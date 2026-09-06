@@ -261,3 +261,59 @@
   background: rgba(79, 209, 165, 0.12);
   color: var(--ok);
 }
+
+/* Money Mapper tallies panel */
+.mm-tallies-panel {
+  margin-top: 14px;
+}
+
+.tallies-columns {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 20px;
+}
+
+.tallies-column {
+  flex: 1 1 320px;
+}
+
+.tally-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(90px, 1fr));
+  gap: 10px;
+}
+
+.tally-stat {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 10px 12px;
+  display: flex;
+  flex-direction: column;
+}
+
+.tally-number {
+  font-family: "IBM Plex Mono", "SF Mono", monospace;
+  font-size: 22px;
+  font-weight: 500;
+  line-height: 1.1;
+  color: var(--text);
+}
+
+.tally-label {
+  font-size: 11px;
+  color: var(--muted);
+  margin-top: 4px;
+}
+
+.tally-billing-breakdown {
+  margin-top: 10px;
+  font-size: 12px;
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+}
+
+/* Money Mapper tickets panel */
+.mm-tickets-panel {
+  margin-top: 14px;
+}
