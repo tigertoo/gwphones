@@ -391,3 +391,25 @@
   display: flex;
   gap: 8px;
 }
+
+.ticket-conversation {
+  margin-top: 8px;
+  padding-top: 8px;
+  border-top: 1px solid var(--border);
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.ticket-conversation-item {
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.ticket-conversation-item-user {
+  color: var(--warn);
+}
+
+.ticket-conversation-author {
+  font-weight: 600;
+}
