@@ -461,3 +461,52 @@
     box-shadow: 0 0 12px 3px rgba(245, 183, 89, 0.85);
   }
 }
+
+.ticket-date-filter {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  margin-bottom: 10px;
+}
+
+.ticket-date-btn {
+  font-size: 12px;
+  padding: 5px 10px;
+  border-radius: 6px;
+  border: 1px solid var(--border);
+  background: var(--panel);
+  color: var(--muted);
+  cursor: pointer;
+}
+
+.ticket-date-btn-active {
+  background: rgba(79, 209, 165, 0.12);
+  border-color: rgba(79, 209, 165, 0.3);
+  color: var(--ok);
+}
+
+.ticket-date-input {
+  font-size: 12px;
+  padding: 4px 8px;
+  border-radius: 6px;
+  border: 1px solid var(--border);
+  background: var(--bg);
+  color: var(--text);
+  color-scheme: dark;
+}
+
+.ticket-date-sep {
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.ticket-expand-btn {
+  font-size: 11px;
+  padding: 2px 6px;
+  border-radius: 4px;
+  border: 1px solid var(--border);
+  background: rgba(255, 255, 255, 0.03);
+  color: var(--muted);
+  cursor: pointer;
+}
