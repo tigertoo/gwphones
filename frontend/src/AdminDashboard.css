@@ -413,3 +413,8 @@
 .ticket-conversation-author {
   font-weight: 600;
 }
+
+.ticket-conversation-time {
+  color: var(--muted);
+  font-size: 11px;
+}
