@@ -418,3 +418,32 @@
   color: var(--muted);
   font-size: 11px;
 }
+
+.ticket-tabs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-bottom: 14px;
+}
+
+.ticket-tab-btn {
+  font-size: 12px;
+  padding: 6px 12px;
+  border-radius: 6px;
+  border: 1px solid var(--border);
+  background: var(--panel);
+  color: var(--muted);
+  cursor: pointer;
+}
+
+.ticket-tab-btn-active {
+  background: rgba(79, 209, 165, 0.12);
+  border-color: rgba(79, 209, 165, 0.3);
+  color: var(--ok);
+}
+
+.ticket-tab-count {
+  font-family: "IBM Plex Mono", "SF Mono", monospace;
+  margin-left: 4px;
+  opacity: 0.8;
+}
