@@ -447,3 +447,17 @@
   margin-left: 4px;
   opacity: 0.8;
 }
+
+.ticket-tab-btn-glow {
+  border-color: var(--warn);
+  animation: ticket-tab-pulse 1.6s ease-in-out infinite;
+}
+
+@keyframes ticket-tab-pulse {
+  0%, 100% {
+    box-shadow: 0 0 4px 0px rgba(245, 183, 89, 0.5);
+  }
+  50% {
+    box-shadow: 0 0 12px 3px rgba(245, 183, 89, 0.85);
+  }
+}
