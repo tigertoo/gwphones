@@ -3,11 +3,13 @@ Phone System (Asterisk PBX) management — the "Phone System" tab.
 
 The dashboard keeps its own small SQLite store (pbx.db) as the source of
 truth for extensions, ring groups, inbound routes and trunk settings, and
-GENERATES two Asterisk include files from it on every change:
+GENERATES two Asterisk include files from it on every change, in a folder
+of their own (PBX_GENERATED_DIR, /etc/asterisk/portal on the VPS) so the
+dashboard needs no write access to the rest of /etc/asterisk:
 
-    /etc/asterisk/pjsip_extensions.conf   extensions (endpoint/auth/aor)
-    /etc/asterisk/extensions_portal.conf  [globals], ring groups, inbound
-                                          routing, outbound trunk order
+    portal/pjsip_extensions.conf   extensions (endpoint/auth/aor)
+    portal/extensions_portal.conf  [globals], ring groups, inbound
+                                   routing, outbound trunk order
 
 then reloads Asterisk (pjsip reload + dialplan reload — neither drops
 calls in progress). Everything else in /etc/asterisk (transports, the
@@ -18,8 +20,9 @@ First run: if pbx.db is empty, the extensions already in
 pjsip_extensions.conf (from make_extensions.py) and the [globals] values in
 extensions.conf are imported, so existing phones keep their passwords.
 
-Live status comes from `asterisk -rx` CLI commands. This works because the
-dashboard service runs as root, same as its other reads on this VPS.
+Live status and reloads go through `asterisk -rx`, which needs the
+service's user to be in the asterisk group, with Asterisk's control socket
+open to that group (astctlpermissions = 0660 in asterisk.conf).
 """
 
 import os
@@ -50,8 +53,12 @@ CHANGES_LOG_PATH = os.environ.get("PBX_CHANGES_LOG", "/var/log/admin-dashboard/p
 PUBLIC_HOST = os.environ.get("PBX_PUBLIC_HOST", "")
 PUBLIC_PORT = os.environ.get("PBX_PUBLIC_PORT", "15061")
 
-EXT_CONF = os.path.join(ASTERISK_DIR, "pjsip_extensions.conf")
-PORTAL_DIALPLAN = os.path.join(ASTERISK_DIR, "extensions_portal.conf")
+# Where the two generated files go. Defaults to ASTERISK_DIR itself, as
+# before; on the VPS it's /etc/asterisk/portal (owned by the dashboard's
+# user, group asterisk), included from extensions.conf and pjsip.conf.
+GENERATED_DIR = os.environ.get("PBX_GENERATED_DIR", ASTERISK_DIR)
+EXT_CONF = os.path.join(GENERATED_DIR, "pjsip_extensions.conf")
+PORTAL_DIALPLAN = os.path.join(GENERATED_DIR, "extensions_portal.conf")
 STATIC_DIALPLAN = os.path.join(ASTERISK_DIR, "extensions.conf")
 
 # Must line up with the static dialplan: _2XX dials extensions, and ring
@@ -314,9 +321,15 @@ def _write_conf(path: str, content: str):
     tmp = path + ".tmp"
     with open(tmp, "w") as f:
         f.write(content)
+    # Asterisk only needs to read these. As root the files are handed to
+    # the asterisk user; otherwise just to its group, which the service's
+    # user belongs to (the folder's setgid bit does the same).
     try:
         uid, gid = pwd.getpwnam("asterisk").pw_uid, grp.getgrnam("asterisk").gr_gid
-        os.chown(tmp, uid, gid)
+        try:
+            os.chown(tmp, uid, gid)
+        except PermissionError:
+            os.chown(tmp, -1, gid)
     except (KeyError, PermissionError):
         pass  # local dev: no asterisk user
     os.chmod(tmp, 0o640)
