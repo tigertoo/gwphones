@@ -813,17 +813,13 @@ p{{max-width:420px;margin:16px auto}} code{{word-break:break-all;font-size:13px}
 
 
 def _linphone_page(token: str, r) -> HTMLResponse:
-    # Linphone has no paste-a-link option, only Scan QR code. Some versions
-    # open linphone-config: links (two spellings; which works isn't
-    # documented), so offer both and keep the QR code as the sure way.
-    url = _setup_url(token, "linphone")
-    link = html.escape(f"linphone-config:{url}")
-    alt = html.escape(f"linphone-config://{url.split('://', 1)[-1]}")
+    # Linphone has no paste-a-link option, only Scan QR code, but it opens
+    # linphone-config: links (tested with Linphone 6 on an iPhone).
+    link = html.escape(f"linphone-config:{_setup_url(token, 'linphone')}")
     return _setup_page(f"Set up extension {html.escape(r['ext'])} in Linphone", f"""
 <p>Linphone must be installed on this phone first.</p>
 <p><a class="btn" href="{link}">Open in Linphone</a></p>
-<p><small>Nothing happened? <a href="{alt}">Try this link instead</a>.</small></p>
-<p>If neither works, open the setup email on a computer, then in Linphone tap <b>Scan QR code</b>
+<p>If that doesn't work, open the setup email on a computer, then in Linphone tap <b>Scan QR code</b>
 and scan the code from the screen.</p>
 <p><small>This link works once and expires {_local_time(datetime.fromisoformat(r["expires_at"]))}.</small></p>""")
 
