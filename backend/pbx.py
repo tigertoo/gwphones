@@ -87,6 +87,19 @@ TRUNKS = {
 }
 VOXBEAM_ROUTES = {"0011101": "Gold", "0011102": "Platinum", "0011103": "Silver", "0011104": "Call Center"}
 
+# Which trunk(s) each kind of number goes out on. The static dialplan sorts
+# dialled numbers into these and calls [sub-outbound] at the matching
+# extension, e.g. Gosub(sub-outbound,mobile,1(...)).
+#   default = the trunk order above, with fallback; a trunk key = only that
+#   trunk; off = refused.
+NUMBER_TYPES = {
+    "mobile": "Irish mobiles (083, 085, 086, 087, 089)",
+    "landline": "Irish landlines and other Irish numbers (01, 021, 0818...)",
+    "freephone": "Irish freephone (1800)",
+    "international": "International (00 or +, outside Ireland)",
+}
+ROUTE_CHOICES = ["default", *TRUNKS, "off"]
+
 DEFAULT_SETTINGS = {
     "outbound_cid": "",
     "max_outbound": "4",
@@ -95,6 +108,10 @@ DEFAULT_SETTINGS = {
     "trunk_irishvoip_enabled": "1",
     "trunk_voxbeam_enabled": "1",
     "inbound_default": "201",
+    "route_mobile": "irishvoip",
+    "route_landline": "default",
+    "route_freephone": "irishvoip",
+    "route_international": "voxbeam",
 }
 
 NAME_RE = re.compile(r"^[A-Za-z0-9 .'_-]{1,40}$")
@@ -274,6 +291,27 @@ def build_extensions_conf(conn) -> str:
     return "\n".join(out)
 
 
+def _outbound_block(s: Dict[str, str], exten: str, trunks: List[str], refused: bool = False) -> List[str]:
+    out = [f"exten => {exten},1,Set(GROUP(outbound)=calls)",
+           " same => n,GotoIf($[${GROUP_COUNT(calls@outbound)} > ${MAX_OUTBOUND}]?busy)"]
+    if s["outbound_cid"]:
+        out.append(" same => n,Set(CALLERID(num)=${OUTBOUND_CID})")
+    if refused:
+        out += [" same => n,NoOp(These numbers are blocked)", " same => n,Goto(busy)"]
+    elif not trunks:
+        out += [" same => n,NoOp(No enabled trunk for these numbers)", " same => n,Goto(busy)"]
+    for i, t in enumerate(trunks):
+        out.append(f" same => n,Dial(PJSIP/{TRUNKS[t]['dial']}@{t},60)")
+        if i < len(trunks) - 1:
+            # Only fall through to the next trunk if this one couldn't take
+            # the call at all (down, refused, congested), never after a
+            # normal answer/busy/no-answer.
+            out.append(' same => n,GotoIf($["${DIALSTATUS}" != "CHANUNAVAIL" & "${DIALSTATUS}" != "CONGESTION"]?done)')
+    return out + [" same => n(done),Hangup()",
+                  " same => n(busy),Congestion(5)",
+                  " same => n,Hangup()"]
+
+
 def build_portal_dialplan(conn) -> str:
     s = get_settings(conn)
     active = {r["ext"] for r in conn.execute("SELECT ext FROM extensions WHERE enabled = 1")}
@@ -303,29 +341,17 @@ def build_portal_dialplan(conn) -> str:
             out.append(f" same => n,Dial({'&'.join(f'PJSIP/{m}' for m in members)},{t})")
         out.append(" same => n,Hangup()")
 
-    out += ["", "; ---- Outbound: trunks tried in order ----",
-            "; ARG1 = national number, ARG2 = international (353...)",
-            "[sub-outbound]",
-            "exten => s,1,Set(GROUP(outbound)=calls)",
-            " same => n,GotoIf($[${GROUP_COUNT(calls@outbound)} > ${MAX_OUTBOUND}]?busy)"]
-    if s["outbound_cid"]:
-        out.append(" same => n,Set(CALLERID(num)=${OUTBOUND_CID})")
     enabled = [t for t in s["trunk_order"].split(",") if t in TRUNKS and s.get(f"trunk_{t}_enabled") == "1"]
-    if not enabled:
-        out.append(" same => n,NoOp(No outbound trunks enabled)")
-        out.append(" same => n,Goto(busy)")
-    for i, t in enumerate(enabled):
-        last = i == len(enabled) - 1
-        out.append(f" same => n,Dial(PJSIP/{TRUNKS[t]['dial']}@{t},60)")
-        if not last:
-            # Only fall through to the next trunk if this one couldn't take
-            # the call at all (down, refused, congested), never after a
-            # normal answer/busy/no-answer.
-            out.append(' same => n,GotoIf($["${DIALSTATUS}" != "CHANUNAVAIL" & "${DIALSTATUS}" != "CONGESTION"]?done)')
-    out += [" same => n(done),Hangup()",
-            " same => n(busy),Congestion(5)",
-            " same => n,Hangup()",
-            "",
+    out += ["", "; ---- Outbound: one extension per kind of number ----",
+            "; ARG1 = national number, ARG2 = international (353..., 44...)",
+            "; s = the trunk order (kept for dialplans that don't say the kind)",
+            "[sub-outbound]"]
+    out += _outbound_block(s, "s", enabled)
+    for kind in NUMBER_TYPES:
+        route = s.get(f"route_{kind}", "default")
+        trunks = enabled if route == "default" else [t for t in enabled if t == route]
+        out += [""] + _outbound_block(s, kind, trunks, refused=route == "off")
+    out += ["",
             "; ---- Inbound: DID-specific routes, then the default ----",
             "[portal-inbound]"]
     for r in conn.execute("SELECT * FROM inbound_routes ORDER BY did"):
@@ -538,8 +564,10 @@ def api_config():
                 "trunk_order": [t for t in s["trunk_order"].split(",") if t in TRUNKS],
                 "trunks_enabled": {t: s.get(f"trunk_{t}_enabled") == "1" for t in TRUNKS},
                 "inbound_default": s["inbound_default"],
+                "routes": {k: s.get(f"route_{k}", "default") for k in NUMBER_TYPES},
             },
             "trunks": {k: {"label": v["label"], "host": v["host"]} for k, v in TRUNKS.items()},
+            "number_types": NUMBER_TYPES,
             "voxbeam_routes": VOXBEAM_ROUTES,
             "limits": {"ext_min": EXT_MIN, "ext_max": EXT_MAX, "group_min": GROUP_MIN, "group_max": GROUP_MAX},
         }
@@ -874,6 +902,7 @@ class SettingsRequest(BaseModel):
     trunk_order: List[str]
     trunks_enabled: Dict[str, bool]
     inbound_default: str
+    routes: Optional[Dict[str, str]] = None  # number type -> ROUTE_CHOICES
 
 
 @router.put("/settings")
@@ -887,6 +916,9 @@ def api_update_settings(req: SettingsRequest):
         raise HTTPException(400, "Unknown Voxbeam route.")
     if sorted(req.trunk_order) != sorted(TRUNKS):
         raise HTTPException(400, "Trunk order must list each trunk once.")
+    routes = req.routes or {}
+    if set(routes) - set(NUMBER_TYPES) or set(routes.values()) - set(ROUTE_CHOICES):
+        raise HTTPException(400, "Unknown number type or route.")
     with _lock, get_db() as conn:
         default = _valid_target(conn, req.inbound_default)
         _set_setting(conn, "outbound_cid", cid)
@@ -896,10 +928,13 @@ def api_update_settings(req: SettingsRequest):
         for t in TRUNKS:
             _set_setting(conn, f"trunk_{t}_enabled", "1" if req.trunks_enabled.get(t) else "0")
         _set_setting(conn, "inbound_default", default)
+        for kind, route in routes.items():
+            _set_setting(conn, f"route_{kind}", route)
         conn.commit()
         enabled = [t for t in req.trunk_order if req.trunks_enabled.get(t)]
         return apply_config(conn, f"Settings: cid={cid}, max={req.max_outbound}, voxbeam={req.voxbeam_prefix}, "
-                                  f"outbound order={enabled or 'NONE'}, inbound default={default}")
+                                  f"outbound order={enabled or 'NONE'}, inbound default={default}, "
+                                  f"routes={routes or 'unchanged'}")
 
 
 @router.post("/apply")

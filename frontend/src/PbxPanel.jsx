@@ -484,8 +484,9 @@ function TrunksSection({ config, status, send, busy }) {
     <section className="panel">
       <h2>Outbound trunks</h2>
       <p className="pbx-hint pbx-intro">
-        Calls go out through the first enabled trunk. The next one is only tried if that trunk can't take the call
-        (down, refused or congested). 112/999 always go via Irish VoIP, whatever is set here.
+        Calls go out through the first enabled trunk, unless the table below sends that kind of number elsewhere.
+        The next one is only tried if that trunk can't take the call (down, refused or congested). 112/999 always
+        go via Irish VoIP, whatever is set here.
       </p>
       <ol className="pbx-trunk-order">
         {form.trunk_order.map((key, i) => {
@@ -511,6 +512,35 @@ function TrunksSection({ config, status, send, busy }) {
         })}
       </ol>
       {noneEnabled && <div className="ticket-action-result ticket-action-result-error">With no trunk enabled, only extension-to-extension and emergency calls will work.</div>}
+
+      <h3 className="pbx-subhead">Which trunk each kind of number uses</h3>
+      <table className="users-table pbx-routes">
+        <tbody>
+          {Object.entries(config.number_types).map(([kind, label]) => (
+            <tr key={kind}>
+              <td>{label}</td>
+              <td>
+                <select
+                  className="idea-select pbx-select"
+                  value={form.routes[kind]}
+                  onChange={(e) => setForm({ ...form, routes: { ...form.routes, [kind]: e.target.value } })}
+                >
+                  <option value="default">Trunk order above</option>
+                  {form.trunk_order.map((t) => <option key={t} value={t}>{trunks[t].label} only</option>)}
+                  <option value="off">Blocked</option>
+                </select>
+                {form.routes[kind] !== "off" && form.routes[kind] !== "default" && !form.trunks_enabled[form.routes[kind]] && (
+                  <small className="pbx-hint"> {trunks[form.routes[kind]].label} is off above, so these calls will fail.</small>
+                )}
+              </td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+      <p className="pbx-hint">
+        &ldquo;Only&rdquo; means no fallback: if that trunk can&rsquo;t take the call, it fails. Numbers that fit none
+        of these (premium 15xx, short codes) are always refused.
+      </p>
 
       <div className="pbx-fields">
         <label className="pbx-field">
