@@ -813,12 +813,18 @@ p{{max-width:420px;margin:16px auto}} code{{word-break:break-all;font-size:13px}
 
 
 def _linphone_page(token: str, r) -> HTMLResponse:
-    url = html.escape(_setup_url(token, "linphone"))
+    # Linphone has no paste-a-link option, only Scan QR code. Some versions
+    # open linphone-config: links (two spellings; which works isn't
+    # documented), so offer both and keep the QR code as the sure way.
+    url = _setup_url(token, "linphone")
+    link = html.escape(f"linphone-config:{url}")
+    alt = html.escape(f"linphone-config://{url.split('://', 1)[-1]}")
     return _setup_page(f"Set up extension {html.escape(r['ext'])} in Linphone", f"""
-<p>Open Linphone and choose <b>Fetch remote configuration</b> on its setup screen. Then either scan the
-QR code from the email or setup card, or copy this address and paste it in:</p>
-<p><code id="u">{url}</code></p>
-<p><button class="btn" onclick="navigator.clipboard.writeText(document.getElementById('u').textContent).then(()=>this.textContent='Copied')">Copy address</button></p>
+<p>Linphone must be installed on this phone first.</p>
+<p><a class="btn" href="{link}">Open in Linphone</a></p>
+<p><small>Nothing happened? <a href="{alt}">Try this link instead</a>.</small></p>
+<p>If neither works, open the setup email on a computer, then in Linphone tap <b>Scan QR code</b>
+and scan the code from the screen.</p>
 <p><small>This link works once and expires {_local_time(datetime.fromisoformat(r["expires_at"]))}.</small></p>""")
 
 
@@ -1177,10 +1183,11 @@ def _setup_email(e, token: str, apps: List[str], expires: datetime):
 <h2 style="font-size:18px">Linphone</h2>
 <ol>
 <li>Install <b>Linphone</b> from the App Store and open it.</li>
-<li>On its setup screen choose <b>Fetch remote configuration</b>.</li>
-<li>Scan this QR code from there (not with the Camera app):<br>
-<img src="cid:linphone-qr" alt="Linphone setup QR code" width="200" height="200"><br>
-or, on your iPhone, open <a href="{esc(PROVISION_BASE_URL)}/prov/{token}?app=linphone">this page</a> and copy the address into Linphone.</li>
+<li>Reading this on a computer? In Linphone tap <b>Scan QR code</b> and scan this
+(not with the Camera app):<br>
+<img src="cid:linphone-qr" alt="Linphone setup QR code" width="200" height="200"></li>
+<li>Reading it on your iPhone? Tap <a href="{esc(PROVISION_BASE_URL)}/prov/{token}?app=linphone">this link</a>
+and then <b>Open in Linphone</b>. If that doesn't work, open this email on a computer and scan the code.</li>
 </ol>
 <p style="color:#666">Linphone only rings while the app is open.</p>""")
     either = " Use it in one app only." if len(apps) > 1 else ""

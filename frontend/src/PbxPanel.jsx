@@ -293,7 +293,7 @@ const SETUP_APPS = {
   },
   linphone: {
     label: "Linphone",
-    how: "Install Linphone, choose \u201cFetch remote configuration\u201d (or the QR code option) on its setup screen and scan this from there, not with the Camera app. Linphone won't ring while it's closed: it can't get push notifications from this server.",
+    how: "Install Linphone, tap \u201cScan QR code\u201d on its setup screen and scan this from there, not with the Camera app. Linphone won't ring while it's closed: it can't get push notifications from this server.",
   },
 };
 
