@@ -300,6 +300,23 @@ const SETUP_APPS = {
 function SetupQr({ ext, apiBase }) {
   const [link, setLink] = useState(null); // { app, url, expires_at, qr }
   const [error, setError] = useState("");
+  const [mail, setMail] = useState({ to: "", apps: ["groundwire"] });
+  const [mailResult, setMailResult] = useState(null); // { ok, text }
+  const [sending, setSending] = useState(false);
+
+  const email = async (ev) => {
+    ev.preventDefault();
+    setSending(true);
+    setMailResult(null);
+    const res = await fetch(`${apiBase}/api/pbx/extensions/${ext}/email-setup`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(mail),
+    });
+    const data = await res.json().catch(() => ({}));
+    setSending(false);
+    setMailResult(res.ok ? { ok: true, text: data.messages?.join(" ") } : { ok: false, text: data.detail || "Email not sent." });
+  };
 
   const make = async (app) => {
     setError("");
@@ -334,6 +351,38 @@ function SetupQr({ ext, apiBase }) {
             A new password cancels it.
           </p>
         </>
+      )}
+      <form className="idea-form-row pbx-gap" onSubmit={email}>
+        <input
+          className="idea-input"
+          type="email"
+          placeholder="Client's email address"
+          value={mail.to}
+          onChange={(e) => setMail({ ...mail, to: e.target.value })}
+        />
+        {Object.entries(SETUP_APPS).map(([app, { label }]) => (
+          <label key={app} className="pbx-toggle">
+            <input
+              type="checkbox"
+              checked={mail.apps.includes(app)}
+              onChange={(e) => setMail({
+                ...mail,
+                apps: e.target.checked ? [...mail.apps, app] : mail.apps.filter((a) => a !== app),
+              })}
+            />
+            {label}
+          </label>
+        ))}
+        <button className="ticket-action-btn" disabled={sending || !mail.to.trim() || !mail.apps.length}>
+          {sending ? "Sending…" : "Email setup"}
+        </button>
+      </form>
+      <p className="pbx-hint">
+        The email has a link to tap on the iPhone and QR codes for reading it on a computer, plus the voicemail PIN.
+        The link works once, for 72 hours.
+      </p>
+      {mailResult && (
+        <div className={`ticket-action-result ${mailResult.ok ? "" : "ticket-action-result-error"}`}>{mailResult.text}</div>
       )}
     </div>
   );
@@ -471,6 +520,18 @@ function ExtensionsSection({ config, status, send, busy, apiBase }) {
                     <CopyField label="Encryption" value={creds.media_encryption} />
                     <CopyField label="Username" value={creds.username} />
                     <CopyField label="Password" value={creds.password} />
+                    <CopyField label="Voicemail" value={creds.voicemail_number} />
+                    <CopyField label="Voicemail PIN" value={creds.voicemail_pin} />
+                    <button
+                      className="ticket-action-btn"
+                      disabled={busy}
+                      onClick={async () => {
+                        if (await send("POST", `/extensions/${e.ext}/reset-voicemail-pin`, null, "New voicemail PIN set.")) {
+                          setCreds(null);
+                          showCreds(e.ext);
+                        }
+                      }}
+                    >New voicemail PIN</button>
                     {!creds.server && <p className="pbx-hint">Set PBX_PUBLIC_HOST in the dashboard's .env to show the server name here.</p>}
                   </td>
                 </tr>
@@ -631,7 +692,7 @@ function DestinationSelect({ config, value, onChange }) {
   );
 }
 
-const EMPTY_GROUP = { number: "", name: "", strategy: "ringall", ring_time: 25, members: [] };
+const EMPTY_GROUP = { number: "", name: "", strategy: "ringall", ring_time: 25, members: [], voicemail: "" };
 
 function InboundSection({ config, send, busy }) {
   const [route, setRoute] = useState({ did: "", label: "", target: config.settings.inbound_default });
@@ -641,7 +702,8 @@ function InboundSection({ config, send, busy }) {
   const extName = (n) => config.extensions.find((e) => e.ext === n);
 
   const saveGroup = async () => {
-    const body = { name: group.name, strategy: group.strategy, ring_time: Number(group.ring_time), members: group.members };
+    const body = { name: group.name, strategy: group.strategy, ring_time: Number(group.ring_time), members: group.members,
+      voicemail: group.voicemail || "" };
     const ok = group.isNew
       ? await send("POST", "/ringgroups", { ...body, number: group.number.trim() || null }, "Ring group created.")
       : await send("PUT", `/ringgroups/${group.number}`, body, "Ring group saved.");
@@ -714,7 +776,10 @@ function InboundSection({ config, send, busy }) {
               <div className="idea-item-head">
                 <span className="idea-priority idea-priority-medium">{g.number}</span>
                 <span className="idea-title">{g.name}</span>
-                <span className="pbx-hint">{g.strategy === "hunt" ? "Hunt" : "Ring all"} · {g.ring_time}s</span>
+                <span className="pbx-hint">
+                  {g.strategy === "hunt" ? "Hunt" : "Ring all"} · {g.ring_time}s
+                  {" · "}{g.voicemail ? `voicemail to ${g.voicemail}` : "no voicemail"}
+                </span>
               </div>
               <div className="pbx-chips">
                 {g.members.map((m) => (
@@ -775,6 +840,14 @@ function InboundSection({ config, send, busy }) {
                 </label>
               ))}
             </div>
+            <label className="pbx-field pbx-gap">
+              <span>If nobody answers, leave a voicemail in</span>
+              <select className="idea-select pbx-select" value={group.voicemail || ""}
+                onChange={(e) => setGroup({ ...group, voicemail: e.target.value })}>
+                <option value="">No voicemail (the call ends after the ring time)</option>
+                {config.extensions.map((e) => <option key={e.ext} value={e.ext}>{e.ext} · {e.name}</option>)}
+              </select>
+            </label>
             <div className="ticket-action-buttons">
               <button className="ticket-action-btn" onClick={() => setGroup(null)}>Cancel</button>
               <button className="ticket-action-btn ticket-action-btn-primary"
