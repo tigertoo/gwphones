@@ -388,6 +388,29 @@ function SetupQr({ ext, apiBase }) {
   );
 }
 
+function VoicemailEmail({ ext, current, send, busy }) {
+  const [value, setValue] = useState(current || "");
+  useEffect(() => setValue(current || ""), [current]);
+  const save = (ev) => {
+    ev.preventDefault();
+    send("PUT", `/extensions/${ext}/voicemail-email`, { email: value.trim() },
+      value.trim() ? `New voicemails for ${ext} will be emailed to ${value.trim()}.` : `Voicemails for ${ext} won't be emailed.`);
+  };
+  return (
+    <form className="idea-form-row pbx-gap" onSubmit={save}>
+      <input
+        className="idea-input"
+        type="email"
+        placeholder="Email new voicemails to (optional)"
+        value={value}
+        onChange={(e) => setValue(e.target.value)}
+      />
+      <button className="ticket-action-btn" disabled={busy || value.trim() === (current || "")}>Save</button>
+      <span className="pbx-hint">With the recording attached. Leave blank to turn off.</span>
+    </form>
+  );
+}
+
 function ExtensionsSection({ config, status, send, busy, apiBase }) {
   const [draft, setDraft] = useState({ ext: "", name: "" });
   const [editing, setEditing] = useState(null); // { ext, name }
@@ -532,6 +555,7 @@ function ExtensionsSection({ config, status, send, busy, apiBase }) {
                         }
                       }}
                     >New voicemail PIN</button>
+                    <VoicemailEmail ext={e.ext} current={e.voicemail_email} send={send} busy={busy} />
                     {!creds.server && <p className="pbx-hint">Set PBX_PUBLIC_HOST in the dashboard's .env to show the server name here.</p>}
                   </td>
                 </tr>
