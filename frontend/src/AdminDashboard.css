@@ -874,3 +874,28 @@
   .pbx table.users-table { display: block; overflow-x: auto; }
   .pbx-push { margin-left: 0; }
 }
+
+/* ---------------------------------------------------------------------------
+   Phone System → Billing (BillingPanel.jsx)
+   --------------------------------------------------------------------------- */
+
+.pbx-month-input { width: auto; }
+.pbx-call-row { cursor: pointer; }
+.pbx-call-row:hover td { background: rgba(127, 127, 127, 0.08); }
+.pbx-bill-status {
+  font-size: 12px;
+  padding: 1px 7px;
+  border-radius: 9px;
+  white-space: nowrap;
+}
+.pbx-bill-rated { background: rgba(34, 160, 90, 0.15); }
+.pbx-bill-provisional { background: rgba(230, 160, 20, 0.2); }
+.pbx-bill-unrated { background: rgba(220, 60, 60, 0.15); }
+.pbx-bill-free { color: var(--muted); }
+.pbx-trace td { padding: 2px 14px 2px 0; border: 0; }
+.pbx-mapping {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+  gap: 10px;
+  margin: 10px 0;
+}

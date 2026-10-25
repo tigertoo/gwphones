@@ -1,4 +1,5 @@
 import React, { useEffect, useState, useCallback } from "react";
+import BillingPanel from "./BillingPanel";
 
 // Phone System tab: manages the Asterisk PBX on this VPS through the
 // dashboard's own /api/pbx/* endpoints (see backend/pbx.py). Every save is
@@ -9,6 +10,7 @@ const SECTIONS = [
   { key: "extensions", label: "Extensions" },
   { key: "trunks", label: "Trunks & Outbound" },
   { key: "inbound", label: "Inbound & Ring Groups" },
+  { key: "billing", label: "Billing" },
 ];
 const STATUS_POLL_MS = 5000;
 
@@ -126,6 +128,7 @@ export default function PbxPanel({ apiBase }) {
       {section === "extensions" && <ExtensionsSection {...props} />}
       {section === "trunks" && <TrunksSection {...props} />}
       {section === "inbound" && <InboundSection {...props} />}
+      {section === "billing" && <BillingPanel apiBase={apiBase} />}
     </div>
   );
 }
