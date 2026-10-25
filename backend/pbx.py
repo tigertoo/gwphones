@@ -679,17 +679,16 @@ def prov_page(token: str):
     if not r:
         return HTMLResponse(f"<p>{_GONE}</p>", status_code=404, headers=_NO_STORE)
     host_path = f"{PROVISION_BASE_URL.split('://', 1)[-1]}/prov/{token}/account.xml"
-    link, alt = html.escape(f"provlinkbs://{host_path}"), html.escape(f"provlinkbs:{host_path}")
+    link = html.escape(f"provlinkbs://{host_path}")
     page = f"""<!doctype html>
 <html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Phone setup</title>
 <style>body{{font:17px -apple-system,system-ui,sans-serif;margin:40px 20px;text-align:center;color:#222}}
 a.btn{{display:inline-block;padding:14px 22px;border-radius:10px;background:#0a7cff;color:#fff;text-decoration:none;font-weight:600}}
-p{{max-width:420px;margin:16px auto}} small a{{color:#666}}</style></head>
+p{{max-width:420px;margin:16px auto}}</style></head>
 <body><h1>Set up extension {html.escape(r["ext"])}</h1>
 <p>Groundwire must be installed on this phone first.</p>
 <p><a class="btn" href="{link}">Open in Groundwire</a></p>
-<p><small>Nothing happened? <a href="{alt}">Try this link instead</a>.</small></p>
 <p><small>This link works once and expires 15 minutes after it was made.</small></p>
 </body></html>"""
     return HTMLResponse(page, headers=_NO_STORE)
