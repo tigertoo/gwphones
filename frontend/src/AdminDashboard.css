@@ -759,6 +759,7 @@
 .pbx-toggle input { accent-color: var(--ok); }
 
 .pbx-qr { margin-bottom: 14px; }
+.pbx-qr .ticket-action-btn { margin-right: 8px; }
 .pbx-qr-img {
   display: block;
   width: 246px;

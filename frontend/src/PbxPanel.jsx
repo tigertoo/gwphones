@@ -265,29 +265,50 @@ function CopyField({ label, value }) {
   );
 }
 
+const SETUP_APPS = {
+  groundwire: {
+    label: "Groundwire",
+    how: "Install Groundwire, then scan this with the iPhone's Camera app and tap the link.",
+  },
+  linphone: {
+    label: "Linphone",
+    how: "Install Linphone, choose \u201cFetch remote configuration\u201d (or the QR code option) on its setup screen and scan this from there, not with the Camera app. Linphone won't ring while it's closed: it can't get push notifications from this server.",
+  },
+};
+
 function SetupQr({ ext, apiBase }) {
-  const [link, setLink] = useState(null); // { url, expires_at, qr }
+  const [link, setLink] = useState(null); // { app, url, expires_at, qr }
   const [error, setError] = useState("");
 
-  const make = async () => {
+  const make = async (app) => {
     setError("");
-    const res = await fetch(`${apiBase}/api/pbx/extensions/${ext}/setup-link`, { method: "POST" });
+    const res = await fetch(`${apiBase}/api/pbx/extensions/${ext}/setup-link`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ app }),
+    });
     const data = await res.json().catch(() => ({}));
-    if (res.ok) setLink(data);
+    if (res.ok) setLink({ app, ...data });
     else setError(data.detail || "Couldn't make a setup link.");
   };
 
   return (
     <div className="pbx-qr">
-      <button className="ticket-action-btn ticket-action-btn-primary" onClick={make}>
-        {link ? "Make a new QR code" : "Show QR code for Groundwire"}
-      </button>
+      {Object.entries(SETUP_APPS).map(([app, { label }]) => (
+        <button
+          key={app}
+          className={`ticket-action-btn${app === "groundwire" ? " ticket-action-btn-primary" : ""}`}
+          onClick={() => make(app)}
+        >
+          {link?.app === app ? `New QR code for ${label}` : `QR code for ${label}`}
+        </button>
+      ))}
       {error && <p className="pbx-hint">{error}</p>}
       {link && (
         <>
-          <img className="pbx-qr-img" src={link.qr} alt={`Setup QR code for extension ${ext}`} />
+          <img className="pbx-qr-img" src={link.qr} alt={`${SETUP_APPS[link.app].label} setup QR code for extension ${ext}`} />
           <p className="pbx-hint">
-            Install Groundwire, then scan this with the iPhone's Camera app and tap the link.
+            <b>{SETUP_APPS[link.app].label}:</b> {SETUP_APPS[link.app].how}{" "}
             It works once, until {new Date(link.expires_at).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}.
             A new password cancels it.
           </p>

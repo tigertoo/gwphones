@@ -613,11 +613,14 @@ def api_credentials(ext: str):
 
 
 # ---------------------------------------------------------------------------
-# Phone setup by QR code (Groundwire / Acrobits)
+# Phone setup by QR code (Groundwire / Acrobits, and Linphone)
 #
-# The dashboard makes a one-time link and shows it as a QR code. The phone's
-# camera opens it in Safari, which hands it to Groundwire (provlinkbs:), and
-# Groundwire fetches the account settings from it. Links last 15 minutes and
+# The dashboard makes a one-time link and shows it as a QR code.
+# - Groundwire: the phone's Camera opens it in Safari, which hands it to
+#   Groundwire (provlinkbs://), and Groundwire fetches account.xml.
+# - Linphone: the QR code is the settings link itself (linphone.xml),
+#   scanned from inside Linphone, which fetches it directly.
+# Links last 15 minutes and
 # stop working a minute after the settings are first fetched; a new
 # password, or disabling or deleting the extension, cancels them. Only a
 # hash of each token is stored.
@@ -635,8 +638,18 @@ def _client_ip(request: Request) -> str:
     return request.headers.get("x-real-ip") or (request.client.host if request.client else "?")
 
 
+SETUP_APPS = {"groundwire": "", "linphone": "/linphone.xml"}  # what the QR code points at
+
+
+class SetupLinkRequest(BaseModel):
+    app: str = "groundwire"
+
+
 @router.post("/extensions/{ext}/setup-link")
-def api_setup_link(ext: str):
+def api_setup_link(ext: str, req: Optional[SetupLinkRequest] = None):
+    app = (req or SetupLinkRequest()).app
+    if app not in SETUP_APPS:
+        raise HTTPException(400, "Unknown phone app.")
     if not PROVISION_BASE_URL or not PUBLIC_HOST:
         raise HTTPException(400, "Set PBX_PROVISION_BASE_URL and PBX_PUBLIC_HOST in the dashboard's .env to use QR setup.")
     token = secrets.token_urlsafe(32)
@@ -648,8 +661,8 @@ def api_setup_link(ext: str):
         conn.execute("INSERT INTO provision_tokens (token_hash, ext, expires_at) VALUES (?, ?, ?)",
                      (_token_hash(token), ext, (now + PROVISION_TTL).isoformat()))
         conn.commit()
-    changes_log.info(f"Made a QR setup link for extension {ext}")
-    url = f"{PROVISION_BASE_URL}/prov/{token}"
+    changes_log.info(f"Made a {app} QR setup link for extension {ext}")
+    url = f"{PROVISION_BASE_URL}/prov/{token}{SETUP_APPS[app]}"
     return {"url": url, "expires_at": (now + PROVISION_TTL).isoformat(),
             "qr": segno.make(url, error="m").svg_data_uri(scale=6, border=2)}
 
@@ -694,19 +707,34 @@ p{{max-width:420px;margin:16px auto}}</style></head>
     return HTMLResponse(page, headers=_NO_STORE)
 
 
-@public_router.get("/{token}/account.xml")
-def prov_account(token: str, request: Request):
-    """The account settings, in Acrobits' Account XML format."""
+def _redeem(token: str, request: Request, app: str):
+    """The extension the token is for, marking the token used; None if it
+    can't be used any more."""
     with _lock, get_db() as conn:
         r = _live_token(conn, token)
         e = r and conn.execute("SELECT * FROM extensions WHERE ext = ? AND enabled = 1", (r["ext"],)).fetchone()
         if not e:
-            return Response(_GONE, status_code=404, media_type="text/plain", headers=_NO_STORE)
+            return None
         if not r["used_at"]:
             conn.execute("UPDATE provision_tokens SET used_at = ? WHERE token_hash = ?", (_now(), r["token_hash"]))
             conn.commit()
-    changes_log.info(f"Phone fetched setup for extension {e['ext']} from {_client_ip(request)}")
-    x = lambda v: xml_escape(str(v))
+    changes_log.info(f"Phone fetched {app} setup for extension {e['ext']} from {_client_ip(request)}")
+    return e
+
+
+def _gone():
+    return Response(_GONE, status_code=404, media_type="text/plain", headers=_NO_STORE)
+
+
+x = lambda v: xml_escape(str(v))
+
+
+@public_router.get("/{token}/account.xml")
+def prov_account(token: str, request: Request):
+    """The account settings, in Acrobits' Account XML format."""
+    e = _redeem(token, request, "Groundwire")
+    if not e:
+        return _gone()
     body = f"""<?xml version="1.0" encoding="UTF-8"?>
 <account>
   <title>{x(e["name"])} ({x(e["ext"])})</title>
@@ -879,3 +907,56 @@ def api_apply():
     """Regenerate and reload without changing anything (e.g. after editing pjsip.conf by hand)."""
     with _lock, get_db() as conn:
         return apply_config(conn, "Manual re-apply")
+
+
+@public_router.get("/{token}/linphone.xml")
+def prov_linphone(token: str, request: Request):
+    """The account settings as a Linphone remote-provisioning file. A
+    browser (someone scanning with the Camera app) gets told to scan from
+    inside Linphone instead, without using the token up or seeing the
+    password; Linphone's own downloader doesn't call itself Mozilla."""
+    if "mozilla" in request.headers.get("user-agent", "").lower():
+        with get_db() as conn:
+            live = _live_token(conn, token) is not None
+        if not live:
+            return HTMLResponse(f"<p>{_GONE}</p>", status_code=404, headers=_NO_STORE)
+        return HTMLResponse("""<!doctype html>
+<html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Phone setup</title>
+<style>body{font:17px -apple-system,system-ui,sans-serif;margin:40px 20px;text-align:center;color:#222}
+p{max-width:420px;margin:16px auto}</style></head>
+<body><h1>Scan this from Linphone</h1>
+<p>Open Linphone, choose <b>Fetch remote configuration</b> (or the QR code option) on its setup screen,
+and scan the code again from there.</p></body></html>""", headers=_NO_STORE)
+    e = _redeem(token, request, "Linphone")
+    if not e:
+        return _gone()
+    server = f"&lt;sip:{x(PUBLIC_HOST)}:{x(PUBLIC_PORT)};transport=tls&gt;"
+    name = x(e["name"]).replace('"', "")
+    body = f"""<?xml version="1.0" encoding="UTF-8"?>
+<config xmlns="http://www.linphone.org/xsds/lpconfig.xsd" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:schemaLocation="http://www.linphone.org/xsds/lpconfig.xsd lpconfig.xsd">
+  <section name="misc">
+    <entry name="transient_provisioning" overwrite="true">1</entry>
+  </section>
+  <section name="sip">
+    <entry name="default_proxy" overwrite="true">0</entry>
+    <entry name="media_encryption" overwrite="true">srtp</entry>
+    <entry name="media_encryption_mandatory" overwrite="true">1</entry>
+  </section>
+  <section name="proxy_0" overwrite="true">
+    <entry name="reg_proxy" overwrite="true">{server}</entry>
+    <entry name="reg_route" overwrite="true">{server}</entry>
+    <entry name="reg_identity" overwrite="true">"{name}" &lt;sip:{x(e["ext"])}@{x(PUBLIC_HOST)}&gt;</entry>
+    <entry name="reg_expires" overwrite="true">600</entry>
+    <entry name="reg_sendregister" overwrite="true">1</entry>
+    <entry name="publish" overwrite="true">0</entry>
+  </section>
+  <section name="auth_info_0" overwrite="true">
+    <entry name="username" overwrite="true">{x(e["ext"])}</entry>
+    <entry name="userid" overwrite="true">{x(e["ext"])}</entry>
+    <entry name="passwd" overwrite="true">{x(e["password"])}</entry>
+    <entry name="domain" overwrite="true">{x(PUBLIC_HOST)}</entry>
+  </section>
+</config>
+"""
+    return Response(body, media_type="application/xml", headers=_NO_STORE)
