@@ -134,6 +134,8 @@ export default function PbxPanel({ apiBase }) {
 // Status
 // ---------------------------------------------------------------------------
 
+const KIND_NAMES = { mobile: "mobiles", landline: "landlines", freephone: "freephone", international: "international" };
+
 function StatusSection({ config, status }) {
   if (!status) return <section className="panel"><p className="panel-empty">Checking Asterisk…</p></section>;
   if (!status.asterisk_running) {
@@ -150,6 +152,18 @@ function StatusSection({ config, status }) {
   const registered = exts.filter((e) => status.extensions[e.ext]?.status === "Avail");
   const { settings, trunks } = config;
   const enabledOrder = settings.trunk_order.filter((t) => settings.trunks_enabled[t]);
+  // Per trunk: the kinds of number it's tried first for, and those it's the fallback for.
+  const roles = (key) => {
+    const r = { first: [], fallback: [] };
+    for (const kind of Object.keys(config.number_types)) {
+      const route = settings.routes[kind];
+      const used = route === "default" ? enabledOrder : enabledOrder.filter((t) => t === route);
+      const i = used.indexOf(key);
+      if (i === 0) r.first.push(KIND_NAMES[kind]);
+      else if (i > 0) r.fallback.push(KIND_NAMES[kind]);
+    }
+    return r;
+  };
 
   return (
     <>
@@ -160,7 +174,7 @@ function StatusSection({ config, status }) {
       <section className="pbx-trunk-grid">
         {settings.trunk_order.map((key) => {
           const s = status.trunks[key] || {};
-          const role = enabledOrder.indexOf(key);
+          const { first, fallback } = roles(key);
           return (
             <div key={key} className={`vital-card vital-${statusLevel(s.status)}`}>
               <div className="vital-card-top">
@@ -172,9 +186,16 @@ function StatusSection({ config, status }) {
                 {trunks[key].host}
                 {s.rtt_ms != null && ` · ${s.rtt_ms} ms`}
               </div>
-              <div className="vital-detail">
-                Outbound: {role === -1 ? "off" : role === 0 ? "primary" : "fallback"}
-              </div>
+              {!settings.trunks_enabled[key] ? (
+                <div className="vital-detail">Outbound: off</div>
+              ) : !first.length && !fallback.length ? (
+                <div className="vital-detail">Outbound: not used for any calls</div>
+              ) : (
+                <>
+                  {first.length > 0 && <div className="vital-detail">Main route: {first.join(", ")}</div>}
+                  {fallback.length > 0 && <div className="vital-detail">Fallback: {fallback.join(", ")}</div>}
+                </>
+              )}
             </div>
           );
         })}
