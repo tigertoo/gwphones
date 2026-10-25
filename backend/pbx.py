@@ -901,7 +901,19 @@ x = lambda v: xml_escape(str(v))
 
 @public_router.get("/{token}/account.xml")
 def prov_account(token: str, request: Request):
-    """The account settings, in Acrobits' Account XML format."""
+    """The account settings, in Acrobits' Account XML format, only for
+    Acrobits' apps (Groundwire says e.g. "Groundwire/26.1.18 (build ...;
+    iOS ...)"; Acrobits Softphone and Cloud Softphone say Acrobits). A
+    browser gets the Open in Groundwire page; anything else, such as an
+    email security scanner, gets nothing. Neither uses the token up."""
+    agent = request.headers.get("user-agent", "").lower()
+    if "groundwire" not in agent and "acrobits" not in agent:
+        if "mozilla" in agent:
+            return prov_page(token)
+        with get_db() as conn:
+            live = _live_token(conn, token) is not None
+        return Response("Open this link from Groundwire." if live else _GONE, status_code=403 if live else 404,
+                        media_type="text/plain", headers=_NO_STORE)
     e = _redeem(token, request, "Groundwire")
     if not e:
         return _gone()
