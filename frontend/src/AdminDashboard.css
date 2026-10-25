@@ -758,6 +758,15 @@
 
 .pbx-toggle input { accent-color: var(--ok); }
 
+.pbx-qr { margin-bottom: 14px; }
+.pbx-qr-img {
+  display: block;
+  width: 246px;
+  max-width: 100%;
+  margin: 10px 0 6px;
+  background: #fff; /* a QR code needs a light background, also in dark mode */
+}
+
 .pbx-cred-row {
   display: flex;
   align-items: center;

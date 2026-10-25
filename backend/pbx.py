@@ -27,6 +27,8 @@ open to that group (astctlpermissions = 0660 in asterisk.conf).
 
 import os
 import re
+import html
+import hashlib
 import pwd
 import grp
 import secrets
@@ -35,10 +37,13 @@ import logging
 import logging.handlers
 import subprocess
 import threading
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Dict, List, Optional
+from xml.sax.saxutils import escape as xml_escape
 
-from fastapi import APIRouter, HTTPException
+import segno
+from fastapi import APIRouter, HTTPException, Request
+from fastapi.responses import HTMLResponse, Response
 from pydantic import BaseModel
 
 # ---------------------------------------------------------------------------
@@ -52,6 +57,12 @@ CHANGES_LOG_PATH = os.environ.get("PBX_CHANGES_LOG", "/var/log/admin-dashboard/p
 # Shown on the "set up a phone" card. Must match transport-tls in pjsip.conf.
 PUBLIC_HOST = os.environ.get("PBX_PUBLIC_HOST", "")
 PUBLIC_PORT = os.environ.get("PBX_PUBLIC_PORT", "15061")
+# Public address of the QR-code setup links (see "Phone setup by QR code"
+# in the README), e.g. https://amapforyourmoney.com. Empty turns them off.
+PROVISION_BASE_URL = os.environ.get("PBX_PROVISION_BASE_URL", "").rstrip("/")
+PROVISION_TTL = timedelta(minutes=15)
+# Groundwire may fetch the settings more than once (a retry, HEAD then GET).
+PROVISION_GRACE = timedelta(seconds=60)
 
 # Where the two generated files go. Defaults to ASTERISK_DIR itself, as
 # before; on the VPS it's /etc/asterisk/portal (owned by the dashboard's
@@ -93,6 +104,10 @@ _lock = threading.Lock()
 _last_apply: dict = {"at": None, "ok": None, "messages": []}
 
 router = APIRouter(prefix="/api/pbx")
+# The only routes here reachable without the dashboard's login: a phone
+# scanning a setup QR code isn't on Tailscale. Outside /api/, so
+# require_auth leaves them alone; each needs a valid one-time token.
+public_router = APIRouter(prefix="/prov")
 
 
 def _changes_logger() -> logging.Logger:
@@ -146,7 +161,12 @@ def get_db() -> sqlite3.Connection:
                label TEXT NOT NULL DEFAULT '');
            CREATE TABLE IF NOT EXISTS settings (
                key TEXT PRIMARY KEY,
-               value TEXT NOT NULL);"""
+               value TEXT NOT NULL);
+           CREATE TABLE IF NOT EXISTS provision_tokens (
+               token_hash TEXT PRIMARY KEY,
+               ext TEXT NOT NULL,
+               expires_at TEXT NOT NULL,
+               used_at TEXT);"""
     )
     if fresh:
         os.chmod(PBX_DB_PATH, 0o600)  # holds SIP passwords
@@ -564,6 +584,8 @@ def api_update_extension(ext: str, req: ExtensionUpdate):
         if conn.execute("UPDATE extensions SET name = ?, enabled = ?, updated_at = ? WHERE ext = ?",
                         (name, int(req.enabled), _now(), ext)).rowcount == 0:
             raise HTTPException(404, "Extension not found.")
+        if not req.enabled:
+            _revoke_setup_links(conn, ext)
         conn.commit()
         return apply_config(conn, f"Updated extension {ext}: name={name}, enabled={req.enabled}")
 
@@ -574,6 +596,7 @@ def api_reset_password(ext: str):
         if conn.execute("UPDATE extensions SET password = ?, updated_at = ? WHERE ext = ?",
                         (secrets.token_urlsafe(24), _now(), ext)).rowcount == 0:
             raise HTTPException(404, "Extension not found.")
+        _revoke_setup_links(conn, ext)
         conn.commit()
         return apply_config(conn, f"Reset password for extension {ext}")
 
@@ -589,6 +612,118 @@ def api_credentials(ext: str):
             "port": PUBLIC_PORT, "transport": "TLS", "media_encryption": "SRTP (SDES)"}
 
 
+# ---------------------------------------------------------------------------
+# Phone setup by QR code (Groundwire / Acrobits)
+#
+# The dashboard makes a one-time link and shows it as a QR code. The phone's
+# camera opens it in Safari, which hands it to Groundwire (provlinkbs:), and
+# Groundwire fetches the account settings from it. Links last 15 minutes and
+# stop working a minute after the settings are first fetched; a new
+# password, or disabling or deleting the extension, cancels them. Only a
+# hash of each token is stored.
+# ---------------------------------------------------------------------------
+
+def _token_hash(token: str) -> str:
+    return hashlib.sha256(token.encode()).hexdigest()
+
+
+def _revoke_setup_links(conn, ext: str):
+    conn.execute("DELETE FROM provision_tokens WHERE ext = ?", (ext,))
+
+
+def _client_ip(request: Request) -> str:
+    return request.headers.get("x-real-ip") or (request.client.host if request.client else "?")
+
+
+@router.post("/extensions/{ext}/setup-link")
+def api_setup_link(ext: str):
+    if not PROVISION_BASE_URL or not PUBLIC_HOST:
+        raise HTTPException(400, "Set PBX_PROVISION_BASE_URL and PBX_PUBLIC_HOST in the dashboard's .env to use QR setup.")
+    token = secrets.token_urlsafe(32)
+    now = datetime.now(timezone.utc)
+    with _lock, get_db() as conn:
+        if not conn.execute("SELECT 1 FROM extensions WHERE ext = ? AND enabled = 1", (ext,)).fetchone():
+            raise HTTPException(404, "Extension not found, or turned off.")
+        conn.execute("DELETE FROM provision_tokens WHERE expires_at < ?", (now.isoformat(),))
+        conn.execute("INSERT INTO provision_tokens (token_hash, ext, expires_at) VALUES (?, ?, ?)",
+                     (_token_hash(token), ext, (now + PROVISION_TTL).isoformat()))
+        conn.commit()
+    changes_log.info(f"Made a QR setup link for extension {ext}")
+    url = f"{PROVISION_BASE_URL}/prov/{token}"
+    return {"url": url, "expires_at": (now + PROVISION_TTL).isoformat(),
+            "qr": segno.make(url, error="m").svg_data_uri(scale=6, border=2)}
+
+
+def _live_token(conn, token: str):
+    """The token's row if it can still be used, else None."""
+    r = conn.execute("SELECT * FROM provision_tokens WHERE token_hash = ?", (_token_hash(token),)).fetchone()
+    now = datetime.now(timezone.utc)
+    if not r or datetime.fromisoformat(r["expires_at"]) < now:
+        return None
+    if r["used_at"] and datetime.fromisoformat(r["used_at"]) + PROVISION_GRACE < now:
+        return None
+    return r
+
+
+_NO_STORE = {"Cache-Control": "no-store", "Referrer-Policy": "no-referrer", "X-Robots-Tag": "noindex"}
+_GONE = "This setup link has expired or has already been used. Ask for a new QR code."
+
+
+@public_router.get("/{token}", response_class=HTMLResponse)
+def prov_page(token: str):
+    """What Safari opens from the QR code. Only hands over to Groundwire;
+    the settings themselves come from account.xml, so a visit here (or a
+    link preview) doesn't use the token up."""
+    with get_db() as conn:
+        r = _live_token(conn, token)
+    if not r:
+        return HTMLResponse(f"<p>{_GONE}</p>", status_code=404, headers=_NO_STORE)
+    host_path = f"{PROVISION_BASE_URL.split('://', 1)[-1]}/prov/{token}/account.xml"
+    link, alt = html.escape(f"provlinkbs://{host_path}"), html.escape(f"provlinkbs:{host_path}")
+    page = f"""<!doctype html>
+<html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Phone setup</title>
+<style>body{{font:17px -apple-system,system-ui,sans-serif;margin:40px 20px;text-align:center;color:#222}}
+a.btn{{display:inline-block;padding:14px 22px;border-radius:10px;background:#0a7cff;color:#fff;text-decoration:none;font-weight:600}}
+p{{max-width:420px;margin:16px auto}} small a{{color:#666}}</style></head>
+<body><h1>Set up extension {html.escape(r["ext"])}</h1>
+<p>Groundwire must be installed on this phone first.</p>
+<p><a class="btn" href="{link}">Open in Groundwire</a></p>
+<p><small>Nothing happened? <a href="{alt}">Try this link instead</a>.</small></p>
+<p><small>This link works once and expires 15 minutes after it was made.</small></p>
+</body></html>"""
+    return HTMLResponse(page, headers=_NO_STORE)
+
+
+@public_router.get("/{token}/account.xml")
+def prov_account(token: str, request: Request):
+    """The account settings, in Acrobits' Account XML format."""
+    with _lock, get_db() as conn:
+        r = _live_token(conn, token)
+        e = r and conn.execute("SELECT * FROM extensions WHERE ext = ? AND enabled = 1", (r["ext"],)).fetchone()
+        if not e:
+            return Response(_GONE, status_code=404, media_type="text/plain", headers=_NO_STORE)
+        if not r["used_at"]:
+            conn.execute("UPDATE provision_tokens SET used_at = ? WHERE token_hash = ?", (_now(), r["token_hash"]))
+            conn.commit()
+    changes_log.info(f"Phone fetched setup for extension {e['ext']} from {_client_ip(request)}")
+    x = lambda v: xml_escape(str(v))
+    body = f"""<?xml version="1.0" encoding="UTF-8"?>
+<account>
+  <title>{x(e["name"])} ({x(e["ext"])})</title>
+  <username>{x(e["ext"])}</username>
+  <password>{x(e["password"])}</password>
+  <userDisplayName>{x(e["name"])}</userDisplayName>
+  <host>{x(PUBLIC_HOST)}:{x(PUBLIC_PORT)}</host>
+  <transport>tls</transport>
+  <sdesIncoming>required</sdesIncoming>
+  <sdesOutgoing>required</sdesOutgoing>
+  <icm>push</icm>
+</account>
+"""
+    return Response(body, media_type="application/xml", headers=_NO_STORE)
+
+
 @router.delete("/extensions/{ext}")
 def api_delete_extension(ext: str):
     with _lock, get_db() as conn:
@@ -602,6 +737,7 @@ def api_delete_extension(ext: str):
                 conn.execute("UPDATE ring_groups SET members = ? WHERE number = ?",
                              (",".join(m for m in _members(g) if m != ext), g["number"]))
         conn.execute("DELETE FROM extensions WHERE ext = ?", (ext,))
+        _revoke_setup_links(conn, ext)
         conn.commit()
         return apply_config(conn, f"Deleted extension {ext}")
 

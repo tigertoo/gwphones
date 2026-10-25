@@ -265,6 +265,38 @@ function CopyField({ label, value }) {
   );
 }
 
+function SetupQr({ ext, apiBase }) {
+  const [link, setLink] = useState(null); // { url, expires_at, qr }
+  const [error, setError] = useState("");
+
+  const make = async () => {
+    setError("");
+    const res = await fetch(`${apiBase}/api/pbx/extensions/${ext}/setup-link`, { method: "POST" });
+    const data = await res.json().catch(() => ({}));
+    if (res.ok) setLink(data);
+    else setError(data.detail || "Couldn't make a setup link.");
+  };
+
+  return (
+    <div className="pbx-qr">
+      <button className="ticket-action-btn ticket-action-btn-primary" onClick={make}>
+        {link ? "Make a new QR code" : "Show QR code for Groundwire"}
+      </button>
+      {error && <p className="pbx-hint">{error}</p>}
+      {link && (
+        <>
+          <img className="pbx-qr-img" src={link.qr} alt={`Setup QR code for extension ${ext}`} />
+          <p className="pbx-hint">
+            Install Groundwire, then scan this with the iPhone's Camera app and tap the link.
+            It works once, until {new Date(link.expires_at).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}.
+            A new password cancels it.
+          </p>
+        </>
+      )}
+    </div>
+  );
+}
+
 function ExtensionsSection({ config, status, send, busy, apiBase }) {
   const [draft, setDraft] = useState({ ext: "", name: "" });
   const [editing, setEditing] = useState(null); // { ext, name }
@@ -389,7 +421,8 @@ function ExtensionsSection({ config, status, send, busy, apiBase }) {
               rows.push(
                 <tr key={`${e.ext}-creds`}>
                   <td colSpan={5} className="ticket-action-panel">
-                    <div className="ticket-action-label">Enter these in the phone app for extension {e.ext}:</div>
+                    <SetupQr key={e.ext} ext={e.ext} apiBase={apiBase} />
+                    <div className="ticket-action-label">Or enter these in the phone app for extension {e.ext}:</div>
                     <CopyField label="Server" value={creds.server} />
                     <CopyField label="Port" value={creds.port} />
                     <CopyField label="Transport" value={creds.transport} />
