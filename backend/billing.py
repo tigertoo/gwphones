@@ -99,6 +99,13 @@ def get_db() -> sqlite3.Connection:
                PRIMARY KEY (day, currency));
            CREATE TABLE IF NOT EXISTS state (key TEXT PRIMARY KEY, value TEXT NOT NULL);"""
     )
+    for column in ("rate_sheets ADD COLUMN rate_unit TEXT NOT NULL DEFAULT 'units'",
+                   "rate_sheets ADD COLUMN vat_pct TEXT NOT NULL DEFAULT '0'",
+                   "mappings ADD COLUMN defaults TEXT"):
+        try:
+            conn.execute(f"ALTER TABLE {column}")
+        except sqlite3.OperationalError:
+            pass  # already there
     if fresh:
         os.chmod(BILLING_DB, 0o600)
     return conn
@@ -496,6 +503,18 @@ class SheetDefaults(BaseModel):
     conn_unit: int = 1
     bill_unit: int = 1
     conn_fee: str = "0"
+    # How the sheet states its prices: "units" (e.g. 0.045 euro) or "cents"
+    # (4.5), and the VAT included in them, which is taken off: costs are
+    # always ex VAT (the markup goes on the net cost).
+    rate_unit: str = "units"
+    vat_pct: str = "0"
+
+
+def _net(published: Decimal, defaults: SheetDefaults) -> Decimal:
+    """A published price as the net amount per currency unit."""
+    value = published / 100 if defaults.rate_unit == "cents" else published
+    vat = Decimal(defaults.vat_pct or "0")
+    return value / (1 + vat / 100) if vat else value
 
 
 def parse_rates(rows, mapping: Dict[str, Optional[int]], defaults: SheetDefaults):
@@ -503,6 +522,13 @@ def parse_rates(rows, mapping: Dict[str, Optional[int]], defaults: SheetDefaults
     for field, (label, required, _) in FIELDS.items():
         if required and mapping.get(field) is None:
             raise HTTPException(400, f"Choose the column for '{label}'.")
+    if defaults.rate_unit not in ("units", "cents"):
+        raise HTTPException(400, "Rates must be in currency units or cents.")
+    try:
+        if not 0 <= Decimal(defaults.vat_pct or "0") < 100:
+            raise InvalidOperation
+    except InvalidOperation:
+        raise HTTPException(400, "VAT included must be a percentage, e.g. 23 (or 0).")
     col = lambda r, f: r[mapping[f]] if mapping.get(f) is not None and mapping[f] < len(r) else ""
     rates, stats = {}, {"rows": 0, "imported": 0, "skipped": 0, "errors": [], "statuses": {}, "currencies": {},
                         "increments": {}, "change_dates": [], "expiry_dates": []}
@@ -517,17 +543,23 @@ def parse_rates(rows, mapping: Dict[str, Optional[int]], defaults: SheetDefaults
             prefix = re.sub(r"\D", "", col(r, "prefix"))
             if not prefix:
                 raise ValueError("no prefix")
-            rate = to_micro(_money(col(r, "rate")))
+            published = _money(col(r, "rate"))
+            rate = to_micro(_net(published, defaults))
             before = col(r, "rate_before")
             currency = (col(r, "currency") or defaults.currency).upper()[:3]
-            conn_unit = int(Decimal(col(r, "conn_unit") or defaults.conn_unit))
-            bill_unit = int(Decimal(col(r, "bill_unit") or defaults.bill_unit))
+            # A sheet with one increment column (e.g. 60) means 60/60.
+            conn_unit = int(Decimal(col(r, "conn_unit") or col(r, "bill_unit") or defaults.conn_unit))
+            bill_unit = int(Decimal(col(r, "bill_unit") or col(r, "conn_unit") or defaults.bill_unit))
             fee = col(r, "conn_fee")
             change_at = _parse_datetime(col(r, "effective_date"), col(r, "effective_time"))
             expires_at = _parse_datetime(col(r, "expiry_date"), col(r, "expiry_time"))
-            rates[prefix] = (prefix, col(r, "destination")[:80], rate, to_micro(_money(before)) if before else None,
+            rates[prefix] = (prefix, col(r, "destination")[:80], rate,
+                             to_micro(_net(_money(before), defaults)) if before else None,
                              change_at, expires_at, currency, conn_unit, bill_unit,
-                             to_micro(_money(fee) if fee else _money(defaults.conn_fee)))
+                             to_micro(_net(_money(fee) if fee else _money(defaults.conn_fee), defaults)))
+            if "example" not in stats:
+                stats["example"] = {"prefix": prefix, "destination": col(r, "destination")[:80],
+                                    "published": col(r, "rate"), "net": from_micro(rate, 6), "currency": currency}
         except (ValueError, InvalidOperation) as e:
             stats["skipped"] += 1
             if len(stats["errors"]) < 5:
@@ -575,16 +607,19 @@ def api_preview_sheet(req: SheetRequest):
     mapping = req.mapping
     if mapping is None:
         with get_db() as conn:
-            saved = conn.execute("SELECT mapping FROM mappings WHERE trunk = ?", (req.trunk,)).fetchone()
+            saved = conn.execute("SELECT mapping, defaults FROM mappings WHERE trunk = ?", (req.trunk,)).fetchone()
         import json
         mapping = json.loads(saved["mapping"]) if saved else guess_mapping(rows[0])
         if saved and any(v is not None and v >= len(rows[0]) for v in mapping.values()):
             mapping = guess_mapping(rows[0])  # this sheet's layout differs from last time
+        if saved and saved["defaults"]:
+            req.defaults = SheetDefaults(**json.loads(saved["defaults"]))
     try:
         _, stats = parse_rates(rows, mapping, req.defaults)
     except HTTPException as e:
         stats = {"problem": e.detail}
     return {"columns": rows[0], "sample": rows[1:6], "mapping": mapping, "stats": stats,
+            "defaults": req.defaults.model_dump(),
             "fields": {k: {"label": v[0], "required": v[1]} for k, v in FIELDS.items()}}
 
 
@@ -601,15 +636,16 @@ def api_import_sheet(req: SheetRequest):
         valid_from = stats["change_dates"][0] if stats["change_dates"] else _now()
         valid_to = stats["expiry_dates"][1] if stats["expiry_dates"] else None
         cur = conn.execute("INSERT INTO rate_sheets (trunk, route, filename, uploaded_at, rows, valid_from, valid_to, "
-                           "currencies) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                           "currencies, rate_unit, vat_pct) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                            (req.trunk, req.route, req.filename[:120], _now(), len(rates), valid_from, valid_to,
-                            ",".join(sorted(stats["currencies"]))))
+                            ",".join(sorted(stats["currencies"])), req.defaults.rate_unit, req.defaults.vat_pct or "0"))
         sheet_id = cur.lastrowid
         conn.executemany("INSERT INTO rates (sheet_id, prefix, destination, rate_micro, rate_before_micro, change_at, "
                          "expires_at, currency, conn_unit, bill_unit, conn_fee_micro) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                          [(sheet_id, *r) for r in rates])
-        conn.execute("INSERT INTO mappings (trunk, mapping) VALUES (?, ?) ON CONFLICT(trunk) DO UPDATE SET "
-                     "mapping = excluded.mapping", (req.trunk, json.dumps(req.mapping)))
+        conn.execute("INSERT INTO mappings (trunk, mapping, defaults) VALUES (?, ?, ?) ON CONFLICT(trunk) DO UPDATE SET "
+                     "mapping = excluded.mapping, defaults = excluded.defaults",
+                     (req.trunk, json.dumps(req.mapping), json.dumps(req.defaults.model_dump())))
         conn.commit()
     changes_log.info(f"Uploaded rate sheet {req.filename} for {req.trunk} {req.route}: {len(rates)} rates")
     repriced = rate_calls("status IN ('unrated', 'provisional', 'rated') AND trunk = ? AND route = ?",

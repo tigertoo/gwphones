@@ -162,7 +162,7 @@ export default function BillingPanel({ apiBase }) {
                 if (open === c.id) rows.push(
                   <tr key={`${c.id}-trace`}>
                     <td colSpan={8} className="ticket-action-panel">
-                      <PricingTrace call={c} />
+                      <PricingTrace call={c} sheet={overview.sheets.find((s) => s.id === c.sheet_id)} />
                     </td>
                   </tr>
                 );
@@ -176,7 +176,7 @@ export default function BillingPanel({ apiBase }) {
   );
 }
 
-function PricingTrace({ call: c }) {
+function PricingTrace({ call: c, sheet }) {
   const lines = [
     ["Number sent", c.number ? `+${c.number}` : c.dialled],
     ["Talk time", `${c.billsec} s (${c.disposition?.toLowerCase()})`],
@@ -184,7 +184,8 @@ function PricingTrace({ call: c }) {
   if (c.prefix) {
     lines.push(
       ["Matched", `${c.prefix} · ${c.destination || "(no name)"} · sheet #${c.sheet_id}`],
-      ["Rate", `${c.rate} ${c.currency}/min`],
+      ["Rate", `${c.rate} ${c.currency}/min ex VAT${sheet && (sheet.rate_unit === "cents" || Number(sheet.vat_pct))
+        ? ` (the sheet gives ${sheet.rate_unit === "cents" ? "cents" : c.currency}${Number(sheet.vat_pct) ? `, incl. ${sheet.vat_pct}% VAT` : ""})` : ""}`],
       ["Charged for", `${c.bill_seconds} s (billing increments)`],
       ["Connection fee", `${c.conn_fee} ${c.currency}`],
       ["Cost", `${c.cost} ${c.currency}`],
@@ -209,7 +210,7 @@ function RateSheets({ overview, run, api, busy, setResult }) {
     try {
       const b64 = await readAsBase64(file);
       const preview = await api("POST", "/rate-sheets/preview", { trunk, route, filename: file.name, content_b64: b64 });
-      setUpload({ trunk, route, file, b64, preview, mapping: preview.mapping, defaults: { currency: "EUR", conn_unit: 1, bill_unit: 1, conn_fee: "0" } });
+      setUpload({ trunk, route, file, b64, preview, mapping: preview.mapping, defaults: preview.defaults });
     } catch (e) {
       setResult({ ok: false, text: e.message });
     }
@@ -291,6 +292,20 @@ function RateSheets({ overview, run, api, busy, setResult }) {
             ))}
           </div>
           <div className="pbx-mapping">
+            <label className="pbx-field">
+              <span>Prices in the sheet are</span>
+              <select className="idea-select pbx-select" value={upload.defaults.rate_unit}
+                onChange={(e) => remap(upload.mapping, { ...upload.defaults, rate_unit: e.target.value })}>
+                <option value="units">per minute in euro/dollars (e.g. 0.045)</option>
+                <option value="cents">per minute in cents (e.g. 4.5)</option>
+              </select>
+            </label>
+            <label className="pbx-field">
+              <span>VAT included in the prices, %</span>
+              <input className="idea-input" value={upload.defaults.vat_pct}
+                onChange={(e) => setUpload({ ...upload, defaults: { ...upload.defaults, vat_pct: e.target.value } })}
+                onBlur={() => remap(upload.mapping, upload.defaults)} />
+            </label>
             {[["currency", "Currency if no column"], ["conn_unit", "First increment (s) if no column"],
               ["bill_unit", "Next increments (s) if no column"], ["conn_fee", "Connection fee if no column"]].map(([k, l]) => (
               <label key={k} className="pbx-field">
@@ -329,6 +344,12 @@ function SheetStats({ stats }) {
   const list = (o) => Object.entries(o).map(([k, v]) => `${k} (${v.toLocaleString()})`).join(", ");
   return (
     <div className="pbx-hint pbx-gap">
+      {stats.example && (
+        <div className="pbx-sheet-example">
+          Check: {stats.example.prefix} {stats.example.destination} is {stats.example.published} in the sheet, which will cost{" "}
+          <b>{stats.example.net} {stats.example.currency} per minute</b>{" "}(ex VAT).
+        </div>
+      )}
       <div>{stats.rows.toLocaleString()} lines: {stats.imported.toLocaleString()} rates to import, {stats.skipped.toLocaleString()} skipped.</div>
       <div>Status column: {list(stats.statuses)}. Rows marked deleted or removed are skipped.</div>
       <div>Currencies: {list(stats.currencies) || "—"} · Increments: {list(stats.increments) || "—"}</div>
