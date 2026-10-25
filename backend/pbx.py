@@ -1066,16 +1066,21 @@ def api_apply():
 
 @public_router.get("/{token}/linphone.xml")
 def prov_linphone(token: str, request: Request):
-    """The account settings as a Linphone remote-provisioning file. A
-    browser (someone scanning with the Camera app) gets told to scan from
-    inside Linphone instead, without using the token up or seeing the
-    password; Linphone's own downloader doesn't call itself Mozilla."""
-    if "mozilla" in request.headers.get("user-agent", "").lower():
+    """The account settings as a Linphone remote-provisioning file, only
+    for Linphone itself (it says e.g. "LinphoneiOS/6.2.3 (iPhone)
+    LinphoneSDK/5.5.23"). A browser (someone scanning with the Camera app)
+    gets the Open in Linphone page; anything else, such as an email
+    security scanner following the QR code, gets nothing. Neither uses the
+    token up or sees the password."""
+    agent = request.headers.get("user-agent", "").lower()
+    if "linphone" not in agent:
         with get_db() as conn:
             r = _live_token(conn, token)
         if not r:
             return HTMLResponse(f"<p>{_GONE}</p>", status_code=404, headers=_NO_STORE)
-        return _linphone_page(token, r)
+        if "mozilla" in agent:
+            return _linphone_page(token, r)
+        return Response("Open this link from Linphone.", status_code=403, media_type="text/plain", headers=_NO_STORE)
     e = _redeem(token, request, "Linphone")
     if not e:
         return _gone()
