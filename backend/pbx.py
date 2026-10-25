@@ -1298,13 +1298,27 @@ _vm_sent: set = set()
 _vm_warned = [False]
 
 
+# voicemail.conf [general] sets Asterisk's email text to "Key: value"
+# lines (see the README), so the details don't depend on its default
+# wording; its X-Asterisk-VM-* headers are only added with IMAP storage:
+#   emailbody=Mailbox: ${VM_MAILBOX}\nCaller-Name: ${VM_CIDNAME}\nCaller-Number: ${VM_CIDNUM}\nLength: ${VM_DUR}\nWhen: ${VM_DATE}\n
+
+
 def _voicemail_email(raw: bytes):
     """(to, subject, html, files) for the email Asterisk wrote."""
     msg = email.message_from_bytes(raw, policy=email.policy.default)
     to = email.utils.parseaddr(str(msg.get("To", "")))[1]
-    h = lambda name: str(msg.get(f"X-Asterisk-VM-{name}", "")).strip()
+    text = msg.get_body(preferencelist=("plain",))
+    fields = {}
+    for line in (text.get_content() if text else "").splitlines():
+        key, sep, value = line.partition(":")
+        if sep and key.strip() and key.strip() not in fields:
+            fields[key.strip()] = value.strip()
+    header = {"Mailbox": "Mailbox", "Caller-Name": "Caller-ID-Name", "Caller-Number": "Caller-ID-Num",
+              "When": "Orig-date", "Length": "Duration"}
+    h = lambda name: fields.get(name) or str(msg.get(f"X-Asterisk-VM-{header[name]}", "")).strip()
     known = lambda v: v if v.lower() not in ("", "unknown", "anonymous") else ""
-    name, number = known(h("Caller-ID-Name")), known(h("Caller-ID-Num"))
+    name, number = known(h("Caller-Name")), known(h("Caller-Number"))
     caller = (f"{name} ({number})" if name and number else name or number) or "Unknown caller"
     files, too_big = [], False
     for part in msg.iter_attachments():
@@ -1314,9 +1328,10 @@ def _voicemail_email(raw: bytes):
             continue
         files.append({"name": part.get_filename() or "voicemail.wav", "type": part.get_content_type(),
                       "data": data})
-    duration = h("Duration")
-    rows = [("From", caller), ("Mailbox", h("Mailbox") or h("Extension")), ("When", h("Orig-date")),
-            ("Length", f"{duration} seconds" if duration else "")]
+    length = h("Length")
+    if length.isdigit():  # the X-Asterisk-VM header gives plain seconds
+        length = f"{int(length) // 60}:{int(length) % 60:02d}"
+    rows = [("From", caller), ("Mailbox", h("Mailbox")), ("When", h("When")), ("Length", length)]
     esc = html.escape
     table = "".join(f"<tr><td style='color:#666;padding:2px 12px 2px 0'>{k}</td><td>{esc(v)}</td></tr>"
                     for k, v in rows if v)
