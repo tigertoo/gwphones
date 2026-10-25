@@ -104,7 +104,7 @@ export default function PbxPanel({ apiBase }) {
   if (loadError) return <section className="panel"><div className="admin-dash-error">{loadError}</div></section>;
   if (!config) return <section className="panel"><p className="panel-empty">Loading…</p></section>;
 
-  const props = { config, status, send, busy, apiBase };
+  const props = { config, status, send, busy, apiBase, reload: loadConfig };
 
   return (
     <div className="pbx">
@@ -297,10 +297,10 @@ const SETUP_APPS = {
   },
 };
 
-function SetupQr({ ext, apiBase }) {
+function SetupQr({ ext, savedEmail, apiBase, reload }) {
   const [link, setLink] = useState(null); // { app, url, expires_at, qr }
   const [error, setError] = useState("");
-  const [mail, setMail] = useState({ to: "", apps: ["groundwire"] });
+  const [mail, setMail] = useState({ to: savedEmail || "", apps: ["groundwire"] });
   const [mailResult, setMailResult] = useState(null); // { ok, text }
   const [sending, setSending] = useState(false);
 
@@ -316,6 +316,7 @@ function SetupQr({ ext, apiBase }) {
     const data = await res.json().catch(() => ({}));
     setSending(false);
     setMailResult(res.ok ? { ok: true, text: data.messages?.join(" ") } : { ok: false, text: data.detail || "Email not sent." });
+    if (res.ok) reload(); // so the address is offered next time
   };
 
   const make = async (app) => {
@@ -411,7 +412,7 @@ function VoicemailEmail({ ext, current, send, busy }) {
   );
 }
 
-function ExtensionsSection({ config, status, send, busy, apiBase }) {
+function ExtensionsSection({ config, status, send, busy, apiBase, reload }) {
   const [draft, setDraft] = useState({ ext: "", name: "" });
   const [editing, setEditing] = useState(null); // { ext, name }
   const [creds, setCreds] = useState(null); // { ext, ...credentials }
@@ -535,7 +536,7 @@ function ExtensionsSection({ config, status, send, busy, apiBase }) {
               rows.push(
                 <tr key={`${e.ext}-creds`}>
                   <td colSpan={5} className="ticket-action-panel">
-                    <SetupQr key={e.ext} ext={e.ext} apiBase={apiBase} />
+                    <SetupQr key={e.ext} ext={e.ext} savedEmail={e.setup_email} apiBase={apiBase} reload={reload} />
                     <div className="ticket-action-label">Or enter these in the phone app for extension {e.ext}:</div>
                     <CopyField label="Server" value={creds.server} />
                     <CopyField label="Port" value={creds.port} />

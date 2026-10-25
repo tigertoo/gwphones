@@ -214,6 +214,7 @@ def get_db() -> sqlite3.Connection:
         os.chmod(PBX_DB_PATH, 0o600)  # holds SIP passwords
     for column in ("extensions ADD COLUMN vm_pin TEXT",
                    "extensions ADD COLUMN vm_email TEXT NOT NULL DEFAULT ''",
+                   "extensions ADD COLUMN setup_email TEXT NOT NULL DEFAULT ''",
                    "ring_groups ADD COLUMN voicemail TEXT NOT NULL DEFAULT ''"):
         try:
             conn.execute(f"ALTER TABLE {column}")
@@ -614,7 +615,7 @@ def api_config():
         s = get_settings(conn)
         return {
             "extensions": [{"ext": r["ext"], "name": r["name"], "enabled": bool(r["enabled"]),
-                            "voicemail_email": r["vm_email"],
+                            "voicemail_email": r["vm_email"], "setup_email": r["setup_email"],
                             "created_at": r["created_at"], "updated_at": r["updated_at"]}
                            for r in conn.execute("SELECT * FROM extensions ORDER BY ext")],
             "ring_groups": [{"number": r["number"], "name": r["name"], "strategy": r["strategy"],
@@ -1267,6 +1268,9 @@ def api_email_setup(ext: str, req: SetupEmailRequest):
             conn.execute("DELETE FROM provision_tokens WHERE token_hash = ?", (_token_hash(token),))
             conn.commit()
         raise
+    with _lock, get_db() as conn:
+        conn.execute("UPDATE extensions SET setup_email = ? WHERE ext = ?", (to, ext))  # offered next time
+        conn.commit()
     changes_log.info(f"Emailed {'+'.join(apps)} setup for extension {ext} to {to}")
     return {"ok": True, "expires_at": expires.isoformat(),
             "messages": [f"Setup email sent to {to}. The link works until {_local_time(expires)}."]}
