@@ -1,5 +1,15 @@
 import React, { useCallback, useEffect, useState } from "react";
 import { CustomersAndNumbers, MonthlySummary, Statements } from "./BillingCustomers";
+import SaveToast, { busyText } from "./SaveToast";
+
+const BUSY_LABELS = [
+  [/^\/statements$/, "Issuing statements…"],
+  [/\/email$/, "Sending the email…"],
+  [/\/cancel$/, "Cancelling the statement…"],
+  [/^\/refresh$/, "Reading new calls…"],
+  [/^\/reprice/, "Re-pricing the month…"],
+  [/^\/rate-sheets\/\d+$/, "Deleting the rate sheet and re-pricing calls…"],
+];
 
 // Phone System → Billing: calls read from Asterisk's CDR log, priced from
 // the uploaded rate sheets (backend/billing.py, /api/billing/*), and what
@@ -64,6 +74,8 @@ export default function BillingPanel({ apiBase }) {
   const [result, setResult] = useState(null);
   const [busy, setBusy] = useState(false);
   const [version, setVersion] = useState(0); // bumped after every change, so every part reloads
+  const [toast, setToast] = useState(null); // see SaveToast
+  const closeToast = useCallback(() => setToast(null), []);
 
   const api = useCallback(async (method, path, body) => {
     const res = await fetch(`${apiBase}/api/billing${path}`, {
@@ -89,17 +101,22 @@ export default function BillingPanel({ apiBase }) {
 
   useEffect(() => { load(); }, [load]);
 
-  const run = async (method, path, body) => {
+  // quiet: the caller shows its own progress (the rate sheet import does)
+  const run = async (method, path, body, { quiet = false } = {}) => {
     setBusy(true);
     setResult(null);
+    if (!quiet) setToast({ busy: true, text: busyText(method, path, BUSY_LABELS) });
     try {
       const data = await api(method, path, body);
-      setResult({ ok: true, text: (data.messages || ["Done."]).join(" ") });
+      const outcome = { ok: true, text: (data.messages || ["Done."]).join(" ") };
+      setResult(outcome);
+      setToast(outcome);
       await load();
       setVersion((v) => v + 1);
       return data;
     } catch (e) {
       setResult({ ok: false, text: e.message });
+      setToast({ ok: false, text: e.message });
       return null;
     } finally {
       setBusy(false);
@@ -115,6 +132,7 @@ export default function BillingPanel({ apiBase }) {
       {result && (
         <div className={`ticket-action-result ticket-action-result-${result.ok ? "success" : "error"} pbx-result`}>{result.text}</div>
       )}
+      <SaveToast toast={toast} onClose={closeToast} />
 
       <section className="panel">
         <h2>Calls and costs</h2>
@@ -272,7 +290,7 @@ function RateSheets({ apiBase, overview, run, api, busy, setResult }) {
     setProgress({ label: `Importing ${upload.preview.stats.imported.toLocaleString()} rates and re-pricing calls` });
     const data = await run("POST", "/rate-sheets", {
       upload_id: upload.preview.upload_id, mapping: upload.mapping, defaults: upload.defaults,
-    });
+    }, { quiet: true });
     setProgress(null);
     if (data) setUpload(null);
   };

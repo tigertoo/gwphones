@@ -1,5 +1,6 @@
 import React, { useEffect, useState, useCallback } from "react";
 import BillingPanel from "./BillingPanel";
+import SaveToast, { busyText } from "./SaveToast";
 
 // Phone System tab: manages the Asterisk PBX on this VPS through the
 // dashboard's own /api/pbx/* endpoints (see backend/pbx.py). Every save is
@@ -45,6 +46,8 @@ export default function PbxPanel({ apiBase }) {
   const [loadError, setLoadError] = useState(null);
   const [result, setResult] = useState(null); // { ok, text } from the last save
   const [busy, setBusy] = useState(false);
+  const [toast, setToast] = useState(null); // see SaveToast
+  const closeToast = useCallback(() => setToast(null), []);
 
   const loadConfig = useCallback(async () => {
     try {
@@ -76,6 +79,12 @@ export default function PbxPanel({ apiBase }) {
   // Every change goes through here: send, show the apply result, reload.
   const send = async (method, path, body, successText) => {
     setBusy(true);
+    // Every change here is applied to Asterisk straight away (a reload).
+    setToast({ busy: true, text: busyText(method, path, [
+      [/reset-password$/, "Setting a new password and applying it…"],
+      [/reset-voicemail-pin$/, "Setting a new voicemail PIN…"],
+      [/^\/apply$/, "Applying to the phone system…"],
+    ]).replace(/^Saving…$/, "Saving and applying to the phone system…").replace(/^Deleting…$/, "Deleting and applying…") });
     try {
       const res = await fetch(`${apiBase}/api/pbx${path}`, {
         method,
@@ -84,19 +93,21 @@ export default function PbxPanel({ apiBase }) {
       });
       const data = await res.json().catch(() => ({}));
       if (!res.ok) {
-        setResult({ ok: false, text: typeof data.detail === "string" ? data.detail : "Something went wrong." });
+        const text = typeof data.detail === "string" ? data.detail : "Something went wrong.";
+        setResult({ ok: false, text });
+        setToast({ ok: false, text });
         return null;
       }
       const applied = data.ok !== false;
-      setResult({
-        ok: applied,
-        text: applied ? successText || "Saved and applied." : (data.messages || []).join(" "),
-      });
+      const outcome = { ok: applied, text: applied ? successText || "Saved and applied." : (data.messages || []).join(" ") };
+      setResult(outcome);
+      setToast(outcome);
       await loadConfig();
       loadStatus();
       return data;
     } catch {
       setResult({ ok: false, text: "Connection error. Please try again." });
+      setToast({ ok: false, text: "Connection error. Please try again." });
       return null;
     } finally {
       setBusy(false);
@@ -123,6 +134,7 @@ export default function PbxPanel({ apiBase }) {
       </div>
 
       <Result result={result} />
+      <SaveToast toast={toast} onClose={closeToast} />
 
       {section === "status" && <StatusSection {...props} />}
       {section === "extensions" && <ExtensionsSection {...props} />}

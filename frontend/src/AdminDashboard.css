@@ -931,3 +931,32 @@
 .pbx-coverage th:nth-child(1) { width: 22%; }
 .pbx-coverage th:nth-child(2) { width: 11%; }
 .pbx-coverage th:nth-child(5) { width: 9%; }
+
+/* Save progress / result, fixed to the corner (SaveToast.jsx) */
+.save-toast {
+  position: fixed;
+  right: 20px;
+  bottom: 20px;
+  z-index: 50;
+  width: min(380px, calc(100vw - 40px));
+  padding: 12px 14px;
+  border-radius: 10px;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  box-shadow: 0 6px 24px rgba(0, 0, 0, 0.35);
+  font-size: 13px;
+}
+.save-toast-ok { border-color: var(--ok); }
+.save-toast-error { border-color: var(--critical); }
+.save-toast-text { display: flex; gap: 10px; justify-content: space-between; align-items: flex-start; margin-bottom: 6px; }
+.save-toast-ok .save-toast-text, .save-toast-error .save-toast-text { margin-bottom: 0; }
+.save-toast-close {
+  background: none;
+  border: 0;
+  color: var(--muted);
+  font-size: 18px;
+  line-height: 1;
+  cursor: pointer;
+  padding: 0 2px;
+}
+.ticket-action-btn:disabled { cursor: progress; }
