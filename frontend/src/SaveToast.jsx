@@ -6,6 +6,12 @@ import React, { useEffect } from "react";
 // button further down).
 //   toast: null | { busy: true, text } | { ok: boolean, text }
 export default function SaveToast({ toast, onClose }) {
+  const busy = !!toast?.busy;
+  useEffect(() => {
+    document.body.classList.toggle("saving", busy);
+    return () => document.body.classList.remove("saving");
+  }, [busy]);
+
   useEffect(() => {
     if (!toast || toast.busy || !toast.ok) return undefined; // errors stay until closed
     const t = setTimeout(onClose, 5000);

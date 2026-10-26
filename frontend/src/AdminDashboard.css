@@ -959,4 +959,6 @@
   cursor: pointer;
   padding: 0 2px;
 }
-.ticket-action-btn:disabled { cursor: progress; }
+/* Only while a save is running (SaveToast sets body.saving); a button
+   disabled for any other reason keeps the normal cursor. */
+body.saving .ticket-action-btn:disabled { cursor: progress; }
