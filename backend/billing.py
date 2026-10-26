@@ -19,8 +19,9 @@ never floats. A call is one of:
                rate's expiry: upload the provider's newer sheet
   unrated      couldn't be priced (no sheet, no matching prefix, no
                exchange rate yet): never shown as zero
-  free         not billable: internal, inbound, unanswered, emergency,
-               voicemail
+  free         not billable: internal, inbound, emergency, voicemail
+  failed       an outbound call that didn't connect (no answer, busy,
+               failed, congestion): not billable either
 Calls on an issued statement (statement_id, stage 2) are never re-priced.
 
 Customers are groups of extensions. A customer pays your cost plus a
@@ -130,6 +131,14 @@ def get_db() -> sqlite3.Connection:
             pass  # already there
     if fresh:
         os.chmod(BILLING_DB, 0o600)
+    if not _state(conn, "failed_status"):
+        # Before 2026-10-26, outbound calls that didn't connect were "free".
+        for r in conn.execute("SELECT id, disposition, billsec FROM calls WHERE direction = 'out' AND status = 'free' "
+                              "AND reason LIKE 'Not answered%'").fetchall():
+            conn.execute("UPDATE calls SET status = 'failed', reason = ? WHERE id = ?",
+                         (_not_connected(r["disposition"], r["billsec"]), r["id"]))
+        _set_state(conn, "failed_status", "1")
+        conn.commit()
     return conn
 
 
@@ -243,12 +252,21 @@ def classify(row: dict) -> dict:
         if call["direction"] != "out":
             call["status"], call["reason"] = "free", "Inbound call" if call["direction"] == "in" else "Internal call"
         elif row["disposition"] != "ANSWERED" or call["billsec"] <= 0:
-            call["status"], call["reason"] = "free", f"Not answered ({row['disposition'].lower()})"
+            call["status"], call["reason"] = "failed", _not_connected(row["disposition"], call["billsec"])
         elif not call["number"]:
             call["status"], call["reason"] = "unrated", "Couldn't read the number dialled"
         else:
             call["status"], call["reason"] = "unrated", "Not priced yet"
     return call
+
+
+DISPOSITIONS = {"NO ANSWER": "No answer", "BUSY": "Busy", "FAILED": "Failed", "CONGESTION": "Congestion"}
+
+
+def _not_connected(disposition: str, billsec: int) -> str:
+    if disposition == "ANSWERED":
+        return f"Answered for {billsec} s"
+    return DISPOSITIONS.get(disposition, (disposition or "Unknown").capitalize())
 
 
 def import_cdr() -> int:
@@ -365,8 +383,8 @@ def price_call(conn, call) -> dict:
     out = {k: None for k in ("sheet_id", "prefix", "destination", "rate_micro", "currency", "bill_seconds",
                              "conn_fee_micro", "cost_micro", "fx_rate", "fx_date", "cost_eur_micro")}
     out["rated_at"] = _now()
-    if call["status"] == "free":
-        return {**out, "status": "free", "reason": call["reason"]}
+    if call["status"] in ("free", "failed"):
+        return {**out, "status": call["status"], "reason": call["reason"]}
     if not call["number"]:
         return {**out, "status": "unrated", "reason": "Couldn't read the number dialled"}
     at = call["start_utc"]
@@ -1133,7 +1151,7 @@ def month_statement(conn, month: str, customer_id: Optional[int] = None, only: b
         return out[cid]
 
     for c in conn.execute("SELECT * FROM calls WHERE direction = 'out' AND start_utc >= ? AND start_utc < ? "
-                          "AND status != 'free' ORDER BY start_utc", (start, end)):
+                          "AND status NOT IN ('free', 'failed') ORDER BY start_utc", (start, end)):
         e = entry(owner.get(c["ext"]))
         e["counts"][c["status"]] += 1
         line = _call_json(c)

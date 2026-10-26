@@ -892,6 +892,7 @@
 .pbx-bill-provisional { background: rgba(230, 160, 20, 0.2); }
 .pbx-bill-unrated { background: rgba(220, 60, 60, 0.15); }
 .pbx-bill-free { color: var(--muted); }
+.pbx-bill-failed { color: var(--critical); background: rgba(220, 60, 60, 0.08); }
 .pbx-trace td { padding: 2px 14px 2px 0; border: 0; }
 .pbx-mapping {
   display: grid;

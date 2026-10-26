@@ -9,6 +9,7 @@ const STATUS_LABELS = {
   rated: "Priced",
   provisional: "Provisional",
   unrated: "Not priced",
+  failed: "Not connected",
   free: "Free",
 };
 const DIRECTIONS = { out: "Outbound", in: "Inbound", internal: "Internal" };
