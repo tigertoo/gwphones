@@ -262,6 +262,7 @@ def get_db() -> sqlite3.Connection:
     for column in ("extensions ADD COLUMN vm_pin TEXT",
                    "extensions ADD COLUMN vm_email TEXT NOT NULL DEFAULT ''",
                    "extensions ADD COLUMN setup_email TEXT NOT NULL DEFAULT ''",
+                   "extensions ADD COLUMN outbound_cid TEXT NOT NULL DEFAULT ''",
                    "ring_groups ADD COLUMN voicemail TEXT NOT NULL DEFAULT ''"):
         try:
             conn.execute(f"ALTER TABLE {column}")
@@ -370,8 +371,12 @@ def build_extensions_conf(conn) -> str:
                 f"auth={r['ext']}",
                 f"aors={r['ext']}",
                 f"callerid=\"{r['name']}\" <{r['ext']}>",
-                f"mailboxes={r['ext']}@{VM_CONTEXT}",
-                "",
+                f"mailboxes={r['ext']}@{VM_CONTEXT}"]
+        if r["outbound_cid"]:
+            # Its own outbound caller ID; [sub-outbound] and 112/999 fall
+            # back to OUTBOUND_CID without it.
+            out.append(f"set_var=EXT_CID={r['outbound_cid']}")
+        out += ["",
                 f"[{r['ext']}](auth-ext)",
                 f"username={r['ext']}",
                 f"password={r['password']}",
@@ -407,8 +412,8 @@ def _route_check(kind: str) -> List[str]:
 def _outbound_block(s: Dict[str, str], exten: str, trunks: List[str], refused: bool = False) -> List[str]:
     out = [f"exten => {exten},1,Set(GROUP(outbound)=calls)",
            " same => n,GotoIf($[${GROUP_COUNT(calls@outbound)} > ${MAX_OUTBOUND}]?busy)"]
-    if s["outbound_cid"]:
-        out.append(" same => n,Set(CALLERID(num)=${OUTBOUND_CID})")
+    out += [' same => n,Set(OUT_CID=${IF($["${EXT_CID}" != ""]?${EXT_CID}:${OUTBOUND_CID})})',
+            ' same => n,ExecIf($["${OUT_CID}" != ""]?Set(CALLERID(num)=${OUT_CID}))']
     if exten in NUMBER_TYPES and not refused:
         out += _route_check(exten)
         if exten == "international":
@@ -705,6 +710,7 @@ def api_config():
         return {
             "extensions": [{"ext": r["ext"], "name": r["name"], "enabled": bool(r["enabled"]),
                             "voicemail_email": r["vm_email"], "setup_email": r["setup_email"],
+                            "outbound_cid": r["outbound_cid"],
                             "created_at": r["created_at"], "updated_at": r["updated_at"]}
                            for r in conn.execute("SELECT * FROM extensions ORDER BY ext")],
             "ring_groups": [{"number": r["number"], "name": r["name"], "strategy": r["strategy"],
@@ -803,6 +809,23 @@ def api_voicemail_email(ext: str, req: VoicemailEmailRequest):
             raise HTTPException(404, "Extension not found.")
         conn.commit()
         return apply_config(conn, f"Voicemail for extension {ext} emailed to {address or 'nobody'}")
+
+
+class OutboundCidRequest(BaseModel):
+    outbound_cid: str = ""  # empty = use the default caller ID
+
+
+@router.put("/extensions/{ext}/outbound-cid")
+def api_extension_outbound_cid(ext: str, req: OutboundCidRequest):
+    cid = req.outbound_cid.strip().replace(" ", "")
+    if cid and not CID_RE.match(cid):
+        raise HTTPException(400, "Caller ID must be a phone number, e.g. +35312345678.")
+    with _lock, get_db() as conn:
+        if conn.execute("UPDATE extensions SET outbound_cid = ?, updated_at = ? WHERE ext = ?",
+                        (cid, _now(), ext)).rowcount == 0:
+            raise HTTPException(404, "Extension not found.")
+        conn.commit()
+        return apply_config(conn, f"Outbound caller ID for extension {ext}: {cid or 'the default'}")
 
 
 @router.post("/extensions/{ext}/reset-voicemail-pin")

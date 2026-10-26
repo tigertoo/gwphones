@@ -427,6 +427,33 @@ function VoicemailEmail({ ext, current, send, busy }) {
   );
 }
 
+function OutboundCid({ ext, current, fallback, dids, send, busy }) {
+  const [value, setValue] = useState(current || "");
+  useEffect(() => setValue(current || ""), [current]);
+  const clean = value.replace(/\s/g, "");
+  const save = (ev) => {
+    ev.preventDefault();
+    send("PUT", `/extensions/${ext}/outbound-cid`, { outbound_cid: clean },
+      clean ? `Calls from ${ext} will show ${clean}.` : `Calls from ${ext} will show the default caller ID.`);
+  };
+  return (
+    <form className="idea-form-row pbx-gap" onSubmit={save}>
+      <input
+        className="idea-input"
+        placeholder={fallback ? `Caller ID (default ${fallback})` : "Caller ID (optional)"}
+        list="pbx-dids"
+        value={value}
+        onChange={(e) => setValue(e.target.value)}
+      />
+      <datalist id="pbx-dids">
+        {dids.map((d) => <option key={d} value={d} />)}
+      </datalist>
+      <button className="ticket-action-btn" disabled={busy || clean === (current || "")}>Save</button>
+      <span className="pbx-hint">Shown to people this extension calls. Use a number on your Irish VoIP account. Leave blank for the default.</span>
+    </form>
+  );
+}
+
 function ExtensionsSection({ config, status, send, busy, apiBase, reload }) {
   const [draft, setDraft] = useState({ ext: "", name: "" });
   const [editing, setEditing] = useState(null); // { ext, name }
@@ -504,6 +531,7 @@ function ExtensionsSection({ config, status, send, busy, apiBase, reload }) {
                       <button className="ticket-action-btn" onClick={() => setEditing(null)}>Cancel</button>
                     </span>
                   ) : e.name}
+                  {e.outbound_cid && <div className="pbx-hint">Shows {e.outbound_cid}</div>}
                 </td>
                 <td>
                   {!e.enabled ? "—" : (
@@ -572,6 +600,8 @@ function ExtensionsSection({ config, status, send, busy, apiBase, reload }) {
                       }}
                     >New voicemail PIN</button>
                     <VoicemailEmail ext={e.ext} current={e.voicemail_email} send={send} busy={busy} />
+                    <OutboundCid ext={e.ext} current={e.outbound_cid} fallback={config.settings.outbound_cid}
+                      dids={config.inbound_routes.map((r) => r.did)} send={send} busy={busy} />
                     {!creds.server && <p className="pbx-hint">Set PBX_PUBLIC_HOST in the dashboard's .env to show the server name here.</p>}
                   </td>
                 </tr>
@@ -703,7 +733,7 @@ function TrunksSection({ config, status, send, busy, apiBase }) {
             value={form.outbound_cid}
             onChange={(e) => setForm({ ...form, outbound_cid: e.target.value })}
           />
-          <small className="pbx-hint">Use a number on your Irish VoIP account. Carriers can reject calls showing a number you don't own.</small>
+          <small className="pbx-hint">Use a number on your Irish VoIP account. Carriers can reject calls showing a number you don't own. An extension can have its own under Phone setup.</small>
         </label>
         <label className="pbx-field">
           <span>Voxbeam route</span>
