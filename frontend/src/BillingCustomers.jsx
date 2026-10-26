@@ -65,6 +65,10 @@ export function MonthlySummary({ apiBase, api, month, version }) {
                 <td colSpan={10} className="ticket-action-panel">
                   <div className="idea-form-row">
                     <a className="ticket-action-btn" href={`${apiBase}/api/billing/customers/${id}/month.csv?month=${month}`}>Download itemised CSV</a>
+                    {id !== 0 && (
+                      <a className="ticket-action-btn" href={`${apiBase}/api/billing/customers/${id}/draft.pdf?month=${month}`}
+                        target="_blank" rel="noreferrer">Preview statement (draft PDF)</a>
+                    )}
                   </div>
                   <table className="users-table">
                     <thead><tr><th>Item</th><th>When</th><th>Ext</th><th>Number</th><th>Destination</th><th>Talk</th><th>Cost €</th><th>Price €</th></tr></thead>
@@ -307,9 +311,13 @@ export function Statements({ apiBase, api, run, busy, month, version }) {
             && run("POST", "/statements", { month, customer_id: who ? Number(who) : null })}>
           Issue for {month}
         </button>
+        {who && (
+          <a className="ticket-action-btn" href={`${apiBase}/api/billing/customers/${who}/draft.pdf?month=${month}`}
+            target="_blank" rel="noreferrer">Preview draft PDF</a>
+        )}
         <button className="ticket-action-btn" onClick={() => setEditing({ ...s })}>Business details</button>
         <span className="pbx-hint">
-          {ended ? "Locks each customer's prices for the month. Calls read later go on a follow-up." : "Statements can be issued once the month has ended."}
+          {ended ? "Locks each customer's prices for the month. Calls read later go on a follow-up." : "Statements can be issued once the month has ended; pick a customer to preview a draft now."}
         </span>
       </div>
 

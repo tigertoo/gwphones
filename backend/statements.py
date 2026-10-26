@@ -91,17 +91,8 @@ def _money2(micro: int) -> str:
     return from_micro(micro, 2)
 
 
-def _issue_one(conn, entry: dict, month: str, settings: dict) -> Optional[dict]:
-    """Locks and snapshots one customer's unbilled items for the month.
-    Returns the statement row's fields, or None if there's nothing to bill."""
-    calls = [c for c in entry["calls"] if c["statement_id"] is None]
-    ddis = [d for d in entry["ddis"] if d["statement_id"] is None]
-    if not calls and not ddis:
-        return None
-    name = entry["customer"]["name"]
-    if any(c["status"] in ("unrated", "provisional") for c in calls):
-        raise HTTPException(409, f"{name} has calls in {month} that aren't priced, or are only provisionally "
-                                 "priced. Upload the missing or newer rate sheet first.")
+def _snapshot(conn, entry: dict, month: str, settings: dict, number: str, calls: list, ddis: list) -> dict:
+    """What a statement shows for these calls and numbers (no changes made)."""
     call_lines = [{"id": c["id"], "start": c["start"], "ext": c["ext"] or "",
                    "number": f"+{c['number']}" if c["number"] else (c["dialled"] or ""),
                    "destination": c["destination"] or "", "seconds": c["billsec"],
@@ -118,30 +109,68 @@ def _issue_one(conn, entry: dict, month: str, settings: dict) -> Optional[dict]:
     ddis_total = sum(d["price_micro"] for d in ddi_lines)
     # Rounded to the cent once, on the total, so the lines add up as shown.
     subtotal = to_micro(Decimal(_money2(calls_total + ddis_total)))
-    seq = int(_state(conn, "statement_seq", "0") or 0) + 1
-    _set_state(conn, "statement_seq", seq)
-    number = f"S{seq:05d}"
-    issued = datetime.now(timezone.utc)
-    snapshot = {
-        "number": number, "month": month, "issued": issued.astimezone(LOCAL_TZ).strftime("%d %b %Y"),
+    return {
+        "number": number, "month": month, "issued": datetime.now(LOCAL_TZ).strftime("%d %b %Y"),
         "business": settings,
-        "customer": {"name": name, "email": entry["customer"]["email"] or ""},
+        "customer": {"name": entry["customer"]["name"], "email": entry["customer"]["email"] or ""},
         "follow_up": bool(conn.execute(
             "SELECT 1 FROM statements WHERE customer_id IS ? AND month = ? AND cancelled_at IS NULL",
             (entry["customer"]["id"], month)).fetchone()),
         "ddis": ddi_lines, "groups": sorted(groups.values(), key=lambda g: -g["price_micro"]), "calls": call_lines,
         "totals": {"ddis": ddis_total, "calls": calls_total, "subtotal": subtotal, "vat": 0, "total": subtotal},
     }
+
+
+def _issue_one(conn, entry: dict, month: str, settings: dict) -> Optional[dict]:
+    """Locks and snapshots one customer's unbilled items for the month.
+    Returns the statement row's fields, or None if there's nothing to bill."""
+    calls = [c for c in entry["calls"] if c["statement_id"] is None]
+    ddis = [d for d in entry["ddis"] if d["statement_id"] is None]
+    if not calls and not ddis:
+        return None
+    name = entry["customer"]["name"]
+    if any(c["status"] in ("unrated", "provisional") for c in calls):
+        raise HTTPException(409, f"{name} has calls in {month} that aren't priced, or are only provisionally "
+                                 "priced. Upload the missing or newer rate sheet first.")
+    seq = int(_state(conn, "statement_seq", "0") or 0) + 1
+    _set_state(conn, "statement_seq", seq)
+    number = f"S{seq:05d}"
+    snapshot = _snapshot(conn, entry, month, settings, number, calls, ddis)
+    subtotal = snapshot["totals"]["total"]
     cur = conn.execute("INSERT INTO statements (number, customer_id, month, issued_at, total_micro, snapshot) "
                        "VALUES (?, ?, ?, ?, ?, ?)",
-                       (number, entry["customer"]["id"], month, issued.isoformat(timespec="seconds"), subtotal,
-                        json.dumps(snapshot)))
+                       (number, entry["customer"]["id"], month, billing._now(), subtotal, json.dumps(snapshot)))
     sid = cur.lastrowid
-    for c in call_lines:
+    for c in snapshot["calls"]:
         conn.execute("UPDATE calls SET statement_id = ?, price_micro = ? WHERE id = ?", (sid, c["price_micro"], c["id"]))
     conn.executemany("INSERT INTO statement_ddis (statement_id, did, month) VALUES (?, ?, ?)",
-                     [(sid, d["did"], month) for d in ddi_lines])
+                     [(sid, d["did"], month) for d in snapshot["ddis"]])
     return {"id": sid, "number": number, "customer": name, "total": _money2(subtotal)}
+
+
+@router.get("/customers/{customer_id}/draft.pdf")
+def api_draft_pdf(customer_id: int, month: str):
+    """A draft of the statement a customer would get for the month, as
+    things stand: any month, the current one too; nothing is locked or
+    numbered. Calls not priced yet are left out and counted on it."""
+    if not MONTH_RE.match(month):
+        raise HTTPException(400, "Month must look like 2026-10.")
+    with get_db() as conn:
+        settings = _settings(conn)
+        entries = [e for e in month_statement(conn, month) if e["customer"]["id"] == customer_id]
+        if not entries:
+            raise HTTPException(404, "Customer not found.")
+        e = entries[0]
+        unbilled = [c for c in e["calls"] if c["statement_id"] is None]
+        priced = [c for c in unbilled if c["status"] in ("rated", "provisional")]
+        snap = _snapshot(conn, e, month, settings, "DRAFT", priced, [d for d in e["ddis"] if d["statement_id"] is None])
+    snap["draft"] = {"left_out": len(unbilled) - len(priced),
+                     "provisional": sum(c["status"] == "provisional" for c in priced),
+                     "month_open": not _month_ended(month)}
+    if not snap["business"]["business_name"]:
+        snap["business"]["business_name"] = "(your business details)"
+    return Response(statement_pdf(snap), media_type="application/pdf",
+                    headers={"Content-Disposition": f'inline; filename="{_filename(snap)}"'})
 
 
 def _month_ended(month: str) -> bool:
@@ -257,12 +286,23 @@ def statement_pdf(snap: dict, cancelled: bool = False) -> bytes:
     contact = " · ".join(x for x in (b["email"], b["phone"]) if x)
     if contact:
         head_left.append(p(contact, small))
-    head_right = [p(("CANCELLED " if cancelled else "") + "Statement", title),
+    draft = snap.get("draft")
+    head_right = [p(("CANCELLED " if cancelled else "DRAFT " if draft else "") + "Statement", title),
                   p(f"Number: {snap['number']}"), p(f"Date: {snap['issued']}"),
                   p(f"Period: {_month_name(snap['month'])}" + (" (follow-up)" if snap.get("follow_up") else ""))]
     head = Table([[head_left, head_right]], colWidths=[105 * mm, 65 * mm])
     head.setStyle(TableStyle([("VALIGN", (0, 0), (-1, -1), "TOP"), ("LEFTPADDING", (0, 0), (-1, -1), 0)]))
     story += [head, Spacer(1, 8 * mm), p("To:", small), p(c["name"]), Spacer(1, 6 * mm)]
+    if draft:
+        notes = ["This is a draft, not a statement: nothing has been issued or locked."]
+        if draft["month_open"]:
+            notes.append("The month hasn't ended, so more calls may still be added.")
+        if draft["left_out"]:
+            notes.append(f"{draft['left_out']} call(s) not priced yet are left out.")
+        if draft["provisional"]:
+            notes.append(f"{draft['provisional']} call(s) are only provisionally priced (their rate sheet has expired).")
+        story += [p(" ".join(notes), ParagraphStyle("draft", parent=body, textColor=colors.HexColor("#b45309"))),
+                  Spacer(1, 4 * mm)]
 
     def table(rows, widths, money_cols=(), total_row=False):
         tbl = Table(rows, colWidths=[w * mm for w in widths], repeatRows=1)
