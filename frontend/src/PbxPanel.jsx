@@ -577,7 +577,7 @@ function ExtensionsSection({ config, status, send, busy, apiBase, reload }) {
 // Trunks & outbound
 // ---------------------------------------------------------------------------
 
-function TrunksSection({ config, status, send, busy }) {
+function TrunksSection({ config, status, send, busy, apiBase }) {
   const [form, setForm] = useState(config.settings);
   useEffect(() => setForm(config.settings), [config.settings]);
   const { trunks } = config;
@@ -591,6 +591,7 @@ function TrunksSection({ config, status, send, busy }) {
   const noneEnabled = !form.trunk_order.some((t) => form.trunks_enabled[t]);
 
   return (
+    <>
     <section className="panel">
       <h2>Outbound trunks</h2>
       <p className="pbx-hint pbx-intro">
@@ -637,9 +638,10 @@ function TrunksSection({ config, status, send, busy }) {
                 >
                   <option value="default">Trunk order above</option>
                   {form.trunk_order.map((t) => <option key={t} value={t}>{trunks[t].label} only</option>)}
+                  <option value="cheapest">Cheapest route</option>
                   <option value="off">Blocked</option>
                 </select>
-                {form.routes[kind] !== "off" && form.routes[kind] !== "default" && !form.trunks_enabled[form.routes[kind]] && (
+                {trunks[form.routes[kind]] && !form.trunks_enabled[form.routes[kind]] && (
                   <small className="pbx-hint"> {trunks[form.routes[kind]].label} is off above, so these calls will fail.</small>
                 )}
               </td>
@@ -648,9 +650,37 @@ function TrunksSection({ config, status, send, busy }) {
         </tbody>
       </table>
       <p className="pbx-hint">
-        &ldquo;Only&rdquo; means no fallback: if that trunk can&rsquo;t take the call, it fails. Numbers that fit none
-        of these (premium 15xx, short codes) are always refused.
+        &ldquo;Only&rdquo; means no fallback: if that trunk can&rsquo;t take the call, it fails. &ldquo;Cheapest
+        route&rdquo; tries the routes ticked below, cheapest first. Numbers that fit none of these (premium 15xx, short
+        codes) are always refused.
       </p>
+
+      <h3 className="pbx-subhead">Price cap and cheapest route</h3>
+      <p className="pbx-hint pbx-intro">
+        Before every outbound call (except 112/999) the dashboard drops any route whose rate sheet has no price for
+        the number, or whose price is over the cap, in € per minute ex VAT. If none is left, the call is refused. If
+        the dashboard doesn&rsquo;t answer (restarting or down), Irish numbers go out on the trunk order unchecked and
+        international calls are refused, so keep a high safety cap on Voxbeam&rsquo;s portal too.
+      </p>
+      <div className="pbx-mapping">
+        {[["default", "Default cap, € per minute *"], ...Object.keys(config.number_types).map((k) => [k, `${config.number_types[k].split(" (")[0]} cap`])].map(([k, label]) => (
+          <label key={k} className="pbx-field">
+            <span>{label}</span>
+            <input className="idea-input" placeholder={k === "default" ? "0.05" : `default (${form.caps.default || "—"})`}
+              value={form.caps[k]} onChange={(e) => setForm({ ...form, caps: { ...form.caps, [k]: e.target.value } })} />
+          </label>
+        ))}
+      </div>
+      <div className="ticket-action-label">Routes &ldquo;Cheapest route&rdquo; may use</div>
+      <div className="pbx-member-grid">
+        {config.all_routes.map((r) => (
+          <label key={r.key} className="pbx-toggle">
+            <input type="checkbox" checked={!!form.lcr_allow[r.key]}
+              onChange={(e) => setForm({ ...form, lcr_allow: { ...form.lcr_allow, [r.key]: e.target.checked } })} />
+            {r.label}
+          </label>
+        ))}
+      </div>
 
       <div className="pbx-fields">
         <label className="pbx-field">
@@ -697,6 +727,93 @@ function TrunksSection({ config, status, send, busy }) {
           onClick={() => send("PUT", "/settings", form, "Trunk settings saved and applied.")}
         >Save</button>
       </div>
+    </section>
+    <RouteTest apiBase={apiBase} />
+    </>
+  );
+}
+
+// Try a number against the saved routing, and see the recent real checks.
+function RouteTest({ apiBase }) {
+  const [number, setNumber] = useState("");
+  const [data, setData] = useState(null);
+  const [error, setError] = useState("");
+
+  const run = async (e) => {
+    e?.preventDefault();
+    setError("");
+    const res = await fetch(`${apiBase}/api/pbx/route-test?${new URLSearchParams({ number: number || "0" })}`);
+    const d = await res.json().catch(() => ({}));
+    if (res.ok) setData(d); else setError(d.detail || `Error ${res.status}`);
+  };
+  useEffect(() => { run(); }, []); // eslint-disable-line react-hooks/exhaustive-deps
+
+  const r = data?.result;
+  const stale = data && data.last_outbound_call && data.last_outbound_call > data.started_at &&
+    (!data.last_check || data.last_check < data.last_outbound_call);
+  return (
+    <section className="panel pbx-gap">
+      <h2>Test a number</h2>
+      <form className="idea-form-row" onSubmit={run}>
+        <input className="idea-input" placeholder="e.g. +44 20 8759 9036 or 087 123 4567" value={number}
+          onChange={(e) => setNumber(e.target.value)} />
+        <button className="ticket-action-btn ticket-action-btn-primary" disabled={!number.trim()}>Check</button>
+        <span className="pbx-hint">Uses the saved settings: save changes above first.</span>
+      </form>
+      {error && <div className="ticket-action-result ticket-action-result-error">{error}</div>}
+      {data && number && !data.recognised && <p className="pbx-hint">That number would be refused: it isn&rsquo;t a number type the phones can call.</p>}
+      {r && r.note && <p>{r.note}</p>}
+      {r && !r.note && (
+        <>
+          <p>
+            <b>{r.refuse ? `Refused: ${r.refuse}` : `Tries ${r.routes.map((x) => x.label).join(", then ")}`}</b>
+            <span className="pbx-hint"> · {r.kind}, {r.mode === "cheapest" ? "cheapest route" : r.mode === "default" ? "trunk order" : r.mode}, cap €{r.cap}/min</span>
+          </p>
+          <table className="users-table">
+            <thead><tr><th>Route</th><th>Destination</th><th>€/min</th><th>2-min call €</th><th>Increments</th><th></th></tr></thead>
+            <tbody>
+              {r.candidates.map((c) => (
+                <tr key={c.label} className={c.dropped ? "pbx-row-disabled" : ""}>
+                  <td>{c.label}</td>
+                  <td>{c.destination ? `${c.prefix} ${c.destination}` : "—"}</td>
+                  <td>{c.per_min ?? "—"}</td>
+                  <td>{c.typical ?? "—"}</td>
+                  <td>{c.increments || "—"}{c.conn_fee && Number(c.conn_fee) ? ` + ${c.conn_fee} ${c.currency}` : ""}</td>
+                  <td>{c.dropped || (c.expired ? "rate sheet expired" : "")}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+          <p className="pbx-hint">&ldquo;Cheapest&rdquo; orders by the 2-minute call, so increments and connection fees count. Prices are ex VAT, in euro at the latest ECB rate.</p>
+        </>
+      )}
+      {data?.expired_sheets?.length > 0 && (
+        <div className="ticket-action-result ticket-action-result-error">
+          Rate sheet expired for {data.expired_sheets.map((x) => `${x.label} (${x.expired.slice(0, 10)})`).join(", ")}.
+          Its latest prices are still used, so the price cap won&rsquo;t see any rise until you upload the newer sheet
+          in Billing.
+        </div>
+      )}
+      {stale && (
+        <div className="ticket-action-result ticket-action-result-error">
+          Outbound calls have gone out since the dashboard started without a route check. Check that Asterisk&rsquo;s
+          dialplan was reloaded and func_curl is running.
+        </div>
+      )}
+      <div className="ticket-action-label pbx-gap">
+        Recent route checks {data?.last_check ? `(last ${new Date(data.last_check).toLocaleString()})` : "(none since the dashboard started)"}
+      </div>
+      {data?.recent?.length ? (
+        <table className="users-table">
+          <thead><tr><th>When</th><th>Type</th><th>Number</th><th>Answer</th><th>Took</th></tr></thead>
+          <tbody>
+            {data.recent.map((x, i) => (
+              <tr key={i}><td>{new Date(x.at).toLocaleTimeString()}</td><td>{x.kind}</td><td>+{x.number}</td>
+                <td>{x.reply.startsWith("OK:") ? x.routes.join(" → ") : x.reply.replace("REFUSE:", "Refused: ")}</td><td>{x.ms} ms</td></tr>
+            ))}
+          </tbody>
+        </table>
+      ) : <p className="pbx-hint">None yet.</p>}
     </section>
   );
 }

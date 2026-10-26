@@ -336,6 +336,30 @@ def _sheet_for(conn, trunk: str, route: str, at: str):
     return sheets[-1] if sheets else None
 
 
+def route_label(trunk: str, route: str) -> str:
+    label = TRUNKS.get(trunk, {}).get("label", trunk)
+    return f"{label} {VOXBEAM_ROUTES[route]}" if route in VOXBEAM_ROUTES else label
+
+
+def rate_for(conn, trunk: str, route: str, number: str, at: str):
+    """(sheet, rate row, rate per minute in micro-units, reason) for a number
+    on a trunk/route at a time (UTC ISO): the longest matching prefix in the
+    sheet in force, with the row's old rate before its announced change.
+    Used for both billing a call and choosing its route, so they agree."""
+    sheet = _sheet_for(conn, trunk, route, at)
+    if not sheet:
+        return None, None, None, f"No rate sheet for {route_label(trunk, route)}"
+    candidates = [number[:i] for i in range(len(number), 0, -1)]
+    row = conn.execute(f"SELECT * FROM rates WHERE sheet_id = ? AND prefix IN ({','.join('?' * len(candidates))}) "
+                       "ORDER BY length(prefix) DESC LIMIT 1", [sheet["id"], *candidates]).fetchone()
+    if not row:
+        return sheet, None, None, "No prefix in the rate sheet matches"
+    rate = row["rate_micro"]
+    if row["change_at"] and at < row["change_at"] and row["rate_before_micro"] is not None:
+        rate = row["rate_before_micro"]  # the "existing rate", before the announced change
+    return sheet, row, rate, None
+
+
 def price_call(conn, call) -> dict:
     """The pricing fields for one unfrozen outbound call."""
     out = {k: None for k in ("sheet_id", "prefix", "destination", "rate_micro", "currency", "bill_seconds",
@@ -345,20 +369,10 @@ def price_call(conn, call) -> dict:
         return {**out, "status": "free", "reason": call["reason"]}
     if not call["number"]:
         return {**out, "status": "unrated", "reason": "Couldn't read the number dialled"}
-    route_name = f" {VOXBEAM_ROUTES.get(call['route'], call['route'])}" if call["route"] else ""
-    sheet = _sheet_for(conn, call["trunk"], call["route"] or "", call["start_utc"])
-    if not sheet:
-        return {**out, "status": "unrated",
-                "reason": f"No rate sheet for {TRUNKS[call['trunk']]['label']}{route_name}"}
-    candidates = [call["number"][:i] for i in range(len(call["number"]), 0, -1)]
-    row = conn.execute(f"SELECT * FROM rates WHERE sheet_id = ? AND prefix IN ({','.join('?' * len(candidates))}) "
-                       "ORDER BY length(prefix) DESC LIMIT 1", [sheet["id"], *candidates]).fetchone()
-    if not row:
-        return {**out, "sheet_id": sheet["id"], "status": "unrated", "reason": "No prefix in the rate sheet matches"}
     at = call["start_utc"]
-    rate = row["rate_micro"]
-    if row["change_at"] and at < row["change_at"] and row["rate_before_micro"] is not None:
-        rate = row["rate_before_micro"]  # the "existing rate", before the announced change
+    sheet, row, rate, reason = rate_for(conn, call["trunk"], call["route"] or "", call["number"], at)
+    if not row:
+        return {**out, "sheet_id": sheet["id"] if sheet else None, "status": "unrated", "reason": reason}
     secs = bill_seconds(call["billsec"], row["conn_unit"], row["bill_unit"])
     cost = int((Decimal(rate) * secs / 60).quantize(Decimal(1), rounding=ROUND_CEILING)) + row["conn_fee_micro"]
     out.update(sheet_id=sheet["id"], prefix=row["prefix"], destination=row["destination"], rate_micro=rate,
@@ -391,10 +405,33 @@ def rate_calls(where: str = "status = 'unrated'", args=()) -> int:
     return changed
 
 
+def latest_fx(conn, currency: str):
+    """The newest exchange rate already fetched, for choosing a route
+    during a call (no web request there): (rate, its ECB date) or None."""
+    if currency == "EUR":
+        return Decimal(1), ""
+    r = conn.execute("SELECT rate FROM fx WHERE currency = ? ORDER BY day DESC LIMIT 1", (currency,)).fetchone()
+    if not r:
+        return None
+    rate, day = r["rate"].split("@")
+    return Decimal(rate), day
+
+
+def warm_fx():
+    """Keeps yesterday's rate for every rate sheet currency fetched, so route
+    choices have a recent one even when no calls needed it."""
+    yesterday = datetime.now(LOCAL_TZ).date() - timedelta(days=1)
+    with get_db() as conn:
+        for (cur,) in conn.execute("SELECT DISTINCT currency FROM rates WHERE currency != 'EUR'").fetchall():
+            fx_to_eur(conn, cur, yesterday)
+        conn.commit()
+
+
 def billing_pass():
-    """Import new calls and price whatever isn't priced yet."""
+    """Import new calls, price whatever isn't priced yet, keep FX fresh."""
     import_cdr()
     rate_calls()
+    warm_fx()
 
 
 async def billing_loop():
@@ -790,8 +827,7 @@ def _month_range(month: str):
 
 
 def _route_label(c) -> str:
-    label = TRUNKS.get(c["trunk"], {}).get("label", c["trunk"] or "")
-    return f"{label} {VOXBEAM_ROUTES[c['route']]}" if c["route"] in VOXBEAM_ROUTES else label
+    return route_label(c["trunk"], c["route"]) if c["trunk"] else ""
 
 
 def _call_json(c) -> dict:

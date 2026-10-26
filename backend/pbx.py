@@ -43,6 +43,7 @@ import logging.handlers
 import subprocess
 import threading
 from datetime import datetime, timedelta, timezone
+from decimal import Decimal, InvalidOperation
 from typing import Dict, List, Optional
 from xml.sax.saxutils import escape as xml_escape
 
@@ -116,14 +117,19 @@ VOXBEAM_ROUTES = {"0011101": "Gold", "0011102": "Platinum", "0011103": "Silver",
 # dialled numbers into these and calls [sub-outbound] at the matching
 # extension, e.g. Gosub(sub-outbound,mobile,1(...)).
 #   default = the trunk order above, with fallback; a trunk key = only that
-#   trunk; off = refused.
+#   trunk; cheapest = every route ticked for it, cheapest first (lcr.py);
+#   off = refused. Every call is checked against the price cap first (see
+#   _outbound_block and lcr.py).
 NUMBER_TYPES = {
     "mobile": "Irish mobiles (083, 085, 086, 087, 089)",
     "landline": "Irish landlines and other Irish numbers (01, 021, 0818...)",
     "freephone": "Irish freephone (1800)",
     "international": "International (00 or +, outside Ireland)",
 }
-ROUTE_CHOICES = ["default", *TRUNKS, "off"]
+ROUTE_CHOICES = ["default", *TRUNKS, "cheapest", "off"]
+# Every route a call can take: Irish VoIP, and each Voxbeam route.
+ALL_ROUTES = [("irishvoip", ""), *[("voxbeam", p) for p in VOXBEAM_ROUTES]]
+LCR_URL = "http://127.0.0.1:8010/lcr/route"
 
 DEFAULT_SETTINGS = {
     "outbound_cid": "",
@@ -137,7 +143,48 @@ DEFAULT_SETTINGS = {
     "route_landline": "default",
     "route_freephone": "irishvoip",
     "route_international": "voxbeam",
+    # Price cap, € ex VAT per minute: the default, and per number type
+    # (cap_mobile etc., empty = the default).
+    "cap_default": "0.05",
+    **{f"lcr_allow_{t}{r}": "1" for t, r in ALL_ROUTES},  # usable for "cheapest"
 }
+
+
+def lcr_routes(s: Dict[str, str], mode: str):
+    """The (trunk, route) candidates for a number type's route setting, in
+    that setting's order; Voxbeam's route is the chosen one except for
+    "cheapest", which may use any ticked route."""
+    enabled = [t for t in s["trunk_order"].split(",") if t in TRUNKS and s.get(f"trunk_{t}_enabled") == "1"]
+    if mode == "cheapest":
+        return [(t, r) for t, r in ALL_ROUTES if t in enabled and s.get(f"lcr_allow_{t}{r}", "1") == "1"]
+    if mode not in ("default", *TRUNKS):
+        return []
+    return [(t, s["voxbeam_prefix"] if t == "voxbeam" else "") for t in enabled if mode == "default" or t == mode]
+
+
+def classify_dialled(dialled: str):
+    """(number type, national form, international without 00) for a number
+    as dialled, sorted the way the static dialplan does it; (None, ...) if
+    it would be refused there."""
+    d = re.sub(r"[\s()-]", "", dialled or "")
+    if d in ("112", "999"):
+        return "emergency", d, d
+    if d.startswith("+353"):
+        d = "0" + d[4:].lstrip("0")
+    elif d.startswith("00353"):
+        d = "0" + d[5:].lstrip("0")
+    if re.fullmatch(r"08[35679]\d{7}", d):
+        return "mobile", d, "353" + d[1:]
+    if re.fullmatch(r"0[1-9]\d{7,8}", d):
+        return "landline", d, "353" + d[1:]
+    if re.fullmatch(r"01800\d{6}", d):  # +353 1800 ... came out as 01800...
+        d = d[1:]
+    if re.fullmatch(r"1800\d{6}", d):
+        return "freephone", d, "353" + d
+    m = re.fullmatch(r"(?:00|\+)([1-9]\d{6,})", d)
+    if m:
+        return "international", "00" + m.group(1), m.group(1)
+    return None, d, d
 
 NAME_RE = re.compile(r"^[A-Za-z0-9 .'_-]{1,40}$")
 CID_RE = re.compile(r"^\+?\d{6,15}$")
@@ -334,14 +381,43 @@ def build_extensions_conf(conn) -> str:
     return "\n".join(out)
 
 
+def _route_check(kind: str) -> List[str]:
+    """Asks lcr.py which routes to try (checked against the price cap,
+    cheapest first where set), then tries them in order. Falls through to
+    the lines after it (labelled nocheck) only if there's no answer."""
+    out = [" same => n,Set(CURLOPT(conntimeout)=1)",
+           " same => n,Set(CURLOPT(httptimeout)=2)",
+           " same => n,Set(CURLOPT(httpheader)=X-LCR-Token: ${LCR_TOKEN})",
+           f" same => n,Set(LCR=${{CURL({LCR_URL}?kind={kind}&num=${{ARG2}})}})",
+           ' same => n,GotoIf($["${LCR:0:7}" = "REFUSE:"]?refused)',
+           ' same => n,GotoIf($["${LCR:0:3}" != "OK:"]?nocheck)',
+           " same => n,Set(ROUTES=${LCR:3})"]
+    for i in range(1, len(ALL_ROUTES) + 1):
+        out += [f" same => n,Set(R=${{CUT(ROUTES,/,{i})}})",
+                f' same => n,GotoIf($["${{R}}" = "irishvoip"]?iv{i})']
+        out += [f' same => n,GotoIf($["${{R}}" = "{p}"]?vb{i})' for p in VOXBEAM_ROUTES]
+        out += [" same => n,Goto(done)",  # empty (no more routes) or not a route we know
+                f" same => n(vb{i}),Dial(PJSIP/${{R}}${{ARG2}}@voxbeam,60)",
+                f" same => n,Goto(next{i})",
+                f" same => n(iv{i}),Dial(PJSIP/${{ARG1}}@irishvoip,60)",
+                f' same => n(next{i}),GotoIf($["${{DIALSTATUS}}" != "CHANUNAVAIL" & "${{DIALSTATUS}}" != "CONGESTION"]?done)']
+    return out + [" same => n,Goto(done)", " same => n(nocheck),NoOp(Route check didn't answer: ${LCR})"]
+
+
 def _outbound_block(s: Dict[str, str], exten: str, trunks: List[str], refused: bool = False) -> List[str]:
     out = [f"exten => {exten},1,Set(GROUP(outbound)=calls)",
            " same => n,GotoIf($[${GROUP_COUNT(calls@outbound)} > ${MAX_OUTBOUND}]?busy)"]
     if s["outbound_cid"]:
         out.append(" same => n,Set(CALLERID(num)=${OUTBOUND_CID})")
+    if exten in NUMBER_TYPES and not refused:
+        out += _route_check(exten)
+        if exten == "international":
+            # No answer means the cap can't be checked: refuse (2026-10-26).
+            out += [" same => n,Goto(refused)"]
+            trunks = []
     if refused:
         out += [" same => n,NoOp(These numbers are blocked)", " same => n,Goto(busy)"]
-    elif not trunks:
+    elif not trunks and exten != "international":
         out += [" same => n,NoOp(No enabled trunk for these numbers)", " same => n,Goto(busy)"]
     for i, t in enumerate(trunks):
         out.append(f" same => n,Dial(PJSIP/{TRUNKS[t]['dial']}@{t},60)")
@@ -351,6 +427,7 @@ def _outbound_block(s: Dict[str, str], exten: str, trunks: List[str], refused: b
             # normal answer/busy/no-answer.
             out.append(' same => n,GotoIf($["${DIALSTATUS}" != "CHANUNAVAIL" & "${DIALSTATUS}" != "CONGESTION"]?done)')
     return out + [" same => n(done),Hangup()",
+                  " same => n(refused),NoOp(Refused: ${LCR})",
                   " same => n(busy),Congestion(5)",
                   " same => n,Hangup()"]
 
@@ -368,6 +445,17 @@ def build_voicemail_conf(conn) -> str:
     return "\n".join(out) + "\n"
 
 
+def _lcr_token(conn) -> str:
+    """The shared secret Asterisk sends with route checks (made once)."""
+    r = conn.execute("SELECT value FROM settings WHERE key = 'lcr_token'").fetchone()
+    if r:
+        return r["value"]
+    token = secrets.token_hex(24)
+    _set_setting(conn, "lcr_token", token)
+    conn.commit()
+    return token
+
+
 def build_portal_dialplan(conn) -> str:
     s = get_settings(conn)
     active = {r["ext"] for r in conn.execute("SELECT ext FROM extensions WHERE enabled = 1")}
@@ -379,6 +467,7 @@ def build_portal_dialplan(conn) -> str:
            f"OUTBOUND_CID={s['outbound_cid']}",
            f"MAX_OUTBOUND={s['max_outbound']}",
            f"VOXBEAM_PREFIX={s['voxbeam_prefix']}",
+           f"LCR_TOKEN={_lcr_token(conn)}",
            "",
            "; ---- Ring groups (included into from-internal) ----",
            "[portal-ringgroups]"]
@@ -408,7 +497,7 @@ def build_portal_dialplan(conn) -> str:
     out += _outbound_block(s, "s", enabled)
     for kind in NUMBER_TYPES:
         route = s.get(f"route_{kind}", "default")
-        trunks = enabled if route == "default" else [t for t in enabled if t == route]
+        trunks = enabled if route in ("default", "cheapest") else [t for t in enabled if t == route]
         out += [""] + _outbound_block(s, kind, trunks, refused=route == "off")
     out += ["",
             "; ---- Inbound: DID-specific routes, then the default ----",
@@ -630,7 +719,11 @@ def api_config():
                 "trunks_enabled": {t: s.get(f"trunk_{t}_enabled") == "1" for t in TRUNKS},
                 "inbound_default": s["inbound_default"],
                 "routes": {k: s.get(f"route_{k}", "default") for k in NUMBER_TYPES},
+                "caps": {"default": s.get("cap_default", ""), **{k: s.get(f"cap_{k}", "") for k in NUMBER_TYPES}},
+                "lcr_allow": {f"{t}{r}": s.get(f"lcr_allow_{t}{r}", "1") == "1" for t, r in ALL_ROUTES},
             },
+            "all_routes": [{"key": f"{t}{r}", "label": TRUNKS[t]["label"] + (f" {VOXBEAM_ROUTES[r]}" if r else "")}
+                           for t, r in ALL_ROUTES],
             "trunks": {k: {"label": v["label"], "host": v["host"]} for k, v in TRUNKS.items()},
             "number_types": NUMBER_TYPES,
             "voxbeam_routes": VOXBEAM_ROUTES,
@@ -1067,6 +1160,21 @@ class SettingsRequest(BaseModel):
     trunks_enabled: Dict[str, bool]
     inbound_default: str
     routes: Optional[Dict[str, str]] = None  # number type -> ROUTE_CHOICES
+    caps: Optional[Dict[str, str]] = None  # "default" or a number type -> € per minute ("" = the default)
+    lcr_allow: Optional[Dict[str, bool]] = None  # route key (irishvoip, voxbeam0011103...) -> usable for cheapest
+
+
+def _cap(value: str, what: str) -> str:
+    v = (value or "").strip().replace("€", "").replace(",", ".")
+    if not v:
+        return ""
+    try:
+        d = Decimal(v)
+    except InvalidOperation:
+        raise HTTPException(400, f"{what} must be an amount per minute, e.g. 0.05.")
+    if not 0 <= d <= 10:
+        raise HTTPException(400, f"{what} must be between €0 and €10 a minute.")
+    return format(d.normalize(), "f")
 
 
 @router.put("/settings")
@@ -1083,6 +1191,17 @@ def api_update_settings(req: SettingsRequest):
     routes = req.routes or {}
     if set(routes) - set(NUMBER_TYPES) or set(routes.values()) - set(ROUTE_CHOICES):
         raise HTTPException(400, "Unknown number type or route.")
+    caps = {}
+    for k, v in (req.caps or {}).items():
+        if k != "default" and k not in NUMBER_TYPES:
+            raise HTTPException(400, "Unknown number type for a price cap.")
+        caps[k] = _cap(v, "The default price cap" if k == "default" else f"The {NUMBER_TYPES[k].split(' (')[0]} cap")
+    if req.caps is not None and not caps.get("default"):
+        raise HTTPException(400, "Set a default price cap (e.g. 0.05). It's what stops an expensive call.")
+    allow = req.lcr_allow or {}
+    known = {f"{t}{r}" for t, r in ALL_ROUTES}
+    if set(allow) - known:
+        raise HTTPException(400, "Unknown route.")
     with _lock, get_db() as conn:
         default = _valid_target(conn, req.inbound_default)
         _set_setting(conn, "outbound_cid", cid)
@@ -1094,11 +1213,16 @@ def api_update_settings(req: SettingsRequest):
         _set_setting(conn, "inbound_default", default)
         for kind, route in routes.items():
             _set_setting(conn, f"route_{kind}", route)
+        for k, v in caps.items():
+            _set_setting(conn, f"cap_{k}", v)
+        for k, v in allow.items():
+            _set_setting(conn, f"lcr_allow_{k}", "1" if v else "0")
         conn.commit()
         enabled = [t for t in req.trunk_order if req.trunks_enabled.get(t)]
         return apply_config(conn, f"Settings: cid={cid}, max={req.max_outbound}, voxbeam={req.voxbeam_prefix}, "
                                   f"outbound order={enabled or 'NONE'}, inbound default={default}, "
-                                  f"routes={routes or 'unchanged'}")
+                                  f"routes={routes or 'unchanged'}, caps={caps or 'unchanged'}, "
+                                  f"cheapest-route use={allow or 'unchanged'}")
 
 
 @router.post("/apply")
