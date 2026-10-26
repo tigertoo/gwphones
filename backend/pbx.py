@@ -255,7 +255,17 @@ def get_db() -> sqlite3.Connection:
                token_hash TEXT PRIMARY KEY,
                ext TEXT NOT NULL,
                expires_at TEXT NOT NULL,
-               used_at TEXT);"""
+               used_at TEXT);
+           CREATE TABLE IF NOT EXISTS desk_phones (
+               mac TEXT PRIMARY KEY,
+               ext TEXT NOT NULL,
+               model TEXT NOT NULL DEFAULT '',
+               prov_pass TEXT NOT NULL,
+               admin_pass TEXT NOT NULL,
+               created_at TEXT NOT NULL,
+               last_fetch_at TEXT,
+               last_fetch_ip TEXT,
+               last_fetch_agent TEXT);"""
     )
     if fresh:
         os.chmod(PBX_DB_PATH, 0o600)  # holds SIP passwords

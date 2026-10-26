@@ -9,6 +9,7 @@ import SaveToast, { busyText } from "./SaveToast";
 const SECTIONS = [
   { key: "status", label: "Status" },
   { key: "extensions", label: "Extensions" },
+  { key: "desk", label: "Desk Phones" },
   { key: "trunks", label: "Trunks & Outbound" },
   { key: "inbound", label: "Inbound & Ring Groups" },
   { key: "billing", label: "Billing" },
@@ -84,6 +85,7 @@ export default function PbxPanel({ apiBase }) {
       [/reset-password$/, "Setting a new password and applying it…"],
       [/reset-voicemail-pin$/, "Setting a new voicemail PIN…"],
       [/^\/apply$/, "Applying to the phone system…"],
+      [/^\/desk-phones/, method === "DELETE" ? "Removing the phone…" : "Saving the desk phone…"],
     ]).replace(/^Saving…$/, "Saving and applying to the phone system…").replace(/^Deleting…$/, "Deleting and applying…") });
     try {
       const res = await fetch(`${apiBase}/api/pbx${path}`, {
@@ -138,6 +140,7 @@ export default function PbxPanel({ apiBase }) {
 
       {section === "status" && <StatusSection {...props} />}
       {section === "extensions" && <ExtensionsSection {...props} />}
+      {section === "desk" && <DeskPhonesSection {...props} />}
       {section === "trunks" && <TrunksSection {...props} />}
       {section === "inbound" && <InboundSection {...props} />}
       {section === "billing" && <BillingPanel apiBase={apiBase} />}
@@ -611,6 +614,156 @@ function ExtensionsSection({ config, status, send, busy, apiBase, reload }) {
           })}
         </tbody>
       </table>
+    </section>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Desk phones (Yealink, via RPS)
+// ---------------------------------------------------------------------------
+
+function DeskPhonesSection({ config, send, busy, apiBase }) {
+  const [data, setData] = useState(null);
+  const [draft, setDraft] = useState({ mac: "", ext: "", model: "" });
+  const [open, setOpen] = useState(null); // mac whose RPS details are showing
+  const extName = (n) => config.extensions.find((e) => e.ext === n)?.name || "?";
+
+  const load = useCallback(async () => {
+    const res = await fetch(`${apiBase}/api/pbx/desk-phones`);
+    if (res.ok) setData(await res.json());
+  }, [apiBase]);
+  useEffect(() => { load(); }, [load]);
+
+  const act = async (method, path, body, text) => {
+    const result = await send(method, path, body, text);
+    await load();
+    return result;
+  };
+
+  const add = async (e) => {
+    e.preventDefault();
+    const mac = draft.mac.replace(/[\s:.-]/g, "").toLowerCase();
+    if (await act("POST", "/desk-phones", { ...draft, ext: draft.ext || config.extensions[0]?.ext || "" },
+      "Phone added. Now add it in Yealink RPS with the details below.")) {
+      setDraft({ mac: "", ext: "", model: "" });
+      setOpen(mac);
+    }
+  };
+
+  if (!data) return <section className="panel"><p className="panel-empty">Loading…</p></section>;
+
+  return (
+    <section className="panel">
+      <h2>Desk phones (Yealink)</h2>
+      {!data.ready && (
+        <p className="pbx-hint">Set PBX_PROVISION_BASE_URL and PBX_PUBLIC_HOST in the dashboard's .env first.</p>
+      )}
+      <p className="pbx-hint">
+        Add the phone here, then in Yealink RPS add its MAC with a server using the URL, username and password shown
+        for it. Out of the box (or after a factory reset) the phone sets itself up, then checks for changes every{" "}
+        {data.repeat_minutes} minutes and whenever it restarts. Best on its own extension: check your aor-ext
+        template allows more than one phone before sharing one with an app.
+      </p>
+      <form className="idea-form-row pbx-add-row" onSubmit={add}>
+        <input
+          className="idea-input"
+          placeholder="MAC, e.g. 80:5E:C0:12:34:56"
+          value={draft.mac}
+          onChange={(e) => setDraft({ ...draft, mac: e.target.value })}
+        />
+        <select
+          className="idea-select pbx-select"
+          value={draft.ext || config.extensions[0]?.ext || ""}
+          onChange={(e) => setDraft({ ...draft, ext: e.target.value })}
+        >
+          {config.extensions.map((e) => <option key={e.ext} value={e.ext}>{e.ext} {e.name}</option>)}
+        </select>
+        <input
+          className="idea-input pbx-num-input"
+          placeholder="Model"
+          list="pbx-yealink-models"
+          value={draft.model}
+          onChange={(e) => setDraft({ ...draft, model: e.target.value })}
+        />
+        <datalist id="pbx-yealink-models">
+          {data.models.map((m) => <option key={m} value={m} />)}
+        </datalist>
+        <button className="ticket-action-btn ticket-action-btn-primary" disabled={busy || !draft.mac.trim()}>Add phone</button>
+      </form>
+
+      {data.phones.length === 0 ? (
+        <p className="panel-empty">No desk phones yet.</p>
+      ) : (
+        <table className="users-table">
+          <thead><tr><th>MAC</th><th>Model</th><th>Extension</th><th>Last check</th><th>Actions</th></tr></thead>
+          <tbody>
+            {data.phones.flatMap((p) => {
+              const rows = [
+                <tr key={p.mac}>
+                  <td><code>{p.mac_pretty}</code></td>
+                  <td>{p.model || "—"}</td>
+                  <td>
+                    <select
+                      className="idea-select pbx-select"
+                      value={p.ext}
+                      disabled={busy}
+                      onChange={(e) => act("PUT", `/desk-phones/${p.mac}`, { ext: e.target.value, model: p.model },
+                        `Phone ${p.mac_pretty} is now extension ${e.target.value}. It picks this up within ${data.repeat_minutes} minutes.`)}
+                    >
+                      {config.extensions.map((e) => <option key={e.ext} value={e.ext}>{e.ext} {e.name}</option>)}
+                      {!config.extensions.some((e) => e.ext === p.ext) && <option value={p.ext}>{p.ext} (deleted)</option>}
+                    </select>
+                    {config.extensions.some((e) => e.ext === p.ext) || <div className="pbx-hint">Logged out: extension gone</div>}
+                  </td>
+                  <td>
+                    {p.last_fetch_at ? (
+                      <span title={p.last_fetch_agent || ""}>{new Date(p.last_fetch_at).toLocaleString()}<br />
+                        <span className="pbx-hint">from {p.last_fetch_ip}</span></span>
+                    ) : <span className="pbx-hint">Never</span>}
+                  </td>
+                  <td className="pbx-actions">
+                    <button className="ticket-action-btn" onClick={() => setOpen(open === p.mac ? null : p.mac)}>
+                      {open === p.mac ? "Hide details" : "RPS details"}
+                    </button>
+                    <a className="ticket-action-btn" href={`${apiBase}/api/pbx/desk-phones/${p.mac}/config.cfg`}
+                      target="_blank" rel="noreferrer">View config</a>
+                    <button
+                      className="ticket-action-btn"
+                      disabled={busy}
+                      onClick={() => window.confirm(`Make a new provisioning password for ${p.mac_pretty}? The phone can't fetch changes until RPS has the new one and the phone is factory-reset.`) &&
+                        act("POST", `/desk-phones/${p.mac}/new-password`, null, "New password made. Update it in RPS, then factory-reset the phone.")}
+                    >New password</button>
+                    <button
+                      className="ticket-action-btn idea-delete-btn"
+                      disabled={busy}
+                      onClick={() => window.confirm(`Remove phone ${p.mac_pretty} (extension ${p.ext} ${extName(p.ext)})? It keeps its last settings until it's reset.`) &&
+                        act("DELETE", `/desk-phones/${p.mac}`, null, `Phone ${p.mac_pretty} removed. Remove it in RPS too, and give extension ${p.ext} a new password if the phone has left your hands.`)}
+                    >Remove</button>
+                  </td>
+                </tr>,
+              ];
+              if (open === p.mac) {
+                rows.push(
+                  <tr key={`${p.mac}-rps`}>
+                    <td colSpan={5} className="ticket-action-panel">
+                      <div className="ticket-action-label">In Yealink RPS, add a server with these, then add MAC {p.mac_pretty} to it:</div>
+                      <CopyField label="Server URL" value={data.server_url} />
+                      <CopyField label="Username" value={p.username} />
+                      <CopyField label="Password" value={p.password} />
+                      <div className="ticket-action-label">The phone's web page (Status/Settings) login, set by the config:</div>
+                      <CopyField label="User" value="admin" />
+                      <CopyField label="Password" value={p.admin_password} />
+                      <p className="pbx-hint">To try it without RPS: on the phone's web page, Settings → Auto Provision, enter the
+                        same URL, username and password, then Auto Provision Now.</p>
+                    </td>
+                  </tr>
+                );
+              }
+              return rows;
+            })}
+          </tbody>
+        </table>
+      )}
     </section>
   );
 }
