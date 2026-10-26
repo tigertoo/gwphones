@@ -1016,13 +1016,14 @@ function InboundSection({ config, send, busy }) {
 // routing, ticks and caps, from the current rate sheets.
 const COVERAGE_STATUS = { available: "Available", partly: "Partly", unavailable: "Unavailable" };
 
+const NO_FILTERS = { destination: "", status: "", prefix: "", route: "", maxPrice: "", why: "" };
+
 function Coverage({ apiBase, numberTypes }) {
   const [kind, setKind] = useState("international");
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
-  const [search, setSearch] = useState("");
-  const [only, setOnly] = useState(""); // "" | "blocked"
+  const [f, setF] = useState(NO_FILTERS);
 
   const load = async () => {
     setLoading(true);
@@ -1033,10 +1034,19 @@ function Coverage({ apiBase, numberTypes }) {
     if (res.ok) setData(d); else setError(d.detail || `Error ${res.status}`);
   };
 
-  const q = search.trim().toLowerCase();
+  const set = (k) => (e) => setF({ ...f, [k]: e.target.value });
+  const has = (text, q) => text.toLowerCase().includes(q.trim().toLowerCase());
+  const prefix = f.prefix.trim().replace(/^\+/, "").replace(/\s/g, "");
+  const max = parseFloat(f.maxPrice.replace(",", "."));
   const rows = (data?.rows || []).filter((r) =>
-    (!q || r.destination.toLowerCase().includes(q) || r.sample.some((p) => p.startsWith(q.replace(/^\+/, ""))))
-    && (!only || r.status !== "available"));
+    (!f.destination.trim() || has(r.destination, f.destination))
+    && (!f.status || (f.status === "blocked" ? r.status !== "available" : r.status === f.status))
+    && (!prefix || r.all_prefixes.some((p) => p.startsWith(prefix)))
+    && (!f.route || r.routes.includes(f.route))
+    && (Number.isNaN(max) || (r.per_min != null && parseFloat(r.per_min) <= max))
+    && (!f.why.trim() || has(r.why.join(" "), f.why)));
+  const routes = [...new Set((data?.rows || []).flatMap((r) => r.routes))].sort();
+  const filtered = JSON.stringify(f) !== JSON.stringify(NO_FILTERS);
   const LIMIT = 400;
 
   return (
@@ -1065,22 +1075,44 @@ function Coverage({ apiBase, numberTypes }) {
             </span>
           </p>
           <div className="idea-form-row">
-            <input className="idea-input" placeholder="Search a destination or prefix" value={search} onChange={(e) => setSearch(e.target.value)} />
-            <label className="pbx-toggle">
-              <input type="checkbox" checked={only === "blocked"} onChange={(e) => setOnly(e.target.checked ? "blocked" : "")} />
-              Only partly or unavailable
-            </label>
-            <span className="pbx-hint">{rows.length.toLocaleString()} shown{rows.length > LIMIT ? ` (first ${LIMIT}; search to narrow)` : ""}</span>
+            <span className="pbx-hint">
+              {rows.length.toLocaleString()} of {data.rows.length.toLocaleString()} destinations
+              {rows.length > LIMIT ? ` (first ${LIMIT} shown; filter to narrow)` : ""}
+            </span>
+            {filtered && <button className="ticket-action-btn" onClick={() => setF(NO_FILTERS)}>Clear filters</button>}
           </div>
-          <table className="users-table">
-            <thead><tr><th>Destination</th><th>Status</th><th>Prefixes</th><th>Route</th><th>€/min</th><th>Why not</th></tr></thead>
+          <table className="users-table pbx-coverage">
+            <thead>
+              <tr><th>Destination</th><th>Status</th><th>Prefixes</th><th>Route</th><th>€/min</th><th>Why not</th></tr>
+              <tr className="pbx-filter-row">
+                <th><input className="idea-input" placeholder="Filter" value={f.destination} onChange={set("destination")} /></th>
+                <th>
+                  <select className="idea-select" value={f.status} onChange={set("status")}>
+                    <option value="">All</option>
+                    <option value="available">Available</option>
+                    <option value="partly">Partly</option>
+                    <option value="unavailable">Unavailable</option>
+                    <option value="blocked">Not fully available</option>
+                  </select>
+                </th>
+                <th><input className="idea-input" placeholder="Starts with" value={f.prefix} onChange={set("prefix")} /></th>
+                <th>
+                  <select className="idea-select" value={f.route} onChange={set("route")}>
+                    <option value="">All</option>
+                    {routes.map((r) => <option key={r} value={r}>{r}</option>)}
+                  </select>
+                </th>
+                <th><input className="idea-input" placeholder="Up to" inputMode="decimal" value={f.maxPrice} onChange={set("maxPrice")} /></th>
+                <th><input className="idea-input" placeholder="Filter" value={f.why} onChange={set("why")} /></th>
+              </tr>
+            </thead>
             <tbody>
               {rows.slice(0, LIMIT).map((r) => (
                 <tr key={r.destination}>
                   <td>{r.destination}</td>
                   <td><span className={`pbx-bill-status pbx-bill-${r.status === "available" ? "rated" : r.status === "partly" ? "provisional" : "unrated"}`}>
                     {COVERAGE_STATUS[r.status]}</span></td>
-                  <td title={r.sample.map((p) => `+${p}`).join(", ")}>
+                  <td title={r.all_prefixes.slice(0, 20).map((p) => `+${p}`).join(", ") + (r.all_prefixes.length > 20 ? "…" : "")}>
                     {r.available}{r.blocked ? ` of ${r.available + r.blocked}` : ""}
                     <span className="pbx-hint"> (+{r.sample[0]}{r.available + r.blocked > 1 ? "…" : ""})</span>
                   </td>
@@ -1089,6 +1121,7 @@ function Coverage({ apiBase, numberTypes }) {
                   <td className="pbx-hint">{r.why.join("; ")}</td>
                 </tr>
               ))}
+              {!rows.length && <tr><td colSpan={6} className="panel-empty">No destinations match these filters.</td></tr>}
             </tbody>
           </table>
         </>

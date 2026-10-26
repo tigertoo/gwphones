@@ -925,3 +925,9 @@
   from { transform: translateX(-100%); }
   to { transform: translateX(290%); }
 }
+.pbx-filter-row th { padding-top: 0; font-weight: normal; }
+.pbx-filter-row .idea-input,
+.pbx-filter-row .idea-select { width: 100%; min-width: 0; padding: 4px 6px; font-size: 12px; }
+.pbx-coverage th:nth-child(1) { width: 22%; }
+.pbx-coverage th:nth-child(2) { width: 11%; }
+.pbx-coverage th:nth-child(5) { width: 9%; }

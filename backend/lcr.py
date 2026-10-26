@@ -307,7 +307,10 @@ def api_coverage(kind: str = "international"):
     if kind not in NUMBER_TYPES:
         raise HTTPException(400, "Unknown number type.")
     result = coverage(kind)
-    return {**result, "rows": [{k: v for k, v in r.items() if not k.startswith("_")} for r in result["rows"]]}
+    # Every prefix goes along for the prefix filter: about 0.5 MB for 54,000.
+    return {**result, "rows": [{**{k: v for k, v in r.items() if not k.startswith("_")},
+                                "all_prefixes": [x[0] for x in r["_prefixes"]] + r["_blocked"]}
+                               for r in result["rows"]]}
 
 
 @router.get("/coverage.csv")
