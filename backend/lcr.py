@@ -183,3 +183,148 @@ def _last_outbound() -> Optional[str]:
         return r["t"] if r else None
     except sqlite3.Error:
         return None
+
+
+# ---------------------------------------------------------------------------
+# Coverage: which destinations a number type can call right now
+#
+# The same rules as decide(), applied to every prefix in the candidate
+# routes' current rate sheets at once (in memory, not one query per
+# prefix), grouped by the sheets' destination names.
+# ---------------------------------------------------------------------------
+
+IRISH_MOBILE = ("35383", "35385", "35386", "35387", "35389")
+IRISH_FREEPHONE = ("3531800",)
+
+
+def _probes(kind: str, prefixes: set) -> set:
+    """The prefixes to check for a number type. Irish ranges are checked
+    as themselves too (35387...), since a sheet may only have a broader
+    prefix (3538, or just 353) that covers them."""
+    if kind == "international":
+        return {p for p in prefixes if not p.startswith("353") and not "353".startswith(p)}
+    if kind == "landline":
+        return {p for p in prefixes if p.startswith("353") and not p.startswith(IRISH_MOBILE + IRISH_FREEPHONE)}
+    bases = IRISH_MOBILE if kind == "mobile" else IRISH_FREEPHONE
+    return {p for p in prefixes if p.startswith(bases)} | {b for b in bases if any(b.startswith(p) for p in prefixes)}
+_coverage_cache: dict = {}
+
+
+def _route_rows(conn, trunk: str, route: str, at: str) -> dict:
+    """prefix -> (destination, per-minute micro-units, currency, conn, bill,
+    fee) from the sheet in force at `at`, as rate_for() would price them."""
+    sheet = billing._sheet_for(conn, trunk, route, at)
+    if not sheet:
+        return {}
+    out = {}
+    for r in conn.execute("SELECT * FROM rates WHERE sheet_id = ?", (sheet["id"],)):
+        rate = r["rate_micro"]
+        if r["change_at"] and at < r["change_at"] and r["rate_before_micro"] is not None:
+            rate = r["rate_before_micro"]
+        out[r["prefix"]] = (r["destination"] or "", rate, r["currency"], r["conn_unit"], r["bill_unit"], r["conn_fee_micro"])
+    return out
+
+
+def coverage(kind: str) -> dict:
+    from pbx import DEFAULT_SETTINGS
+    s = {**DEFAULT_SETTINGS, **_pbx_settings()}
+    mode = s.get(f"route_{kind}", "default")
+    cap_text = s.get(f"cap_{kind}") or s.get("cap_default") or ""
+    cap = to_micro(Decimal(cap_text)) if cap_text else None
+    candidates = lcr_routes(s, mode) if mode != "off" else []
+    at = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    with _read(billing.BILLING_DB) as conn:
+        sheets = conn.execute("SELECT max(id) AS m, count(*) AS n FROM rate_sheets").fetchone()
+        fx = {r["currency"]: latest_fx(conn, r["currency"])
+              for r in conn.execute("SELECT DISTINCT currency FROM rates").fetchall()}
+        key = (kind, mode, cap_text, tuple(candidates), sheets["m"], sheets["n"], tuple(sorted((k, str(v)) for k, v in fx.items())))
+        if key in _coverage_cache:
+            return _coverage_cache[key]
+        tables = [(t, r, route_label(t, r), _route_rows(conn, t, r, at)) for t, r in candidates]
+    prefixes = sorted(_probes(kind, {p for *_, rows in tables for p in rows}))
+    groups = {}
+    for p in prefixes:
+        priced, reasons, name, best = [], [], "", 0
+        for t, r, label, rows in tables:
+            match = next((p[:i] for i in range(len(p), 0, -1) if p[:i] in rows), None)
+            if not match:
+                continue
+            dest, rate, cur, cu, bu, fee = rows[match]
+            if len(match) > best:  # name it after the most precise match
+                name, best = dest, len(match)
+            if not fx.get(cur):
+                continue
+            per_min = int(Decimal(rate) * fx[cur][0])
+            secs = bill_seconds(TYPICAL_SECONDS, cu, bu)
+            typical = int(((Decimal(rate) * secs / 60).quantize(Decimal(1), rounding=ROUND_CEILING) + fee) * fx[cur][0])
+            if cap is not None and per_min > cap:
+                reasons.append((per_min, label))
+                continue
+            priced.append((typical, per_min, label, dest))
+        if mode == "cheapest":
+            priced.sort()
+        g = groups.setdefault(name or f"+{p}", {"destination": name or f"+{p}", "prefixes": [], "blocked": [],
+                                                "routes": {}, "min": None, "max": None, "over": None, "unpriced": 0})
+        if priced:
+            _, per_min, label, dest = priced[0]
+            g["prefixes"].append((p, label, per_min))
+            g["routes"][label] = g["routes"].get(label, 0) + 1
+            g["min"] = per_min if g["min"] is None else min(g["min"], per_min)
+            g["max"] = per_min if g["max"] is None else max(g["max"], per_min)
+        else:
+            g["blocked"].append(p)
+            if reasons:  # keep the cheapest price that was over the cap
+                g["over"] = min(g["over"] or reasons[0], min(reasons))
+            else:
+                g["unpriced"] += 1
+    rows = []
+    for g in groups.values():
+        n_ok, n_bad = len(g["prefixes"]), len(g["blocked"])
+        rows.append({
+            "destination": g["destination"],
+            "status": "available" if not n_bad else "unavailable" if not n_ok else "partly",
+            "available": n_ok, "blocked": n_bad,
+            "sample": ([x[0] for x in g["prefixes"]] + g["blocked"])[:3],
+            "routes": sorted(g["routes"], key=lambda k: -g["routes"][k]),
+            "per_min": None if g["min"] is None else (from_micro(g["min"], 4) if g["min"] == g["max"]
+                                                       else f"{from_micro(g['min'], 4)}–{from_micro(g['max'], 4)}"),
+            "why": ([f"cheapest is €{from_micro(g['over'][0], 4)}/min on {g['over'][1]}, over the €{cap_text} cap"]
+                    if g["over"] else []) + ([f"{g['unpriced']} prefix(es) have no price on an allowed route"]
+                                             if g["unpriced"] else []),
+            "_prefixes": g["prefixes"], "_blocked": g["blocked"],
+        })
+    rows.sort(key=lambda r: r["destination"].lower())
+    result = {"kind": kind, "mode": mode, "cap": cap_text, "routes": [label for *_, label, _rows in tables],
+              "rows": rows, "totals": {st: sum(r["status"] == st for r in rows) for st in ("available", "partly", "unavailable")},
+              "prefixes": len(prefixes)}
+    _coverage_cache.clear()  # keep only the latest
+    _coverage_cache[key] = result
+    return result
+
+
+@router.get("/coverage")
+def api_coverage(kind: str = "international"):
+    if kind not in NUMBER_TYPES:
+        raise HTTPException(400, "Unknown number type.")
+    result = coverage(kind)
+    return {**result, "rows": [{k: v for k, v in r.items() if not k.startswith("_")} for r in result["rows"]]}
+
+
+@router.get("/coverage.csv")
+def api_coverage_csv(kind: str = "international"):
+    import csv
+    import io
+    from fastapi.responses import Response
+    if kind not in NUMBER_TYPES:
+        raise HTTPException(400, "Unknown number type.")
+    result = coverage(kind)
+    buf = io.StringIO()
+    w = csv.writer(buf)
+    w.writerow(["destination", "prefix", "callable", "route", "eur_per_min", "reason"])
+    for r in result["rows"]:
+        for p, label, per_min in r["_prefixes"]:
+            w.writerow([r["destination"], p, "yes", label, from_micro(per_min, 4), ""])
+        for p in r["_blocked"]:
+            w.writerow([r["destination"], p, "no", "", "", "; ".join(r["why"])])
+    return Response(buf.getvalue(), media_type="text/csv",
+                    headers={"Content-Disposition": f'attachment; filename="coverage-{kind}.csv"'})

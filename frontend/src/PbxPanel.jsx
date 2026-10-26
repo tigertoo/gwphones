@@ -729,6 +729,7 @@ function TrunksSection({ config, status, send, busy, apiBase }) {
       </div>
     </section>
     <RouteTest apiBase={apiBase} />
+    <Coverage apiBase={apiBase} numberTypes={config.number_types} />
     </>
   );
 }
@@ -1008,5 +1009,90 @@ function InboundSection({ config, send, busy }) {
         )}
       </section>
     </>
+  );
+}
+
+// Which destinations each number type can call right now, under the saved
+// routing, ticks and caps, from the current rate sheets.
+const COVERAGE_STATUS = { available: "Available", partly: "Partly", unavailable: "Unavailable" };
+
+function Coverage({ apiBase, numberTypes }) {
+  const [kind, setKind] = useState("international");
+  const [data, setData] = useState(null);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState("");
+  const [search, setSearch] = useState("");
+  const [only, setOnly] = useState(""); // "" | "blocked"
+
+  const load = async () => {
+    setLoading(true);
+    setError("");
+    const res = await fetch(`${apiBase}/api/pbx/coverage?kind=${kind}`);
+    const d = await res.json().catch(() => ({}));
+    setLoading(false);
+    if (res.ok) setData(d); else setError(d.detail || `Error ${res.status}`);
+  };
+
+  const q = search.trim().toLowerCase();
+  const rows = (data?.rows || []).filter((r) =>
+    (!q || r.destination.toLowerCase().includes(q) || r.sample.some((p) => p.startsWith(q.replace(/^\+/, ""))))
+    && (!only || r.status !== "available"));
+  const LIMIT = 400;
+
+  return (
+    <section className="panel pbx-gap">
+      <h2>Coverage</h2>
+      <div className="idea-form-row">
+        <select className="idea-select pbx-select" value={kind} onChange={(e) => { setKind(e.target.value); setData(null); }}>
+          {Object.entries(numberTypes).map(([k, label]) => <option key={k} value={k}>{label.split(" (")[0]}</option>)}
+        </select>
+        <button className="ticket-action-btn ticket-action-btn-primary" disabled={loading} onClick={load}>
+          {loading ? "Working it out…" : data ? "Refresh" : "Show coverage"}
+        </button>
+        {data && (
+          <a className="ticket-action-btn" href={`${apiBase}/api/pbx/coverage.csv?kind=${kind}`}>Download every prefix (CSV)</a>
+        )}
+        <span className="pbx-hint">Uses the saved routing, ticks and caps, and the latest rate sheets: the same rules as real calls.</span>
+      </div>
+      {error && <div className="ticket-action-result ticket-action-result-error">{error}</div>}
+      {data && (
+        <>
+          <p>
+            <b>{data.totals.available} available</b>, {data.totals.partly} partly, <b>{data.totals.unavailable} unavailable</b>
+            <span className="pbx-hint">
+              {" "}· {data.prefixes.toLocaleString()} prefixes · {data.mode === "cheapest" ? "cheapest route" : data.mode === "default" ? "trunk order" : data.mode}
+              {data.routes.length ? ` via ${data.routes.join(", ")}` : ""} · cap €{data.cap}/min
+            </span>
+          </p>
+          <div className="idea-form-row">
+            <input className="idea-input" placeholder="Search a destination or prefix" value={search} onChange={(e) => setSearch(e.target.value)} />
+            <label className="pbx-toggle">
+              <input type="checkbox" checked={only === "blocked"} onChange={(e) => setOnly(e.target.checked ? "blocked" : "")} />
+              Only partly or unavailable
+            </label>
+            <span className="pbx-hint">{rows.length.toLocaleString()} shown{rows.length > LIMIT ? ` (first ${LIMIT}; search to narrow)` : ""}</span>
+          </div>
+          <table className="users-table">
+            <thead><tr><th>Destination</th><th>Status</th><th>Prefixes</th><th>Route</th><th>€/min</th><th>Why not</th></tr></thead>
+            <tbody>
+              {rows.slice(0, LIMIT).map((r) => (
+                <tr key={r.destination}>
+                  <td>{r.destination}</td>
+                  <td><span className={`pbx-bill-status pbx-bill-${r.status === "available" ? "rated" : r.status === "partly" ? "provisional" : "unrated"}`}>
+                    {COVERAGE_STATUS[r.status]}</span></td>
+                  <td title={r.sample.map((p) => `+${p}`).join(", ")}>
+                    {r.available}{r.blocked ? ` of ${r.available + r.blocked}` : ""}
+                    <span className="pbx-hint"> (+{r.sample[0]}{r.available + r.blocked > 1 ? "…" : ""})</span>
+                  </td>
+                  <td>{r.routes.join(", ") || "—"}</td>
+                  <td>{r.per_min ?? "—"}</td>
+                  <td className="pbx-hint">{r.why.join("; ")}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </>
+      )}
+    </section>
   );
 }
