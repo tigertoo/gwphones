@@ -29,7 +29,6 @@ markup (the default, or their own), for calls and for the phone numbers
 Calls from extensions no customer has are shown as "Not assigned".
 """
 
-import base64
 import csv
 import io
 import os
@@ -38,11 +37,12 @@ import sqlite3
 import threading
 from datetime import date, datetime, time as dtime, timedelta, timezone
 from decimal import Decimal, InvalidOperation, ROUND_CEILING, ROUND_HALF_UP
+from functools import lru_cache
 from typing import Dict, List, Optional
 from zoneinfo import ZoneInfo
 
 import httpx
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import Response
 from pydantic import BaseModel
 
@@ -432,10 +432,51 @@ FIELDS = {  # field: (what it is, required, header words that suggest it)
 }
 
 
+SHEET_SUFFIXES = (".csv", ".tsv", ".txt", ".xlsx")
+MAX_UNPACKED_BYTES = 100 * 1024 * 1024
+
+
+def _unpack(content: bytes) -> bytes:
+    """The rate sheet inside a .zip or .gz, as providers send them. An .xlsx
+    is itself a zip, so it's passed through as it is."""
+    import gzip
+    import zipfile
+    if content[:2] == b"\x1f\x8b":
+        try:
+            with gzip.GzipFile(fileobj=io.BytesIO(content)) as g:
+                data = g.read(MAX_UNPACKED_BYTES + 1)
+        except OSError:
+            raise HTTPException(400, "Couldn't unpack that .gz file.")
+        if len(data) > MAX_UNPACKED_BYTES:
+            raise HTTPException(400, "The unpacked sheet is over 100 MB.")
+        return data
+    if content[:2] != b"PK":
+        return content
+    try:
+        zf = zipfile.ZipFile(io.BytesIO(content))
+    except zipfile.BadZipFile:
+        raise HTTPException(400, "Couldn't open that .zip file.")
+    names = zf.namelist()
+    if "[Content_Types].xml" in names:
+        return content  # an .xlsx
+    sheets = [i for i in zf.infolist() if not i.is_dir() and i.filename.lower().endswith(SHEET_SUFFIXES)
+              and not i.filename.startswith("__MACOSX/")]
+    if not sheets:
+        raise HTTPException(400, "That .zip has no CSV, tab-separated or Excel (.xlsx) file in it.")
+    if len(sheets) > 1:
+        raise HTTPException(400, "That .zip has more than one sheet in it: "
+                                 + ", ".join(i.filename for i in sheets[:5]) + ". Upload the one you want on its own.")
+    if sheets[0].file_size > MAX_UNPACKED_BYTES:
+        raise HTTPException(400, "The unpacked sheet is over 100 MB.")
+    return zf.read(sheets[0])
+
+
 def read_sheet(content: bytes, filename: str) -> List[List[str]]:
-    """All rows as strings, header first, from CSV/TSV/semicolon or Excel."""
+    """All rows as strings, header first, from CSV/TSV/semicolon or Excel,
+    as they are or inside a .zip or .gz."""
     if len(content) > MAX_SHEET_BYTES:
         raise HTTPException(400, "That file is over 20 MB.")
+    content = _unpack(content)
     if content[:2] == b"PK":  # .xlsx is a zip
         try:
             import openpyxl
@@ -492,6 +533,7 @@ def guess_mapping(header: List[str]) -> Dict[str, Optional[int]]:
 DATE_FORMATS = ("%d-%b-%Y", "%Y-%m-%d", "%d/%m/%Y", "%d.%m.%Y", "%d-%m-%Y", "%Y/%m/%d", "%d %b %Y", "%d-%B-%Y")
 
 
+@lru_cache(maxsize=4096)  # a sheet has a handful of distinct dates on tens of thousands of lines
 def _parse_datetime(day: str, clock: str = "") -> Optional[str]:
     """A sheet's date (+ time) as UTC ISO; providers publish in UTC/GMT."""
     day = (day or "").strip()
@@ -600,55 +642,93 @@ def parse_rates(rows, mapping: Dict[str, Optional[int]], defaults: SheetDefaults
     return list(rates.values()), stats
 
 
-class SheetRequest(BaseModel):
-    trunk: str
-    route: str = ""
-    filename: str
-    content_b64: str
-    mapping: Optional[Dict[str, Optional[int]]] = None
-    defaults: SheetDefaults = SheetDefaults()
+# A sheet is uploaded once, as it is (raw bytes, not base64), and kept
+# here once read, so changing a column choice or importing doesn't send it
+# again. Kept 30 minutes; only the last few.
+UPLOAD_TTL = 30 * 60
+_uploads: Dict[str, dict] = {}
 
 
-def _read_request(req: SheetRequest):
-    if req.trunk not in TRUNKS:
+def _route_check(trunk: str, route: str):
+    if trunk not in TRUNKS:
         raise HTTPException(400, "Unknown trunk.")
-    if req.trunk == "voxbeam" and req.route not in VOXBEAM_ROUTES:
+    if trunk == "voxbeam" and route not in VOXBEAM_ROUTES:
         raise HTTPException(400, "Choose which Voxbeam route this sheet is for.")
-    if req.trunk != "voxbeam" and req.route:
-        raise HTTPException(400, f"{TRUNKS[req.trunk]['label']} has no routes.")
-    try:
-        content = base64.b64decode(req.content_b64, validate=True)
-    except ValueError:
-        raise HTTPException(400, "The file didn't upload properly.")
-    return read_sheet(content, req.filename)
+    if trunk != "voxbeam" and route:
+        raise HTTPException(400, f"{TRUNKS[trunk]['label']} has no routes.")
 
 
-@router.post("/rate-sheets/preview")
-def api_preview_sheet(req: SheetRequest):
-    rows = _read_request(req)
-    mapping = req.mapping
+def _upload(upload_id: str) -> dict:
+    import time
+    for k in [k for k, u in _uploads.items() if time.time() - u["at"] > UPLOAD_TTL]:
+        _uploads.pop(k, None)
+    u = _uploads.get(upload_id)
+    if not u:
+        raise HTTPException(410, "That upload has expired. Choose the file again.")
+    return u
+
+
+def _preview(u: dict, mapping, defaults: "SheetDefaults", read_seconds: Optional[float] = None) -> dict:
+    import json
+    rows = u["rows"]
     if mapping is None:
         with get_db() as conn:
-            saved = conn.execute("SELECT mapping, defaults FROM mappings WHERE trunk = ?", (req.trunk,)).fetchone()
-        import json
+            saved = conn.execute("SELECT mapping, defaults FROM mappings WHERE trunk = ?", (u["trunk"],)).fetchone()
         mapping = json.loads(saved["mapping"]) if saved else guess_mapping(rows[0])
         if saved and any(v is not None and v >= len(rows[0]) for v in mapping.values()):
             mapping = guess_mapping(rows[0])  # this sheet's layout differs from last time
         if saved and saved["defaults"]:
-            req.defaults = SheetDefaults(**json.loads(saved["defaults"]))
+            defaults = SheetDefaults(**json.loads(saved["defaults"]))
     try:
-        _, stats = parse_rates(rows, mapping, req.defaults)
+        _, stats = parse_rates(rows, mapping, defaults)
     except HTTPException as e:
         stats = {"problem": e.detail}
-    return {"columns": rows[0], "sample": rows[1:6], "mapping": mapping, "stats": stats,
-            "defaults": req.defaults.model_dump(),
-            "fields": {k: {"label": v[0], "required": v[1]} for k, v in FIELDS.items()}}
+    out = {"upload_id": u["id"], "filename": u["filename"], "columns": rows[0], "sample": rows[1:6],
+           "mapping": mapping, "stats": stats, "defaults": defaults.model_dump(),
+           "fields": {k: {"label": v[0], "required": v[1]} for k, v in FIELDS.items()}}
+    if read_seconds is not None:
+        out["read_seconds"] = read_seconds
+    return out
+
+
+@router.post("/rate-sheets/upload")
+async def api_upload_sheet(request: Request, trunk: str, filename: str, route: str = ""):
+    """The file itself is the request body."""
+    import asyncio
+    import secrets as _secrets
+    import time
+    _route_check(trunk, route)
+    if int(request.headers.get("content-length") or 0) > MAX_SHEET_BYTES:
+        raise HTTPException(400, "That file is over 20 MB.")
+    content = await request.body()
+    started = time.time()
+    rows = await asyncio.to_thread(read_sheet, content, filename)
+    upload_id = _secrets.token_urlsafe(12)
+    while len(_uploads) >= 4:  # keep memory bounded: drop the oldest
+        _uploads.pop(min(_uploads, key=lambda k: _uploads[k]["at"]))
+    _uploads[upload_id] = {"id": upload_id, "trunk": trunk, "route": route, "filename": filename[:120],
+                           "rows": rows, "at": time.time()}
+    preview = await asyncio.to_thread(_preview, _uploads[upload_id], None, SheetDefaults())
+    preview["read_seconds"] = round(time.time() - started, 1)  # reading and checking the lines
+    return preview
+
+
+class SheetRequest(BaseModel):
+    upload_id: str
+    mapping: Optional[Dict[str, Optional[int]]] = None
+    defaults: SheetDefaults = SheetDefaults()
+
+
+@router.post("/rate-sheets/preview")
+def api_preview_sheet(req: SheetRequest):
+    return _preview(_upload(req.upload_id), req.mapping, req.defaults)
 
 
 @router.post("/rate-sheets")
 def api_import_sheet(req: SheetRequest):
     import json
-    rows = _read_request(req)
+    u = _upload(req.upload_id)
+    rows = u["rows"]
     if req.mapping is None:
         raise HTTPException(400, "Preview the sheet first.")
     rates, stats = parse_rates(rows, req.mapping, req.defaults)
@@ -659,7 +739,7 @@ def api_import_sheet(req: SheetRequest):
         valid_to = stats["expiry_dates"][1] if stats["expiry_dates"] else None
         cur = conn.execute("INSERT INTO rate_sheets (trunk, route, filename, uploaded_at, rows, valid_from, valid_to, "
                            "currencies, rate_unit, vat_pct) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                           (req.trunk, req.route, req.filename[:120], _now(), len(rates), valid_from, valid_to,
+                           (u["trunk"], u["route"], u["filename"][:120], _now(), len(rates), valid_from, valid_to,
                             ",".join(sorted(stats["currencies"])), req.defaults.rate_unit, req.defaults.vat_pct or "0"))
         sheet_id = cur.lastrowid
         conn.executemany("INSERT INTO rates (sheet_id, prefix, destination, rate_micro, rate_before_micro, change_at, "
@@ -667,11 +747,12 @@ def api_import_sheet(req: SheetRequest):
                          [(sheet_id, *r) for r in rates])
         conn.execute("INSERT INTO mappings (trunk, mapping, defaults) VALUES (?, ?, ?) ON CONFLICT(trunk) DO UPDATE SET "
                      "mapping = excluded.mapping, defaults = excluded.defaults",
-                     (req.trunk, json.dumps(req.mapping), json.dumps(req.defaults.model_dump())))
+                     (u["trunk"], json.dumps(req.mapping), json.dumps(req.defaults.model_dump())))
         conn.commit()
-    changes_log.info(f"Uploaded rate sheet {req.filename} for {req.trunk} {req.route}: {len(rates)} rates")
+    changes_log.info(f"Uploaded rate sheet {u['filename']} for {u['trunk']} {u['route']}: {len(rates)} rates")
     repriced = rate_calls("status IN ('unrated', 'provisional', 'rated') AND trunk = ? AND route = ?",
-                          (req.trunk, req.route))
+                          (u["trunk"], u["route"]))
+    _uploads.pop(u["id"], None)
     return {"ok": True, "sheet_id": sheet_id, "stats": stats,
             "messages": [f"{len(rates):,} rates imported. {repriced} call(s) re-priced."]}
 

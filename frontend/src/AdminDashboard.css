@@ -903,3 +903,24 @@
   color: var(--text);
   margin-bottom: 6px;
 }
+.pbx-progress-wrap { margin: 12px 0; max-width: 520px; }
+.pbx-progress-label { font-size: 13px; margin-bottom: 4px; }
+.pbx-progress {
+  height: 8px;
+  border-radius: 4px;
+  background: rgba(127, 127, 127, 0.2);
+  overflow: hidden;
+}
+.pbx-progress-bar {
+  height: 100%;
+  background: var(--ok);
+  transition: width 0.2s;
+}
+.pbx-progress-busy {
+  width: 35%;
+  animation: pbx-progress-slide 1.2s ease-in-out infinite;
+}
+@keyframes pbx-progress-slide {
+  from { transform: translateX(-100%); }
+  to { transform: translateX(290%); }
+}

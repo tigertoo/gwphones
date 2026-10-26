@@ -18,13 +18,40 @@ function thisMonth() {
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`;
 }
 
-function readAsBase64(file) {
+// Sends a file as the request body with XMLHttpRequest, which (unlike
+// fetch) reports upload progress: onProgress(percent), then
+// onProgress(null) once it's all sent and the server is reading it.
+function sendFile(url, file, onProgress) {
   return new Promise((resolve, reject) => {
-    const r = new FileReader();
-    r.onload = () => resolve(String(r.result).split(",", 2)[1] || "");
-    r.onerror = () => reject(r.error);
-    r.readAsDataURL(file);
+    const xhr = new XMLHttpRequest();
+    xhr.open("POST", url);
+    xhr.setRequestHeader("Content-Type", "application/octet-stream");
+    xhr.upload.onprogress = (e) => { if (e.lengthComputable) onProgress(Math.round((e.loaded / e.total) * 100)); };
+    xhr.upload.onload = () => onProgress(null);
+    xhr.onload = () => {
+      let data = {};
+      try { data = JSON.parse(xhr.responseText); } catch { /* not JSON */ }
+      if (xhr.status >= 200 && xhr.status < 300) resolve(data);
+      else reject(new Error(data.detail || `Error ${xhr.status}`));
+    };
+    xhr.onerror = () => reject(new Error("The upload failed. Check your connection and try again."));
+    xhr.send(file);
   });
+}
+
+function Progress({ progress }) {
+  if (!progress) return null;
+  const known = typeof progress.pct === "number";
+  return (
+    <div className="pbx-progress-wrap">
+      <div className="pbx-progress-label">
+        {progress.label}{known ? ` ${progress.pct}%` : "…"}
+      </div>
+      <div className="pbx-progress">
+        <div className={`pbx-progress-bar ${known ? "" : "pbx-progress-busy"}`} style={known ? { width: `${progress.pct}%` } : undefined} />
+      </div>
+    </div>
+  );
 }
 
 export default function BillingPanel({ apiBase }) {
@@ -129,7 +156,7 @@ export default function BillingPanel({ apiBase }) {
       <MonthlySummary apiBase={apiBase} api={api} month={month} version={version} />
       <Statements apiBase={apiBase} api={api} run={run} busy={busy} month={month} version={version} />
       <CustomersAndNumbers api={api} run={run} busy={busy} version={version} />
-      <RateSheets overview={overview} run={run} api={api} busy={busy} setResult={setResult} />
+      <RateSheets apiBase={apiBase} overview={overview} run={run} api={api} busy={busy} setResult={setResult} />
 
       <section className="panel pbx-gap">
         <h2>Calls</h2>
@@ -207,37 +234,45 @@ function PricingTrace({ call: c, sheet }) {
   );
 }
 
-function RateSheets({ overview, run, api, busy, setResult }) {
-  const [upload, setUpload] = useState(null); // { route, file, b64, preview, mapping, defaults }
+function RateSheets({ apiBase, overview, run, api, busy, setResult }) {
+  const [upload, setUpload] = useState(null); // { trunk, route, file, preview, mapping, defaults, uploadSeconds }
+  const [progress, setProgress] = useState(null); // { label, pct } while uploading or importing
 
   const choose = async (routeKey, file) => {
     if (!file) return;
     const [trunk, route] = routeKey.split("|");
+    setUpload(null);
+    setProgress({ label: `Uploading ${file.name}`, pct: 0 });
+    const started = Date.now();
     try {
-      const b64 = await readAsBase64(file);
-      const preview = await api("POST", "/rate-sheets/preview", { trunk, route, filename: file.name, content_b64: b64 });
-      setUpload({ trunk, route, file, b64, preview, mapping: preview.mapping, defaults: preview.defaults });
+      const q = new URLSearchParams({ trunk, route, filename: file.name });
+      const preview = await sendFile(`${apiBase}/api/billing/rate-sheets/upload?${q}`, file, (pct) =>
+        setProgress(pct === null ? { label: "Reading the sheet" } : { label: `Uploading ${file.name}`, pct }));
+      const total = (Date.now() - started) / 1000;
+      setUpload({ trunk, route, file, preview, mapping: preview.mapping, defaults: preview.defaults,
+        uploadSeconds: Math.max(0, total - (preview.read_seconds || 0)).toFixed(1) });
     } catch (e) {
       setResult({ ok: false, text: e.message });
+    } finally {
+      setProgress(null);
     }
   };
 
   const remap = async (mapping, defaults = upload.defaults) => {
     try {
-      const preview = await api("POST", "/rate-sheets/preview", {
-        trunk: upload.trunk, route: upload.route, filename: upload.file.name, content_b64: upload.b64, mapping, defaults,
-      });
-      setUpload({ ...upload, preview, mapping, defaults });
+      const preview = await api("POST", "/rate-sheets/preview", { upload_id: upload.preview.upload_id, mapping, defaults });
+      setUpload({ ...upload, preview: { ...preview, read_seconds: upload.preview.read_seconds }, mapping, defaults });
     } catch (e) {
       setResult({ ok: false, text: e.message });
     }
   };
 
   const doImport = async () => {
+    setProgress({ label: `Importing ${upload.preview.stats.imported.toLocaleString()} rates and re-pricing calls` });
     const data = await run("POST", "/rate-sheets", {
-      trunk: upload.trunk, route: upload.route, filename: upload.file.name, content_b64: upload.b64,
-      mapping: upload.mapping, defaults: upload.defaults,
+      upload_id: upload.preview.upload_id, mapping: upload.mapping, defaults: upload.defaults,
     });
+    setProgress(null);
     if (data) setUpload(null);
   };
 
@@ -247,7 +282,7 @@ function RateSheets({ overview, run, api, busy, setResult }) {
     <section className="panel pbx-gap">
       <h2>Rate sheets</h2>
       <p className="pbx-hint pbx-intro">
-        Upload each provider&rsquo;s own spreadsheet (CSV, tab-separated or Excel), one per Voxbeam route. Every
+        Upload each provider&rsquo;s own spreadsheet (CSV, tab-separated or Excel, also as the .zip they send), one per Voxbeam route. Every
         upload is kept: each call is priced from the sheet in force when it was made.
       </p>
       <table className="users-table">
@@ -266,7 +301,7 @@ function RateSheets({ overview, run, api, busy, setResult }) {
                     {s.expired && <span className="pbx-bill-status pbx-bill-provisional"> expired</span>}</> : "—"}
                 </td>
                 <td>
-                  <input type="file" accept=".csv,.tsv,.txt,.xlsx" disabled={busy}
+                  <input type="file" accept=".csv,.tsv,.txt,.xlsx,.zip,.gz" disabled={busy || !!progress}
                     onChange={(e) => { choose(`${r.trunk}|${r.route}`, e.target.files[0]); e.target.value = ""; }} />
                   {s && (
                     <button className="ticket-action-btn idea-delete-btn" disabled={busy}
@@ -280,11 +315,14 @@ function RateSheets({ overview, run, api, busy, setResult }) {
         </tbody>
       </table>
 
+      <Progress progress={progress} />
+
       {upload && (
         <div className="ticket-action-panel pbx-gap">
           <div className="ticket-action-label">
             {upload.file.name} for {label(upload.trunk, upload.route)}: check which column is which
           </div>
+          <p className="pbx-hint">Uploaded in {upload.uploadSeconds} s, read in {upload.preview.read_seconds} s.</p>
           <div className="pbx-mapping">
             {Object.entries(upload.preview.fields).map(([field, f]) => (
               <label key={field} className="pbx-field">
