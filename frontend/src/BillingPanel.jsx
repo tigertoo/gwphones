@@ -1,8 +1,9 @@
 import React, { useCallback, useEffect, useState } from "react";
+import { CustomersAndNumbers, MonthlySummary } from "./BillingCustomers";
 
 // Phone System → Billing: calls read from Asterisk's CDR log, priced from
-// the uploaded rate sheets (backend/billing.py, /api/billing/*). Stage 1:
-// what each call cost; customers, markup and statements come next.
+// the uploaded rate sheets (backend/billing.py, /api/billing/*), and what
+// each customer owes for them (BillingCustomers.jsx).
 
 const STATUS_LABELS = {
   rated: "Priced",
@@ -34,6 +35,7 @@ export default function BillingPanel({ apiBase }) {
   const [open, setOpen] = useState(null); // call id with its pricing shown
   const [result, setResult] = useState(null);
   const [busy, setBusy] = useState(false);
+  const [version, setVersion] = useState(0); // bumped after every change, so every part reloads
 
   const api = useCallback(async (method, path, body) => {
     const res = await fetch(`${apiBase}/api/billing${path}`, {
@@ -66,6 +68,7 @@ export default function BillingPanel({ apiBase }) {
       const data = await api(method, path, body);
       setResult({ ok: true, text: (data.messages || ["Done."]).join(" ") });
       await load();
+      setVersion((v) => v + 1);
       return data;
     } catch (e) {
       setResult({ ok: false, text: e.message });
@@ -123,6 +126,8 @@ export default function BillingPanel({ apiBase }) {
         </p>
       </section>
 
+      <MonthlySummary apiBase={apiBase} api={api} month={month} version={version} />
+      <CustomersAndNumbers api={api} run={run} busy={busy} version={version} />
       <RateSheets overview={overview} run={run} api={api} busy={busy} setResult={setResult} />
 
       <section className="panel pbx-gap">
@@ -151,7 +156,7 @@ export default function BillingPanel({ apiBase }) {
                   <tr key={c.id} className="pbx-call-row" onClick={() => setOpen(open === c.id ? null : c.id)}>
                     <td>{c.start.slice(5, 16)}</td>
                     <td>{c.ext || "—"}</td>
-                    <td>{c.direction === "in" ? `${c.caller} → ${c.number}` : c.number || c.dialled}</td>
+                    <td>{c.direction === "in" ? `${c.caller} → +${c.number}` : c.direction === "out" && c.number ? `+${c.number}` : c.number || c.dialled}</td>
                     <td>{c.trunk || DIRECTIONS[c.direction]}</td>
                     <td>{Math.floor(c.billsec / 60)}:{String(c.billsec % 60).padStart(2, "0")}</td>
                     <td>{c.destination || "—"}</td>

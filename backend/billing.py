@@ -1,7 +1,7 @@
 """
 Phone billing — the Phone System tab's Billing section (/api/billing/*).
 
-Stage 1: calls and their cost.
+Stage 1: calls and their cost, and what each customer owes.
 - Calls come from Asterisk's CDR log (cdr-csv/Master.csv), read every
   minute and kept in billing.db. Re-reading the file is harmless: a call
   is keyed on (uniqueid, dstchannel, start).
@@ -22,6 +22,11 @@ never floats. A call is one of:
   free         not billable: internal, inbound, unanswered, emergency,
                voicemail
 Calls on an issued statement (statement_id, stage 2) are never re-priced.
+
+Customers are groups of extensions. A customer pays your cost plus a
+markup (the default, or their own), for calls and for the phone numbers
+(DDIs) assigned to them, which have a monthly cost (or a fixed price).
+Calls from extensions no customer has are shown as "Not assigned".
 """
 
 import base64
@@ -41,7 +46,8 @@ from fastapi import APIRouter, HTTPException
 from fastapi.responses import Response
 from pydantic import BaseModel
 
-from pbx import TRUNKS, VOXBEAM_ROUTES, changes_log
+from pbx import EMAIL_RE, TRUNKS, VOXBEAM_ROUTES, changes_log, normalize_did
+from pbx import get_db as get_pbx_db
 
 BILLING_DB = os.environ.get("PBX_BILLING_DB", "/var/lib/admin-dashboard/billing.db")
 CDR_CSV = os.environ.get("PBX_CDR_CSV", "/var/log/asterisk/cdr-csv/Master.csv")
@@ -97,7 +103,16 @@ def get_db() -> sqlite3.Connection:
            CREATE TABLE IF NOT EXISTS mappings (trunk TEXT PRIMARY KEY, mapping TEXT NOT NULL);
            CREATE TABLE IF NOT EXISTS fx (day TEXT NOT NULL, currency TEXT NOT NULL, rate TEXT NOT NULL,
                PRIMARY KEY (day, currency));
-           CREATE TABLE IF NOT EXISTS state (key TEXT PRIMARY KEY, value TEXT NOT NULL);"""
+           CREATE TABLE IF NOT EXISTS state (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+           CREATE TABLE IF NOT EXISTS customers (
+               id INTEGER PRIMARY KEY, name TEXT NOT NULL, email TEXT NOT NULL DEFAULT '',
+               markup_pct TEXT, notes TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL);
+           CREATE TABLE IF NOT EXISTS customer_exts (
+               ext TEXT PRIMARY KEY, customer_id INTEGER NOT NULL);
+           CREATE TABLE IF NOT EXISTS ddis (
+               did TEXT PRIMARY KEY, customer_id INTEGER NOT NULL, label TEXT NOT NULL DEFAULT '',
+               monthly_cost_micro INTEGER NOT NULL, monthly_price_micro INTEGER,
+               from_month TEXT NOT NULL, to_month TEXT);"""
     )
     for column in ("rate_sheets ADD COLUMN rate_unit TEXT NOT NULL DEFAULT 'units'",
                    "rate_sheets ADD COLUMN vat_pct TEXT NOT NULL DEFAULT '0'",
@@ -776,3 +791,312 @@ def api_reprice(month: str):
     n = rate_calls("start_utc >= ? AND start_utc < ?", (start, end))
     changes_log.info(f"Re-priced {n} call(s) for {month}")
     return {"ok": True, "messages": [f"{n} call(s) re-priced."]}
+
+
+# ---------------------------------------------------------------------------
+# Customers, markup and phone numbers (DDIs)
+# ---------------------------------------------------------------------------
+
+MONTH_RE = re.compile(r"^\d{4}-(0[1-9]|1[0-2])$")
+
+
+def _pct(value: Optional[str], what: str) -> Optional[str]:
+    if value is None or str(value).strip() == "":
+        return None
+    try:
+        d = Decimal(str(value).strip())
+    except InvalidOperation:
+        raise HTTPException(400, f"{what} must be a number, e.g. 25.")
+    if not Decimal(-100) < d <= Decimal(1000):
+        raise HTTPException(400, f"{what} must be between -100 and 1000%.")
+    return str(d.normalize()) if d != d.to_integral() else str(d.to_integral())
+
+
+def _euro(value, what: str) -> int:
+    try:
+        d = _money(str(value))
+    except InvalidOperation:
+        raise HTTPException(400, f"{what} must be an amount in euro, e.g. 1.50.")
+    if d < 0:
+        raise HTTPException(400, f"{what} can't be negative.")
+    return to_micro(d)
+
+
+def default_markup(conn) -> Decimal:
+    return Decimal(_state(conn, "default_markup_pct", "0") or "0")
+
+
+def _with_markup(cost_micro: int, pct: Decimal) -> int:
+    return int((Decimal(cost_micro) * (1 + pct / 100)).quantize(Decimal(1), rounding=ROUND_HALF_UP))
+
+
+class CustomerRequest(BaseModel):
+    name: str
+    email: str = ""
+    markup_pct: Optional[str] = None  # empty = the default
+    notes: str = ""
+    exts: List[str] = []
+
+
+def _clean_customer(conn, req: CustomerRequest, customer_id: Optional[int] = None) -> dict:
+    name = req.name.strip()
+    if not 1 <= len(name) <= 80:
+        raise HTTPException(400, "Give the customer a name (up to 80 characters).")
+    email = req.email.strip()
+    if email and not EMAIL_RE.match(email):
+        raise HTTPException(400, "That doesn't look like an email address.")
+    exts = sorted(set(e.strip() for e in req.exts if e.strip()))
+    for e in exts:
+        taken = conn.execute("SELECT c.name FROM customer_exts x JOIN customers c ON c.id = x.customer_id "
+                             "WHERE x.ext = ? AND x.customer_id != ?", (e, customer_id or 0)).fetchone()
+        if taken:
+            raise HTTPException(409, f"Extension {e} already belongs to {taken['name']}.")
+    return {"name": name, "email": email, "markup_pct": _pct(req.markup_pct, "Markup"),
+            "notes": req.notes.strip()[:500], "exts": exts}
+
+
+@router.get("/customers")
+def api_customers():
+    with get_db() as conn:
+        exts = {}
+        for r in conn.execute("SELECT * FROM customer_exts ORDER BY ext"):
+            exts.setdefault(r["customer_id"], []).append(r["ext"])
+        ddis = {}
+        for r in conn.execute("SELECT * FROM ddis ORDER BY did"):
+            ddis.setdefault(r["customer_id"], []).append(r["did"])
+        customers = [{**dict(c), "exts": exts.get(c["id"], []), "ddis": ddis.get(c["id"], [])}
+                     for c in conn.execute("SELECT * FROM customers ORDER BY name COLLATE NOCASE")]
+        ddi_rows = [{**dict(d), "monthly_cost": from_micro(d["monthly_cost_micro"], 2),
+                     "monthly_price": from_micro(d["monthly_price_micro"], 2)}
+                    for d in conn.execute("SELECT * FROM ddis ORDER BY did")]
+        markup = str(default_markup(conn))
+    with get_pbx_db() as pconn:
+        extensions = [{"ext": r["ext"], "name": r["name"]} for r in pconn.execute("SELECT ext, name FROM extensions ORDER BY ext")]
+        inbound = [{"did": r["did"], "label": r["label"]} for r in pconn.execute("SELECT did, label FROM inbound_routes ORDER BY did")]
+    return {"customers": customers, "ddis": ddi_rows, "default_markup_pct": markup,
+            "extensions": extensions, "inbound_numbers": inbound}
+
+
+@router.post("/customers")
+def api_create_customer(req: CustomerRequest):
+    with _lock, get_db() as conn:
+        c = _clean_customer(conn, req)
+        cur = conn.execute("INSERT INTO customers (name, email, markup_pct, notes, created_at) VALUES (?, ?, ?, ?, ?)",
+                           (c["name"], c["email"], c["markup_pct"], c["notes"], _now()))
+        conn.executemany("INSERT INTO customer_exts (ext, customer_id) VALUES (?, ?)",
+                         [(e, cur.lastrowid) for e in c["exts"]])
+        conn.commit()
+    changes_log.info(f"Billing: added customer {c['name']} with extensions {c['exts']}, markup {c['markup_pct'] or 'default'}")
+    return {"ok": True, "id": cur.lastrowid, "messages": [f"{c['name']} added."]}
+
+
+@router.put("/customers/{customer_id}")
+def api_update_customer(customer_id: int, req: CustomerRequest):
+    with _lock, get_db() as conn:
+        if not conn.execute("SELECT 1 FROM customers WHERE id = ?", (customer_id,)).fetchone():
+            raise HTTPException(404, "Customer not found.")
+        c = _clean_customer(conn, req, customer_id)
+        conn.execute("UPDATE customers SET name = ?, email = ?, markup_pct = ?, notes = ? WHERE id = ?",
+                     (c["name"], c["email"], c["markup_pct"], c["notes"], customer_id))
+        conn.execute("DELETE FROM customer_exts WHERE customer_id = ?", (customer_id,))
+        conn.executemany("INSERT INTO customer_exts (ext, customer_id) VALUES (?, ?)",
+                         [(e, customer_id) for e in c["exts"]])
+        conn.commit()
+    changes_log.info(f"Billing: updated customer {customer_id} ({c['name']}): extensions {c['exts']}, "
+                     f"markup {c['markup_pct'] or 'default'}")
+    return {"ok": True, "messages": [f"{c['name']} saved."]}
+
+
+@router.delete("/customers/{customer_id}")
+def api_delete_customer(customer_id: int):
+    with _lock, get_db() as conn:
+        c = conn.execute("SELECT * FROM customers WHERE id = ?", (customer_id,)).fetchone()
+        if not c:
+            raise HTTPException(404, "Customer not found.")
+        if conn.execute("SELECT 1 FROM ddis WHERE customer_id = ?", (customer_id,)).fetchone():
+            raise HTTPException(409, f"{c['name']} still has phone numbers. Remove or move them first.")
+        conn.execute("DELETE FROM customer_exts WHERE customer_id = ?", (customer_id,))
+        conn.execute("DELETE FROM customers WHERE id = ?", (customer_id,))
+        conn.commit()
+    changes_log.info(f"Billing: deleted customer {customer_id} ({c['name']})")
+    return {"ok": True, "messages": [f"{c['name']} deleted. Their extensions' calls now show as not assigned."]}
+
+
+class MarkupRequest(BaseModel):
+    default_markup_pct: str
+
+
+@router.put("/settings")
+def api_billing_settings(req: MarkupRequest):
+    pct = _pct(req.default_markup_pct, "Default markup") or "0"
+    with _lock, get_db() as conn:
+        _set_state(conn, "default_markup_pct", pct)
+        conn.commit()
+    changes_log.info(f"Billing: default markup {pct}%")
+    return {"ok": True, "messages": [f"Default markup is now {pct}%."]}
+
+
+class DdiRequest(BaseModel):
+    did: str
+    customer_id: int
+    label: str = ""
+    monthly_cost: str
+    monthly_price: Optional[str] = None  # empty = cost + the customer's markup
+    from_month: str
+    to_month: Optional[str] = None
+
+
+@router.post("/ddis")
+def api_save_ddi(req: DdiRequest):
+    did = normalize_did(req.did)
+    if not MONTH_RE.match(req.from_month) or (req.to_month and not MONTH_RE.match(req.to_month)):
+        raise HTTPException(400, "Months must look like 2026-10.")
+    if req.to_month and req.to_month < req.from_month:
+        raise HTTPException(400, "The last month can't be before the first.")
+    cost = _euro(req.monthly_cost, "Monthly cost")
+    price = _euro(req.monthly_price, "Monthly price") if (req.monthly_price or "").strip() else None
+    with _lock, get_db() as conn:
+        if not conn.execute("SELECT 1 FROM customers WHERE id = ?", (req.customer_id,)).fetchone():
+            raise HTTPException(400, "Choose a customer.")
+        conn.execute("INSERT INTO ddis (did, customer_id, label, monthly_cost_micro, monthly_price_micro, from_month, "
+                     "to_month) VALUES (?, ?, ?, ?, ?, ?, ?) ON CONFLICT(did) DO UPDATE SET customer_id = excluded.customer_id, "
+                     "label = excluded.label, monthly_cost_micro = excluded.monthly_cost_micro, "
+                     "monthly_price_micro = excluded.monthly_price_micro, from_month = excluded.from_month, "
+                     "to_month = excluded.to_month",
+                     (did, req.customer_id, req.label.strip()[:80], cost, price, req.from_month, req.to_month or None))
+        conn.commit()
+    changes_log.info(f"Billing: number +{did} -> customer {req.customer_id}, cost {from_micro(cost, 2)}/month, "
+                     f"price {from_micro(price, 2) if price is not None else 'cost + markup'}, {req.from_month}..{req.to_month or ''}")
+    return {"ok": True, "messages": [f"+{did} saved."]}
+
+
+@router.delete("/ddis/{did}")
+def api_delete_ddi(did: str):
+    with _lock, get_db() as conn:
+        if conn.execute("DELETE FROM ddis WHERE did = ?", (did,)).rowcount == 0:
+            raise HTTPException(404, "Number not found.")
+        conn.commit()
+    changes_log.info(f"Billing: removed number +{did}")
+    return {"ok": True, "messages": [f"+{did} removed."]}
+
+
+# ---------------------------------------------------------------------------
+# What each customer owes for a month
+# ---------------------------------------------------------------------------
+
+UNASSIGNED = {"id": None, "name": "Not assigned", "email": "", "markup_pct": None}
+
+
+def month_statement(conn, month: str, customer_id: Optional[int] = None, only: bool = False) -> List[dict]:
+    """Per customer (and "Not assigned"): their priced outbound calls and
+    their numbers for the month, with cost, price and margin. With `only`,
+    just `customer_id` (None for "Not assigned")."""
+    if not MONTH_RE.match(month):
+        raise HTTPException(400, "Month must look like 2026-10.")
+    start, end = _month_range(month)
+    markup0 = default_markup(conn)
+    customers = {c["id"]: dict(c) for c in conn.execute("SELECT * FROM customers")}
+    owner = {r["ext"]: r["customer_id"] for r in conn.execute("SELECT * FROM customer_exts")}
+    out = {}
+
+    def entry(cid):
+        if cid not in out:
+            c = customers.get(cid, UNASSIGNED)
+            pct = Decimal(c["markup_pct"]) if c.get("markup_pct") is not None else markup0
+            out[cid] = {"customer": {k: c.get(k) for k in ("id", "name", "email", "markup_pct")},
+                        "markup_pct": str(pct), "_pct": pct, "calls": [], "ddis": [],
+                        "counts": {"rated": 0, "provisional": 0, "unrated": 0}}
+        return out[cid]
+
+    for c in conn.execute("SELECT * FROM calls WHERE direction = 'out' AND start_utc >= ? AND start_utc < ? "
+                          "AND status != 'free' ORDER BY start_utc", (start, end)):
+        e = entry(owner.get(c["ext"]))
+        e["counts"][c["status"]] += 1
+        line = _call_json(c)
+        line["price_eur"] = (from_micro(_with_markup(c["cost_eur_micro"], e["_pct"]), 6)
+                             if c["cost_eur_micro"] is not None else None)
+        e["calls"].append(line)
+    for d in conn.execute("SELECT * FROM ddis WHERE from_month <= ? AND (to_month IS NULL OR to_month >= ?) ORDER BY did",
+                          (month, month)):
+        e = entry(d["customer_id"])
+        price = d["monthly_price_micro"] if d["monthly_price_micro"] is not None else \
+            _with_markup(d["monthly_cost_micro"], e["_pct"])
+        e["ddis"].append({"did": d["did"], "label": d["label"], "cost_eur": from_micro(d["monthly_cost_micro"], 6),
+                          "price_eur": from_micro(price, 6), "fixed_price": d["monthly_price_micro"] is not None,
+                          "_cost": d["monthly_cost_micro"], "_price": price})
+    for cid in customers:
+        entry(cid)  # every customer appears, even with nothing this month
+    result = []
+    for cid, e in out.items():
+        if only and cid != customer_id:
+            continue
+        priced = [c for c in e["calls"] if c["cost_eur"] is not None]
+        call_cost = sum(to_micro(Decimal(c["cost_eur"])) for c in priced)
+        call_price = sum(to_micro(Decimal(c["price_eur"])) for c in priced)
+        ddi_cost = sum(d.pop("_cost") for d in e["ddis"])
+        ddi_price = sum(d.pop("_price") for d in e["ddis"])
+        e.pop("_pct")
+        e["totals"] = {
+            "calls": len(e["calls"]), "minutes": round(sum(c["billsec"] for c in e["calls"]) / 60, 1),
+            "call_cost": from_micro(call_cost, 2), "call_price": from_micro(call_price, 2),
+            "ddi_cost": from_micro(ddi_cost, 2), "ddi_price": from_micro(ddi_price, 2),
+            "cost": from_micro(call_cost + ddi_cost, 2), "price": from_micro(call_price + ddi_price, 2),
+            "margin": from_micro(call_price + ddi_price - call_cost - ddi_cost, 2),
+            "complete": not e["counts"]["unrated"] and not e["counts"]["provisional"],
+        }
+        result.append(e)
+    result.sort(key=lambda e: (e["customer"]["id"] is None, (e["customer"]["name"] or "").lower()))
+    return result
+
+
+@router.get("/summary")
+def api_summary(month: str = ""):
+    month = month or datetime.now(LOCAL_TZ).strftime("%Y-%m")
+    with get_db() as conn:
+        rows = month_statement(conn, month)
+    for e in rows:
+        e.pop("calls")  # totals only; the itemised view asks per customer
+    return {"month": month, "customers": rows}
+
+
+@router.get("/customers/{customer_id}/month")
+def api_customer_month(customer_id: int, month: str):
+    """customer_id 0 is "Not assigned"."""
+    with get_db() as conn:
+        rows = month_statement(conn, month, customer_id or None, only=True)
+    if not rows:
+        raise HTTPException(404, "Customer not found.")
+    return rows[0]
+
+
+@router.get("/summary.csv")
+def api_summary_csv(month: str):
+    with get_db() as conn:
+        rows = month_statement(conn, month)
+    buf = io.StringIO()
+    w = csv.writer(buf)
+    w.writerow(["customer", "markup_pct", "calls", "minutes", "call_cost", "call_price", "numbers", "number_cost",
+                "number_price", "cost", "price", "margin", "complete"])
+    for e in rows:
+        t = e["totals"]
+        w.writerow([e["customer"]["name"], e["markup_pct"], t["calls"], t["minutes"], t["call_cost"], t["call_price"],
+                    len(e["ddis"]), t["ddi_cost"], t["ddi_price"], t["cost"], t["price"], t["margin"],
+                    "yes" if t["complete"] else "no"])
+    return Response(buf.getvalue(), media_type="text/csv",
+                    headers={"Content-Disposition": f'attachment; filename="phone-billing-{month}.csv"'})
+
+
+@router.get("/customers/{customer_id}/month.csv")
+def api_customer_month_csv(customer_id: int, month: str):
+    e = api_customer_month(customer_id, month)
+    buf = io.StringIO()
+    w = csv.writer(buf)
+    w.writerow(["item", "date", "ext", "number", "destination", "seconds", "cost_eur", "price_eur", "status"])
+    for d in e["ddis"]:
+        w.writerow(["number", month, "", f"+{d['did']}", d["label"], "", d["cost_eur"], d["price_eur"], "monthly"])
+    for c in e["calls"]:
+        w.writerow(["call", c["start"], c["ext"], f"+{c['number']}" if c["number"] else c["dialled"], c["destination"],
+                    c["billsec"], c["cost_eur"], c["price_eur"], c["status"]])
+    name = re.sub(r"[^A-Za-z0-9]+", "-", e["customer"]["name"]).strip("-") or "customer"
+    return Response(buf.getvalue(), media_type="text/csv",
+                    headers={"Content-Disposition": f'attachment; filename="{name}-{month}.csv"'})
