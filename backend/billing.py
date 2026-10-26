@@ -109,12 +109,19 @@ def get_db() -> sqlite3.Connection:
                markup_pct TEXT, notes TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL);
            CREATE TABLE IF NOT EXISTS customer_exts (
                ext TEXT PRIMARY KEY, customer_id INTEGER NOT NULL);
+           CREATE TABLE IF NOT EXISTS statements (
+               id INTEGER PRIMARY KEY, number TEXT NOT NULL UNIQUE, customer_id INTEGER, month TEXT NOT NULL,
+               issued_at TEXT NOT NULL, total_micro INTEGER NOT NULL, snapshot TEXT NOT NULL,
+               emailed_at TEXT, emailed_to TEXT, cancelled_at TEXT);
+           CREATE TABLE IF NOT EXISTS statement_ddis (
+               statement_id INTEGER NOT NULL, did TEXT NOT NULL, month TEXT NOT NULL);
            CREATE TABLE IF NOT EXISTS ddis (
                did TEXT PRIMARY KEY, customer_id INTEGER NOT NULL, label TEXT NOT NULL DEFAULT '',
                monthly_cost_micro INTEGER NOT NULL, monthly_price_micro INTEGER,
                from_month TEXT NOT NULL, to_month TEXT);"""
     )
-    for column in ("rate_sheets ADD COLUMN rate_unit TEXT NOT NULL DEFAULT 'units'",
+    for column in ("calls ADD COLUMN price_micro INTEGER",  # the customer's price, set when a statement locks it
+                   "rate_sheets ADD COLUMN rate_unit TEXT NOT NULL DEFAULT 'units'",
                    "rate_sheets ADD COLUMN vat_pct TEXT NOT NULL DEFAULT '0'",
                    "mappings ADD COLUMN defaults TEXT"):
         try:
@@ -1013,15 +1020,23 @@ def month_statement(conn, month: str, customer_id: Optional[int] = None, only: b
         e = entry(owner.get(c["ext"]))
         e["counts"][c["status"]] += 1
         line = _call_json(c)
-        line["price_eur"] = (from_micro(_with_markup(c["cost_eur_micro"], e["_pct"]), 6)
-                             if c["cost_eur_micro"] is not None else None)
+        if c["statement_id"] is not None and c["price_micro"] is not None:
+            line["price_eur"] = from_micro(c["price_micro"], 6)  # as on the issued statement
+        else:
+            line["price_eur"] = (from_micro(_with_markup(c["cost_eur_micro"], e["_pct"]), 6)
+                                 if c["cost_eur_micro"] is not None else None)
+        line["statement_id"] = c["statement_id"]
         e["calls"].append(line)
+    billed = {r["did"]: r["statement_id"] for r in conn.execute(
+        "SELECT sd.did, sd.statement_id FROM statement_ddis sd JOIN statements s ON s.id = sd.statement_id "
+        "WHERE sd.month = ? AND s.cancelled_at IS NULL", (month,))}
     for d in conn.execute("SELECT * FROM ddis WHERE from_month <= ? AND (to_month IS NULL OR to_month >= ?) ORDER BY did",
                           (month, month)):
         e = entry(d["customer_id"])
         price = d["monthly_price_micro"] if d["monthly_price_micro"] is not None else \
             _with_markup(d["monthly_cost_micro"], e["_pct"])
-        e["ddis"].append({"did": d["did"], "label": d["label"], "cost_eur": from_micro(d["monthly_cost_micro"], 6),
+        e["ddis"].append({"did": d["did"], "label": d["label"], "statement_id": billed.get(d["did"]),
+                          "cost_eur": from_micro(d["monthly_cost_micro"], 6),
                           "price_eur": from_micro(price, 6), "fixed_price": d["monthly_price_micro"] is not None,
                           "_cost": d["monthly_cost_micro"], "_price": price})
     for cid in customers:

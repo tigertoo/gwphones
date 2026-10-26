@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useState } from "react";
-import { CustomersAndNumbers, MonthlySummary } from "./BillingCustomers";
+import { CustomersAndNumbers, MonthlySummary, Statements } from "./BillingCustomers";
 
 // Phone System → Billing: calls read from Asterisk's CDR log, priced from
 // the uploaded rate sheets (backend/billing.py, /api/billing/*), and what
@@ -127,6 +127,7 @@ export default function BillingPanel({ apiBase }) {
       </section>
 
       <MonthlySummary apiBase={apiBase} api={api} month={month} version={version} />
+      <Statements apiBase={apiBase} api={api} run={run} busy={busy} month={month} version={version} />
       <CustomersAndNumbers api={api} run={run} busy={busy} version={version} />
       <RateSheets overview={overview} run={run} api={api} busy={busy} setResult={setResult} />
 

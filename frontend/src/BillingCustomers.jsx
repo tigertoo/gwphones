@@ -272,3 +272,99 @@ export function CustomersAndNumbers({ api, run, busy, version }) {
     </>
   );
 }
+
+// Statements: issue (locks the month's prices), PDF, email, cancel.
+export function Statements({ apiBase, api, run, busy, month, version }) {
+  const [list, setList] = useState([]);
+  const [settings, setSettings] = useState(null);
+  const [editing, setEditing] = useState(null); // business details form
+  const [customers, setCustomers] = useState([]);
+  const [who, setWho] = useState(""); // "" = every customer
+
+  useEffect(() => {
+    api("GET", `/statements?month=${month}`).then((d) => setList(d.statements)).catch(() => setList([]));
+    api("GET", "/statement-settings").then(setSettings).catch(() => setSettings(null));
+    api("GET", "/customers").then((d) => setCustomers(d.customers)).catch(() => setCustomers([]));
+  }, [api, month, version]);
+
+  if (!settings) return null;
+  const s = settings.settings;
+  const ended = month < currentMonth();
+
+  return (
+    <section className="panel pbx-gap">
+      <h2>Statements</h2>
+      {!s.business_name && !editing && (
+        <div className="ticket-action-result ticket-action-result-error">Fill in your business details before issuing statements.</div>
+      )}
+      <div className="idea-form-row">
+        <select className="idea-select pbx-select" value={who} onChange={(e) => setWho(e.target.value)}>
+          <option value="">Every customer</option>
+          {customers.map((c) => <option key={c.id} value={c.id}>{c.name}</option>)}
+        </select>
+        <button className="ticket-action-btn ticket-action-btn-primary" disabled={busy || !ended || !s.business_name}
+          onClick={() => window.confirm(`Issue ${who ? "a statement" : "statements"} for ${month}? This locks the prices of the calls on ${who ? "it" : "them"}.`)
+            && run("POST", "/statements", { month, customer_id: who ? Number(who) : null })}>
+          Issue for {month}
+        </button>
+        <button className="ticket-action-btn" onClick={() => setEditing({ ...s })}>Business details</button>
+        <span className="pbx-hint">
+          {ended ? "Locks each customer's prices for the month. Calls read later go on a follow-up." : "Statements can be issued once the month has ended."}
+        </span>
+      </div>
+
+      {editing && (
+        <div className="ticket-action-panel pbx-gap">
+          <div className="ticket-action-label">Shown at the top and bottom of every statement</div>
+          <div className="pbx-mapping">
+            {Object.entries(settings.fields).map(([k, label]) => (
+              <label key={k} className="pbx-field"><span>{label}</span>
+                {["address", "payment_details", "footer"].includes(k)
+                  ? <textarea className="idea-input" rows={3} value={editing[k]} onChange={(e) => setEditing({ ...editing, [k]: e.target.value })} />
+                  : <input className="idea-input" value={editing[k]} onChange={(e) => setEditing({ ...editing, [k]: e.target.value })} />}
+              </label>
+            ))}
+          </div>
+          <div className="ticket-action-buttons">
+            <button className="ticket-action-btn" onClick={() => setEditing(null)}>Cancel</button>
+            <button className="ticket-action-btn ticket-action-btn-primary" disabled={busy || !editing.business_name.trim()}
+              onClick={async () => { if (await run("PUT", "/statement-settings", editing)) setEditing(null); }}>Save</button>
+          </div>
+          <p className="pbx-hint">Changes apply to statements issued from now on; issued ones keep what they were sent with.</p>
+        </div>
+      )}
+
+      <table className="users-table pbx-gap">
+        <thead><tr><th>Number</th><th>Customer</th><th>Total €</th><th>Issued</th><th>Emailed</th><th></th></tr></thead>
+        <tbody>
+          {list.map((st) => (
+            <tr key={st.id} className={st.cancelled_at ? "pbx-row-disabled" : ""}>
+              <td>{st.number}{st.follow_up ? " (follow-up)" : ""}{st.cancelled_at ? " — cancelled" : ""}</td>
+              <td>{st.customer}</td>
+              <td>{st.total}</td>
+              <td>{new Date(st.issued_at).toLocaleDateString()}</td>
+              <td>{st.emailed_at ? `${new Date(st.emailed_at).toLocaleDateString()} to ${st.emailed_to}` : "—"}</td>
+              <td className="pbx-actions">
+                <a className="ticket-action-btn" href={`${apiBase}/api/billing/statements/${st.id}/pdf`} target="_blank" rel="noreferrer">PDF</a>
+                {!st.cancelled_at && (
+                  <>
+                    <button className="ticket-action-btn" disabled={busy || !settings.email_ready}
+                      title={settings.email_ready ? "" : "Email isn't set up"}
+                      onClick={() => {
+                        const to = window.prompt(`Email ${st.number} to:`, st.customer_email || "");
+                        if (to) run("POST", `/statements/${st.id}/email`, { to });
+                      }}>{st.emailed_at ? "Email again" : "Email"}</button>
+                    <button className="ticket-action-btn idea-delete-btn" disabled={busy}
+                      onClick={() => window.confirm(`Cancel ${st.number}? Its calls and numbers are unlocked so they can be billed again. The number stays on record.`)
+                        && run("POST", `/statements/${st.id}/cancel`)}>Cancel</button>
+                  </>
+                )}
+              </td>
+            </tr>
+          ))}
+          {!list.length && <tr><td colSpan={6} className="panel-empty">No statements for {month}.</td></tr>}
+        </tbody>
+      </table>
+    </section>
+  );
+}
