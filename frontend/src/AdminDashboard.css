@@ -962,3 +962,7 @@
 /* Only while a save is running (SaveToast sets body.saving); a button
    disabled for any other reason keeps the normal cursor. */
 body.saving .ticket-action-btn:disabled { cursor: progress; }
+
+/* Call forwarding and DND, in an extension's Phone setup panel */
+.pbx-forwarding { display: flex; flex-direction: column; gap: 8px; margin-top: 14px; max-width: 520px; }
+.pbx-forwarding .ticket-action-btn { align-self: flex-start; }

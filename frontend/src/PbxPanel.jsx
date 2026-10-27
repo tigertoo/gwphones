@@ -454,11 +454,69 @@ function OutboundCid({ ext, current, fallback, dids, send, busy }) {
   );
 }
 
+const FORWARD_FIELDS = [
+  ["always", "Forward all calls to"],
+  ["busy", "When busy, forward to"],
+  ["no_answer", "When not answered or offline, forward to"],
+];
+const NO_FORWARDING = { dnd: false, always: "", busy: "", no_answer: "" };
+
+function Forwarding({ ext, current, available, send, busy, reload }) {
+  const saved = current || NO_FORWARDING;
+  const [form, setForm] = useState(saved);
+  useEffect(() => setForm(current || NO_FORWARDING), [current]);
+  const changed = FORWARD_FIELDS.some(([k]) => form[k].trim() !== saved[k]) || form.dnd !== saved.dnd;
+  const save = async (ev) => {
+    ev.preventDefault();
+    if (await send("PUT", `/extensions/${ext}/forwarding`, form, `Call forwarding for ${ext} saved.`)) reload();
+  };
+  if (!available) return <p className="pbx-hint">Call forwarding: Asterisk isn't answering, so it can't be shown.</p>;
+  return (
+    <form className="pbx-forwarding" onSubmit={save}>
+      <div className="ticket-action-label">Call forwarding and do not disturb (also set from the phone, see feature codes)</div>
+      <label className="pbx-toggle">
+        <input type="checkbox" checked={form.dnd} onChange={(e) => setForm({ ...form, dnd: e.target.checked })} />
+        Do not disturb: callers get voicemail (or the busy forward), and ring groups skip {ext}
+      </label>
+      {FORWARD_FIELDS.map(([k, label]) => (
+        <label key={k} className="pbx-field">
+          <span>{label}</span>
+          <input
+            className="idea-input"
+            placeholder="Extension or Irish number, e.g. 202 or 087 123 4567"
+            value={form[k]}
+            onChange={(e) => setForm({ ...form, [k]: e.target.value })}
+          />
+        </label>
+      ))}
+      <button className="ticket-action-btn" disabled={busy || !changed}>Save forwarding</button>
+      <span className="pbx-hint"> Only extensions and Irish landlines and mobiles. Calls to outside numbers use the price cap and are billed to {ext}.</span>
+    </form>
+  );
+}
+
+function forwardingBadge(f) {
+  if (!f) return null;
+  if (f.dnd) return "Do not disturb";
+  if (f.always) return `Forwarded to ${f.always}`;
+  const parts = [f.busy && `busy → ${f.busy}`, f.no_answer && `no answer → ${f.no_answer}`].filter(Boolean);
+  return parts.length ? `Forwards ${parts.join(", ")}` : null;
+}
+
 function ExtensionsSection({ config, status, send, busy, apiBase, reload }) {
   const [draft, setDraft] = useState({ ext: "", name: "" });
   const [editing, setEditing] = useState(null); // { ext, name }
   const [creds, setCreds] = useState(null); // { ext, ...credentials }
+  const [forwarding, setForwarding] = useState({ available: true, extensions: {} });
   const { limits } = config;
+
+  const loadForwarding = useCallback(async () => {
+    try {
+      const res = await fetch(`${apiBase}/api/pbx/forwarding`);
+      if (res.ok) setForwarding(await res.json());
+    } catch { /* shown as unavailable on the next try */ }
+  }, [apiBase]);
+  useEffect(() => { loadForwarding(); }, [loadForwarding, config]);
 
   const add = async (e) => {
     e.preventDefault();
@@ -490,6 +548,22 @@ function ExtensionsSection({ config, status, send, busy, apiBase, reload }) {
         Video calls between extensions
       </label>
       <span className="pbx-hint"> Groundwire and Linphone (VP8/H.264). Calls to and from outside numbers stay audio only.</span>
+      <details className="pbx-gap">
+        <summary className="pbx-hint">Feature codes for the phones</summary>
+        <table className="users-table">
+          <tbody>
+            <tr><td><code>*78</code> / <code>*79</code></td><td>Do not disturb on / off</td></tr>
+            <tr><td><code>*72</code>number / <code>*73</code></td><td>Forward all calls / stop</td></tr>
+            <tr><td><code>*90</code>number / <code>*91</code></td><td>Forward when busy / stop</td></tr>
+            <tr><td><code>*52</code>number / <code>*53</code></td><td>Forward when not answered or offline / stop</td></tr>
+            <tr><td><code>*8</code></td><td>Answer any ringing extension</td></tr>
+            <tr><td><code>**</code>ext, e.g. <code>**202</code></td><td>Answer that extension's ringing call</td></tr>
+            <tr><td><code>*97</code> / <code>*98</code></td><td>Your voicemail / any mailbox</td></tr>
+          </tbody>
+        </table>
+        <p className="pbx-hint">Forward to an extension or an Irish number in national format, e.g. *720871234567.
+          Transfers use the app's or phone's own transfer button.</p>
+      </details>
       <form className="idea-form-row pbx-add-row" onSubmit={add}>
         <input
           className="idea-input pbx-num-input"
@@ -543,6 +617,9 @@ function ExtensionsSection({ config, status, send, busy, apiBase, reload }) {
                     </span>
                   ) : e.name}
                   {e.outbound_cid && <div className="pbx-hint">Shows {e.outbound_cid}</div>}
+                  {forwardingBadge(forwarding.extensions[e.ext]) && (
+                    <div className="pbx-hint">{forwardingBadge(forwarding.extensions[e.ext])}</div>
+                  )}
                 </td>
                 <td>
                   {!e.enabled ? "—" : (
@@ -613,6 +690,8 @@ function ExtensionsSection({ config, status, send, busy, apiBase, reload }) {
                     <VoicemailEmail ext={e.ext} current={e.voicemail_email} send={send} busy={busy} />
                     <OutboundCid ext={e.ext} current={e.outbound_cid} fallback={config.settings.outbound_cid}
                       dids={config.inbound_routes.map((r) => r.did)} send={send} busy={busy} />
+                    <Forwarding ext={e.ext} current={forwarding.extensions[e.ext]} available={forwarding.available}
+                      send={send} busy={busy} reload={loadForwarding} />
                     {!creds.server && <p className="pbx-hint">Set PBX_PUBLIC_HOST in the dashboard's .env to show the server name here.</p>}
                   </td>
                 </tr>

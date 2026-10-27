@@ -95,6 +95,17 @@ VM_CONTEXT = "portal"
 # up: only the hints, so a phone can watch an extension but can't reach
 # anything else in the dialplan this way.
 HINTS_CONTEXT = "portal-hints"
+PICKUP_GROUP = "portal"  # every extension; *8 answers any of them ringing
+# Do not disturb and call forwarding live in Asterisk's own database
+# (AstDB), so the feature codes on the phones and the dashboard change the
+# same thing. Families as FreePBX uses them.
+FORWARD_FAMILIES = {"always": "CF", "busy": "CFB", "no_answer": "CFU"}
+DND_FAMILY = "DND"
+MAX_FORWARD_HOPS = 3  # 201 -> 202 -> 201 ... stops here, at voicemail
+# Where calls may be forwarded: other extensions and Irish landlines and
+# mobiles (national format). Never abroad, 1800/premium or 112/999: anyone
+# who rings your number can set a forward going, at your cost.
+FORWARD_TARGET_DIALPLAN_RE = "^(2[0-9][0-9]|0[1-9][0-9]{7}[0-9]?)$"
 VOICEMAIL_NUMBER = "*97"  # check your own voicemail (static dialplan)
 # Asterisk hands each "new voicemail" email to asterisk/vm-mail.sh (mailcmd
 # in voicemail.conf), which drops it here; the dashboard sends it on
@@ -382,7 +393,9 @@ def build_extensions_conf(conn) -> str:
                 f"aors={r['ext']}",
                 f"callerid=\"{r['name']}\" <{r['ext']}>",
                 f"mailboxes={r['ext']}@{VM_CONTEXT}",
-                f"subscribe_context={HINTS_CONTEXT}"]
+                f"subscribe_context={HINTS_CONTEXT}",
+                f"named_call_group={PICKUP_GROUP}",
+                f"named_pickup_group={PICKUP_GROUP}"]
         if video:
             out.append(f"allow={VIDEO_CODECS}")  # added to the template's audio codecs
         if r["outbound_cid"]:
@@ -474,6 +487,82 @@ def _lcr_token(conn) -> str:
     return token
 
 
+def _call_ext_context() -> List[str]:
+    """A call for an extension (from another extension, a ring of an inbound
+    route, or a forward): forward always, else do not disturb counts as busy,
+    else ring it; busy goes to the busy forward, anything else unanswered to
+    the no-answer forward; with no forward, voicemail. Forwards to outside
+    numbers go out through from-internal like a dialled call (price cap and
+    all), billed to the forwarding extension (CDR userfield fwd:<ext>). No
+    voicemail after that: an unanswered mobile keeps its own."""
+    cf, cfb, cfu = (FORWARD_FAMILIES[k] for k in ("always", "busy", "no_answer"))
+    return [
+        "; ---- Calls for an extension: do not disturb, forwarding, voicemail ----",
+        "[portal-call-ext]",
+        "exten => _2XX,1,Set(HOPS=$[0${HOPS} + 1])",
+        f" same => n,GotoIf($[${{HOPS}} > {MAX_FORWARD_HOPS}]?vm-u)  ; forwarded round in a loop",
+        f" same => n,Set(FWD=${{DB({cf}/${{EXTEN}})}})",
+        ' same => n,GotoIf($["${FWD}" != ""]?fwd)',
+        f' same => n,GotoIf($["${{DB({DND_FAMILY}/${{EXTEN}})}}" = "1"]?busy)',
+        " same => n,Dial(PJSIP/${EXTEN},30)",
+        ' same => n,GotoIf($["${DIALSTATUS}" = "ANSWER"]?done)',
+        ' same => n,GotoIf($["${DIALSTATUS}" = "BUSY"]?busy)',
+        f" same => n,Set(FWD=${{DB({cfu}/${{EXTEN}})}})",
+        ' same => n,GotoIf($["${FWD}" != ""]?fwd)',
+        f" same => n(vm-u),VoiceMail(${{EXTEN}}@{VM_CONTEXT},u)",
+        " same => n,Hangup()",
+        f" same => n(busy),Set(FWD=${{DB({cfb}/${{EXTEN}})}})",
+        ' same => n,GotoIf($["${FWD}" != ""]?fwd)',
+        f" same => n,VoiceMail(${{EXTEN}}@{VM_CONTEXT},b)",
+        " same => n,Hangup()",
+        ' same => n(fwd),GotoIf($["${FWD}" = "${EXTEN}"]?vm-u)',
+        f' same => n,GotoIf($[${{REGEX("{FORWARD_TARGET_DIALPLAN_RE}" ${{FWD}})}}]?:vm-u)  ; set by hand to somewhere not allowed',
+        ' same => n,ExecIf($["${CDR(userfield)}" = ""]?Set(CDR(userfield)=fwd:${EXTEN}))',
+        " same => n,Set(EXT_CID=${EXTCID_${EXTEN}})",
+        " same => n,Goto(from-internal,${FWD},1)",
+        " same => n(done),Hangup()",
+    ]
+
+
+def _features_context() -> List[str]:
+    """Feature codes, dialled from an extension. ME is the extension that
+    dialled, from the channel name (PJSIP/201-0000000e), never the caller
+    ID, which a phone could set to anything."""
+    out = ["; ---- Feature codes (included into from-internal) ----",
+           "; *78/*79 do not disturb on/off; *72<number>/*73 forward always;",
+           "; *90<number>/*91 forward when busy; *52<number>/*53 forward when",
+           "; unanswered; *8 answer any ringing extension; **2XX answer that one.",
+           "[portal-features]"]
+    me = [" same => n,Set(ME=${CHANNEL(name)})",
+          " same => n,Set(ME=${CUT(ME,-,1)})",
+          " same => n,Set(ME=${CUT(ME,/,2)})",
+          f' same => n,GotoIf($[${{REGEX("^2[0-9][0-9]$" ${{ME}})}}]?:bad)']
+    end = [" same => n,Hangup()", " same => n(bad),Playback(invalid)", " same => n,Hangup()"]
+    out += ["exten => *78,1,Answer()"] + me + [
+        f" same => n,Set(DB({DND_FAMILY}/${{ME}})=1)",
+        " same => n,Playback(do-not-disturb&activated)"] + end
+    out += ["exten => *79,1,Answer()"] + me + [
+        f" same => n,NoOp(${{DB_DELETE({DND_FAMILY}/${{ME}})}})",
+        " same => n,Playback(do-not-disturb&de-activated)"] + end
+    for on, off, key, sound in (("*72", "*73", "always", "call-fwd-unconditional"),
+                                ("*90", "*91", "busy", "call-fwd-on-busy"),
+                                ("*52", "*53", "no_answer", "call-fwd-no-ans")):
+        fam = FORWARD_FAMILIES[key]
+        out += [f"exten => _{on}X.,1,Answer()"] + me + [
+            " same => n,Set(T=${EXTEN:3})",
+            f' same => n,GotoIf($[${{REGEX("{FORWARD_TARGET_DIALPLAN_RE}" ${{T}})}}]?:bad)',
+            ' same => n,GotoIf($["${T}" = "${ME}"]?bad)',
+            f" same => n,Set(DB({fam}/${{ME}})=${{T}})",
+            f" same => n,Playback({sound}&activated)",
+            " same => n,SayDigits(${T})"] + end
+        out += [f"exten => {off},1,Answer()"] + me + [
+            f" same => n,NoOp(${{DB_DELETE({fam}/${{ME}})}})",
+            f" same => n,Playback({sound}&de-activated)"] + end
+    out += ["exten => *8,1,Pickup()", " same => n,Hangup()",
+            "exten => _**2XX,1,PickupChan(PJSIP/${EXTEN:2}-,p)", " same => n,Hangup()"]
+    return out
+
+
 def build_portal_dialplan(conn) -> str:
     s = get_settings(conn)
     active = {r["ext"] for r in conn.execute("SELECT ext FROM extensions WHERE enabled = 1")}
@@ -485,11 +574,15 @@ def build_portal_dialplan(conn) -> str:
            f"OUTBOUND_CID={s['outbound_cid']}",
            f"MAX_OUTBOUND={s['max_outbound']}",
            f"VOXBEAM_PREFIX={s['voxbeam_prefix']}",
-           f"LCR_TOKEN={_lcr_token(conn)}",
-           "",
-           "; ---- Busy lamps (BLF) and presence: one hint per extension ----",
-           f"[{HINTS_CONTEXT}]"]
+           f"LCR_TOKEN={_lcr_token(conn)}"]
+    # Each extension's own caller ID, for calls it forwards to outside numbers.
+    out += [f"EXTCID_{r['ext']}={r['outbound_cid']}"
+            for r in conn.execute("SELECT ext, outbound_cid FROM extensions WHERE enabled = 1 AND outbound_cid != '' ORDER BY ext")]
+    out += ["",
+            "; ---- Busy lamps (BLF) and presence: one hint per extension ----",
+            f"[{HINTS_CONTEXT}]"]
     out += [f"exten => {e},hint,PJSIP/{e}" for e in sorted(active)]
+    out += [""] + _call_ext_context() + [""] + _features_context()
     out += ["",
             "; ---- Ring groups (included into from-internal) ----",
             "[portal-ringgroups]"]
@@ -498,15 +591,22 @@ def build_portal_dialplan(conn) -> str:
         members = [m for m in _members(g) if m in active]
         n, t = g["number"], g["ring_time"]
         out.append(f"exten => {n},1,NoOp(Ring group {n}: {g['name']})")
+        # Members on do not disturb are left out, at the time of the call.
         if not members:
             out.append(" same => n,NoOp(No active members)")
         elif g["strategy"] == "hunt":
-            for m in members:
-                out.append(f" same => n,Dial(PJSIP/{m},{t})")
-                out.append(' same => n,ExecIf($["${DIALSTATUS}" = "ANSWER"]?Hangup())')
+            for i, m in enumerate(members):
+                out += [f' same => n,GotoIf($["${{DB({DND_FAMILY}/{m})}}" = "1"]?skip{i})',
+                        f" same => n,Dial(PJSIP/{m},{t})",
+                        ' same => n,ExecIf($["${DIALSTATUS}" = "ANSWER"]?Hangup())',
+                        f" same => n(skip{i}),NoOp()"]
         else:
-            out.append(f" same => n,Dial({'&'.join(f'PJSIP/{m}' for m in members)},{t})")
-            out.append(' same => n,ExecIf($["${DIALSTATUS}" = "ANSWER"]?Hangup())')
+            out.append(" same => n,Set(RG=)")
+            out += [f' same => n,ExecIf($["${{DB({DND_FAMILY}/{m})}}" != "1"]?Set(RG=${{RG}}&PJSIP/{m}))' for m in members]
+            out += [' same => n,GotoIf($["${RG}" = ""]?nobody)',
+                    f" same => n,Dial(${{RG:1}},{t})",
+                    ' same => n,ExecIf($["${DIALSTATUS}" = "ANSWER"]?Hangup())',
+                    " same => n(nobody),NoOp()"]
         if g["voicemail"] in active:
             out.append(f" same => n,VoiceMail({g['voicemail']}@{VM_CONTEXT},u)")
         out.append(" same => n,Hangup()")
@@ -846,6 +946,97 @@ def api_extension_outbound_cid(ext: str, req: OutboundCidRequest):
         return apply_config(conn, f"Outbound caller ID for extension {ext}: {cid or 'the default'}")
 
 
+_DB_LINE = re.compile(r"^/(CF|CFB|CFU|DND)/(\d+)\s*:\s*(\S*)\s*$")
+
+
+def read_forwarding() -> Optional[Dict[str, dict]]:
+    """{ext: {"dnd": bool, "always": "...", "busy": "...", "no_answer": "..."}}
+    from AstDB, or None if Asterisk can't be asked."""
+    out = asterisk_cli("database show")
+    if out is None:
+        return None
+    names = {v: k for k, v in FORWARD_FAMILIES.items()}
+    found: Dict[str, dict] = {}
+    for line in out.splitlines():
+        m = _DB_LINE.match(line.strip())
+        if not m:
+            continue
+        family, ext, value = m.groups()
+        entry = found.setdefault(ext, {"dnd": False, "always": "", "busy": "", "no_answer": ""})
+        if family == DND_FAMILY:
+            entry["dnd"] = value == "1"
+        else:
+            entry[names[family]] = value
+    return found
+
+
+def _db_set(family: str, ext: str, value: str):
+    cmd = f"database put {family} {ext} {value}" if value else f"database del {family} {ext}"
+    out = asterisk_cli(cmd)
+    if out is None:
+        raise HTTPException(503, "Asterisk isn't answering, so nothing was changed. Is it running?")
+    if value and "updated" not in out.lower():
+        raise HTTPException(502, f"Asterisk didn't save it: {out.strip()[:200]}")
+
+
+def forward_target(conn, ext: str, value: str) -> str:
+    """The number as stored and dialled, or "" for off. Only other extensions
+    and Irish landlines and mobiles (see FORWARD_TARGET_DIALPLAN_RE)."""
+    v = re.sub(r"[\s()-]", "", value or "")
+    if not v:
+        return ""
+    if re.fullmatch(r"2\d\d", v):
+        if v == ext:
+            raise HTTPException(400, "An extension can't forward to itself.")
+        if not conn.execute("SELECT 1 FROM extensions WHERE ext = ?", (v,)).fetchone():
+            raise HTTPException(400, f"There's no extension {v}.")
+        return v
+    kind, national, _ = classify_dialled(v)
+    if kind not in ("mobile", "landline") or not re.fullmatch(r"0[1-9]\d{7,8}", national):
+        raise HTTPException(400, f"{value.strip()} can't be used: forward only to an extension or an Irish landline "
+                                 "or mobile (not abroad, 1800 or premium numbers).")
+    return national
+
+
+@router.get("/forwarding")
+def api_forwarding():
+    data = read_forwarding()
+    return {"available": data is not None, "extensions": data or {}}
+
+
+class ForwardingRequest(BaseModel):
+    dnd: bool = False
+    always: str = ""
+    busy: str = ""
+    no_answer: str = ""
+
+
+@router.put("/extensions/{ext}/forwarding")
+def api_set_forwarding(ext: str, req: ForwardingRequest):
+    with get_db() as conn:
+        if not conn.execute("SELECT 1 FROM extensions WHERE ext = ?", (ext,)).fetchone():
+            raise HTTPException(404, "Extension not found.")
+        targets = {k: forward_target(conn, ext, getattr(req, k)) for k in FORWARD_FAMILIES}
+    with _lock:
+        _db_set(DND_FAMILY, ext, "1" if req.dnd else "")
+        for key, family in FORWARD_FAMILIES.items():
+            _db_set(family, ext, targets[key])
+    summary = ", ".join([f"{k}={v}" for k, v in targets.items() if v] + (["dnd"] if req.dnd else [])) or "all off"
+    changes_log.info(f"Forwarding for extension {ext}: {summary}")
+    return {"ok": True, **targets, "dnd": req.dnd}
+
+
+def _clear_forwarding(ext: str):
+    """An extension's own settings, and forwards to it, when it's deleted."""
+    data = read_forwarding() or {}
+    for family in [DND_FAMILY, *FORWARD_FAMILIES.values()]:
+        asterisk_cli(f"database del {family} {ext}")
+    for other, entry in data.items():
+        for key, family in FORWARD_FAMILIES.items():
+            if entry.get(key) == ext:
+                asterisk_cli(f"database del {family} {other}")
+
+
 @router.post("/extensions/{ext}/reset-voicemail-pin")
 def api_reset_voicemail_pin(ext: str):
     with _lock, get_db() as conn:
@@ -1084,6 +1275,7 @@ def api_delete_extension(ext: str):
         conn.execute("UPDATE ring_groups SET voicemail = '' WHERE voicemail = ?", (ext,))
         _revoke_setup_links(conn, ext)
         conn.commit()
+        _clear_forwarding(ext)
         return apply_config(conn, f"Deleted extension {ext}")
 
 
