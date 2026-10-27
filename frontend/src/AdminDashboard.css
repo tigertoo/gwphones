@@ -966,3 +966,13 @@ body.saving .ticket-action-btn:disabled { cursor: progress; }
 /* Call forwarding and DND, in an extension's Phone setup panel */
 .pbx-forwarding { display: flex; flex-direction: column; gap: 8px; margin-top: 14px; max-width: 520px; }
 .pbx-forwarding .ticket-action-btn { align-self: flex-start; }
+
+/* Caller ID that isn't one of your numbers: a warning, not an error */
+.pbx-warning {
+  display: block;
+  margin-top: 6px;
+  padding: 6px 10px;
+  border-left: 3px solid var(--warn);
+  font-size: 12px;
+  color: var(--text);
+}

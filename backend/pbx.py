@@ -796,6 +796,29 @@ def normalize_did(did: str) -> str:
     return d
 
 
+def own_numbers(conn) -> List[str]:
+    """Numbers known to be yours (international, no +): the inbound routes'
+    DIDs and billing's DDIs. A caller ID not among them may be refused by
+    the carrier, so the dashboard warns about it (it doesn't block it)."""
+    found = {r["did"] for r in conn.execute("SELECT did FROM inbound_routes")}
+    path = os.environ.get("PBX_BILLING_DB", "/var/lib/admin-dashboard/billing.db")
+    try:
+        bconn = sqlite3.connect(f"file:{path}?mode=ro", uri=True, timeout=1)
+        try:
+            found |= {r[0] for r in bconn.execute("SELECT did FROM ddis")}
+        finally:
+            bconn.close()
+    except sqlite3.Error:
+        pass  # no billing yet: inbound routes only
+    numbers = set()
+    for d in found:
+        try:
+            numbers.add(normalize_did(d))
+        except HTTPException:
+            pass
+    return sorted(numbers)
+
+
 def _valid_target(conn, target: str) -> str:
     target = (target or "").strip()
     if conn.execute("SELECT 1 FROM extensions WHERE ext = ?", (target,)).fetchone() or \
@@ -852,6 +875,7 @@ def api_config():
             "number_types": NUMBER_TYPES,
             "voxbeam_routes": VOXBEAM_ROUTES,
             "limits": {"ext_min": EXT_MIN, "ext_max": EXT_MAX, "group_min": GROUP_MIN, "group_max": GROUP_MAX},
+            "own_numbers": own_numbers(conn),
         }
 
 

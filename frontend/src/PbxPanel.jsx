@@ -427,14 +427,36 @@ function VoicemailEmail({ ext, current, send, busy }) {
   );
 }
 
-function OutboundCid({ ext, current, fallback, dids, send, busy }) {
+// The caller ID as the backend compares it: international, digits only.
+function intlNumber(value) {
+  let d = (value || "").replace(/[\s()-]/g, "");
+  if (d.startsWith("+")) d = d.slice(1);
+  else if (d.startsWith("00")) d = d.slice(2);
+  else if (d.startsWith("0")) d = "353" + d.slice(1);
+  return d;
+}
+
+// A warning (not a block) for a caller ID that isn't one of your numbers:
+// carriers refuse calls showing a number that isn't on your account.
+function cidWarning(value, ownNumbers) {
+  const d = intlNumber(value);
+  if (!d || ownNumbers.includes(d)) return null;
+  if (!ownNumbers.length) {
+    return "Can't check this: add your numbers under Inbound routes or as billing DDIs.";
+  }
+  return `+${d} isn't one of your numbers (inbound routes and billing DDIs). Irish VoIP refuses calls showing a number that isn't on your account, so calls may fail.`;
+}
+
+function OutboundCid({ ext, current, fallback, dids, ownNumbers, send, busy }) {
   const [value, setValue] = useState(current || "");
   useEffect(() => setValue(current || ""), [current]);
   const clean = value.replace(/\s/g, "");
+  const warning = cidWarning(clean, ownNumbers);
   const save = (ev) => {
     ev.preventDefault();
     send("PUT", `/extensions/${ext}/outbound-cid`, { outbound_cid: clean },
-      clean ? `Calls from ${ext} will show ${clean}.` : `Calls from ${ext} will show the default caller ID.`);
+      clean ? `Calls from ${ext} will show ${clean}.${warning ? ` Warning: ${warning}` : ""}`
+        : `Calls from ${ext} will show the default caller ID.`);
   };
   return (
     <form className="idea-form-row pbx-gap" onSubmit={save}>
@@ -450,6 +472,7 @@ function OutboundCid({ ext, current, fallback, dids, send, busy }) {
       </datalist>
       <button className="ticket-action-btn" disabled={busy || clean === (current || "")}>Save</button>
       <span className="pbx-hint">Shown to people this extension calls. Use a number on your Irish VoIP account. Leave blank for the default.</span>
+      {warning && <div className="pbx-warning">{warning}</div>}
     </form>
   );
 }
@@ -689,7 +712,7 @@ function ExtensionsSection({ config, status, send, busy, apiBase, reload }) {
                     >New voicemail PIN</button>
                     <VoicemailEmail ext={e.ext} current={e.voicemail_email} send={send} busy={busy} />
                     <OutboundCid ext={e.ext} current={e.outbound_cid} fallback={config.settings.outbound_cid}
-                      dids={config.inbound_routes.map((r) => r.did)} send={send} busy={busy} />
+                      dids={config.inbound_routes.map((r) => r.did)} ownNumbers={config.own_numbers} send={send} busy={busy} />
                     <Forwarding ext={e.ext} current={forwarding.extensions[e.ext]} available={forwarding.available}
                       send={send} busy={busy} reload={loadForwarding} />
                     {!creds.server && <p className="pbx-hint">Set PBX_PUBLIC_HOST in the dashboard's .env to show the server name here.</p>}
@@ -824,6 +847,9 @@ function TrunksSection({ config, status, send, busy, apiBase }) {
             onChange={(e) => setForm({ ...form, outbound_cid: e.target.value })}
           />
           <small className="pbx-hint">Use a number on your Irish VoIP account. Carriers can reject calls showing a number you don't own. An extension can have its own under Phone setup.</small>
+          {cidWarning(form.outbound_cid, config.own_numbers) && (
+            <small className="pbx-warning">{cidWarning(form.outbound_cid, config.own_numbers)}</small>
+          )}
         </label>
         <label className="pbx-field">
           <span>Voxbeam route</span>
