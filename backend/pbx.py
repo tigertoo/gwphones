@@ -1829,6 +1829,29 @@ def send_voicemail_emails():
     return sent
 
 
+def _apply_now(reason: str) -> dict:
+    with _lock, get_db() as conn:
+        return apply_config(conn, reason)
+
+
+async def apply_on_startup(attempts: int = 6, wait: int = 10):
+    """Rewrite the Asterisk files and reload once when the dashboard starts,
+    so a deploy that changes what's generated (new contexts, hints...) takes
+    effect with the restart alone, no save needed. After a reboot Asterisk
+    may still be starting, so it tries again for about a minute; a file
+    that can't be written won't fix itself, so that stops at once."""
+    import asyncio
+    for attempt in range(attempts):
+        try:
+            result = await asyncio.to_thread(_apply_now, "Dashboard started: rewrote and reloaded")
+        except Exception as e:  # e.g. pbx.db unreadable: the tab will say so
+            changes_log.info(f"Dashboard started: couldn't apply the config: {e}")
+            return
+        if result["ok"] or any("couldn't write" in m for m in result["messages"]):
+            return
+        await asyncio.sleep(wait)
+
+
 async def voicemail_mail_loop():
     import asyncio
     while True:
