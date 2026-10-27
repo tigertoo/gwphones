@@ -8,6 +8,7 @@ import SaveToast, { busyText } from "./SaveToast";
 
 const SECTIONS = [
   { key: "status", label: "Status" },
+  { key: "call", label: "Click to Call" },
   { key: "extensions", label: "Extensions" },
   { key: "trunks", label: "Trunks & Outbound" },
   { key: "inbound", label: "Inbound & Ring Groups" },
@@ -39,8 +40,9 @@ function Result({ result }) {
   );
 }
 
-export default function PbxPanel({ apiBase }) {
-  const [section, setSection] = useState("status");
+export default function PbxPanel({ apiBase, callNumber }) {
+  const [section, setSection] = useState(callNumber ? "call" : "status");
+  useEffect(() => { if (callNumber) setSection("call"); }, [callNumber]);
   const [config, setConfig] = useState(null);
   const [status, setStatus] = useState(null);
   const [loadError, setLoadError] = useState(null);
@@ -84,6 +86,7 @@ export default function PbxPanel({ apiBase }) {
       [/reset-password$/, "Setting a new password and applying it…"],
       [/reset-voicemail-pin$/, "Setting a new voicemail PIN…"],
       [/^\/apply$/, "Applying to the phone system…"],
+      [/^\/click-to-call$/, "Ringing your extension…"],
     ]).replace(/^Saving…$/, "Saving and applying to the phone system…").replace(/^Deleting…$/, "Deleting and applying…") });
     try {
       const res = await fetch(`${apiBase}/api/pbx${path}`, {
@@ -137,6 +140,7 @@ export default function PbxPanel({ apiBase }) {
       <SaveToast toast={toast} onClose={closeToast} />
 
       {section === "status" && <StatusSection {...props} />}
+      {section === "call" && <ClickToCallSection {...props} initialNumber={callNumber} />}
       {section === "extensions" && <ExtensionsSection {...props} />}
       {section === "trunks" && <TrunksSection {...props} />}
       {section === "inbound" && <InboundSection {...props} />}
@@ -701,6 +705,110 @@ function ExtensionsSection({ config, status, send, busy, apiBase, reload }) {
           })}
         </tbody>
       </table>
+    </section>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Click to call
+// ---------------------------------------------------------------------------
+
+const C2C_EXT_KEY = "pbx-click-to-call-ext";
+
+// tel:+353-87-123-4567;ext=12 -> +353871234567 (parameters dropped)
+export function numberFromTel(value) {
+  let v = value || "";
+  try { v = decodeURIComponent(v); } catch { /* use as is */ }
+  v = v.replace(/^tel:/i, "").split(";")[0];
+  return v.replace(/[^\d+*#]/g, "");
+}
+
+function ClickToCallSection({ config, send, busy, apiBase, initialNumber }) {
+  const enabled = config.extensions.filter((e) => e.enabled);
+  const [ext, setExt] = useState(() => {
+    try { return localStorage.getItem(C2C_EXT_KEY) || ""; } catch { return ""; }
+  });
+  const [number, setNumber] = useState(initialNumber || "");
+  const [route, setRoute] = useState(null);
+  const [handler, setHandler] = useState("");
+  useEffect(() => { if (initialNumber) setNumber(initialNumber); }, [initialNumber]);
+  const from = enabled.some((e) => e.ext === ext) ? ext : enabled[0]?.ext || "";
+  const isExt = /^2\d\d$/.test(number.trim());
+
+  // What the call would do, before it's made: the route and price, or why
+  // it would be refused. Numbers from tel: links come from any web page.
+  useEffect(() => {
+    const n = number.trim();
+    if (!n || /^2\d\d$/.test(n)) { setRoute(null); return undefined; }
+    const t = setTimeout(async () => {
+      try {
+        const res = await fetch(`${apiBase}/api/pbx/route-test?${new URLSearchParams({ number: n })}`);
+        if (res.ok) setRoute(await res.json());
+      } catch { setRoute(null); }
+    }, 400);
+    return () => clearTimeout(t);
+  }, [number, apiBase]);
+
+  const call = async (ev) => {
+    ev.preventDefault();
+    try { localStorage.setItem(C2C_EXT_KEY, from); } catch { /* not remembered */ }
+    await send("POST", "/click-to-call", { ext: from, number },
+      `Ringing extension ${from}. Answer it and the call to ${number.trim()} starts.`);
+  };
+
+  const registerTel = () => {
+    try {
+      navigator.registerProtocolHandler("tel", `${window.location.origin}${window.location.pathname}?call=%s`);
+      setHandler("Asked the browser. Accept its prompt, then tel: links open here with the number filled in.");
+    } catch (e) {
+      setHandler(`This browser wouldn't do it: ${e.message}`);
+    }
+  };
+
+  const r = route?.result;
+  const blocked = !isExt && route && (!route.recognised || !!r?.refuse || !!r?.note);
+  let preview = null;
+  if (isExt) preview = <span>Extension {number.trim()}</span>;
+  else if (route && !route.recognised) preview = <span className="pbx-warning">Not a number the phones can call.</span>;
+  else if (r?.note) preview = <span className="pbx-warning">Dial emergency numbers from the phone itself.</span>;
+  else if (r?.refuse) preview = <span className="pbx-warning">Would be refused: {r.refuse}</span>;
+  else if (r?.routes?.length) {
+    const first = r.candidates.find((c) => !c.dropped);
+    preview = <span>{r.kind}, via {r.routes[0].label}{first?.per_min ? `, €${first.per_min}/min` : ""}</span>;
+  }
+
+  return (
+    <section className="panel">
+      <h2>Click to call</h2>
+      <p className="pbx-hint">
+        Your extension rings first, showing the number. Answer it and the call goes out as if you&rsquo;d dialled it:
+        your caller ID, the price cap, billed to your extension. It rings even on do not disturb.
+      </p>
+      <form className="idea-form-row pbx-add-row" onSubmit={call}>
+        <select className="idea-select pbx-select" value={from} onChange={(e) => setExt(e.target.value)}>
+          {enabled.map((e) => <option key={e.ext} value={e.ext}>{e.ext} {e.name}</option>)}
+        </select>
+        <input
+          className="idea-input"
+          placeholder="Number, e.g. 087 123 4567, +44 20 8759 9036 or 202"
+          value={number}
+          onChange={(e) => setNumber(e.target.value)}
+        />
+        <button className="ticket-action-btn ticket-action-btn-primary"
+          disabled={busy || !from || !number.trim() || blocked}>Call</button>
+      </form>
+      {preview && <div className="pbx-hint">{preview}</div>}
+      {initialNumber && <p className="pbx-hint">Filled in from a tel: link. Check the number before you call.</p>}
+
+      <div className="ticket-action-label pbx-gap">Call from links on other web pages</div>
+      <p className="pbx-hint">
+        Make this dashboard the browser&rsquo;s handler for phone number (tel:) links, e.g. in a CRM. Clicking one opens
+        this page with the number filled in; it never calls until you press Call. Chrome, Edge and Firefox; not Safari.
+      </p>
+      {typeof navigator.registerProtocolHandler === "function" ? (
+        <button className="ticket-action-btn" onClick={registerTel}>Open tel: links here</button>
+      ) : <p className="pbx-hint">This browser can&rsquo;t do this.</p>}
+      {handler && <p className="pbx-hint">{handler}</p>}
     </section>
   );
 }

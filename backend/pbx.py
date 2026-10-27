@@ -563,6 +563,32 @@ def _features_context() -> List[str]:
     return out
 
 
+C2C_RING = "portal-c2c-ring"
+C2C_DIAL = "portal-c2c-dial"
+
+
+def _click_to_call_contexts() -> List[str]:
+    """Click to call: the dashboard originates Local/<ext><number>@ring,
+    which rings the extension showing the number; once it answers, the
+    other half dials the number from dial as that extension (its caller ID,
+    billed to it via CDR userfield c2c:<ext>) through from-internal, so the
+    route check, price cap and call limit apply as for a dialled call.
+    Extensions are always 3 digits. Not included anywhere a phone can
+    reach, so a phone can't use these to pass as another extension. The
+    ring leg skips do not disturb and forwarding: the user asked for it."""
+    return ["; ---- Click to call: only started by the dashboard, never dialled ----",
+            f"[{C2C_RING}]",
+            "exten => _2XXX.,1,Set(CALLERID(name)=Calling ${EXTEN:3})",
+            " same => n,Set(CALLERID(num)=${EXTEN:3})",
+            " same => n,Dial(PJSIP/${EXTEN:0:3},30)",
+            " same => n,Hangup()",
+            f"[{C2C_DIAL}]",
+            "exten => _2XXX.,1,Set(C2C=${EXTEN:0:3})",
+            " same => n,Set(CDR(userfield)=c2c:${C2C})",
+            " same => n,Set(EXT_CID=${EXTCID_${C2C}})",
+            " same => n,Goto(from-internal,${EXTEN:3},1)"]
+
+
 def build_portal_dialplan(conn) -> str:
     s = get_settings(conn)
     active = {r["ext"] for r in conn.execute("SELECT ext FROM extensions WHERE enabled = 1")}
@@ -582,7 +608,7 @@ def build_portal_dialplan(conn) -> str:
             "; ---- Busy lamps (BLF) and presence: one hint per extension ----",
             f"[{HINTS_CONTEXT}]"]
     out += [f"exten => {e},hint,PJSIP/{e}" for e in sorted(active)]
-    out += [""] + _call_ext_context() + [""] + _features_context()
+    out += [""] + _call_ext_context() + [""] + _features_context() + [""] + _click_to_call_contexts()
     out += ["",
             "; ---- Ring groups (included into from-internal) ----",
             "[portal-ringgroups]"]
@@ -1035,6 +1061,47 @@ def _clear_forwarding(ext: str):
         for key, family in FORWARD_FAMILIES.items():
             if entry.get(key) == ext:
                 asterisk_cli(f"database del {family} {other}")
+
+
+class ClickToCallRequest(BaseModel):
+    ext: str
+    number: str
+
+
+def click_to_call_target(conn, ext: str, number: str) -> str:
+    """The number as the dialplan will dial it (digits only), or 400. Never
+    emergency numbers: a tel: link from any web page can fill this in."""
+    v = re.sub(r"[\s().-]", "", number or "")
+    if re.fullmatch(r"2\d\d", v):
+        if v == ext:
+            raise HTTPException(400, "That's the extension you're calling from.")
+        if not conn.execute("SELECT 1 FROM extensions WHERE ext = ? AND enabled = 1", (v,)).fetchone():
+            raise HTTPException(400, f"There's no extension {v}.")
+        return v
+    kind, national, _ = classify_dialled(v)
+    if kind == "emergency":
+        raise HTTPException(400, "Dial emergency numbers from the phone itself.")
+    if not kind or not re.fullmatch(r"\d{6,20}", national):
+        raise HTTPException(400, f"{number.strip()} isn't a number the phones can call.")
+    return national
+
+
+@router.post("/click-to-call")
+def api_click_to_call(req: ClickToCallRequest):
+    with get_db() as conn:
+        e = conn.execute("SELECT * FROM extensions WHERE ext = ?", (req.ext,)).fetchone()
+        if not e or not e["enabled"]:
+            raise HTTPException(400, "Choose an extension that's switched on.")
+        target = click_to_call_target(conn, e["ext"], req.number)
+    # Only digits reach the command line (checked above).
+    leg = f"{e['ext']}{target}"
+    out = asterisk_cli(f"channel originate Local/{leg}@{C2C_RING}/n extension {leg}@{C2C_DIAL}")
+    changes_log.info(f"Click to call: extension {e['ext']} to {target}")
+    if out is None:
+        raise HTTPException(502, "Asterisk didn't answer, so the call may not have started. Check your phone.")
+    if re.search(r"no such command|usage:|unable to", out, re.I):
+        raise HTTPException(502, f"Asterisk said: {out.strip()[:200]}")
+    return {"ok": True, "number": target, "asterisk_said": out.strip()[:200]}
 
 
 @router.post("/extensions/{ext}/reset-voicemail-pin")

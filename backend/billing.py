@@ -237,7 +237,8 @@ def classify(row: dict) -> dict:
         # An outside caller forwarded to an outside number by an extension
         # (portal-call-ext sets userfield fwd:<ext>): that extension pays.
         # A forward that an extension's own call set going is the caller's.
-        fwd = re.fullmatch(r"fwd:(\d+)", row.get("userfield") or "")
+        # Click to call dials from a Local channel (userfield c2c:<ext>).
+        fwd = re.fullmatch(r"(?:fwd|c2c):(\d+)", row.get("userfield") or "")
         if not call["ext"] and fwd:
             call["ext"] = fwd.group(1)
         target = DIAL_TARGET.match(row["lastdata"] or "")

@@ -966,3 +966,11 @@ body.saving .ticket-action-btn:disabled { cursor: progress; }
 /* Call forwarding and DND, in an extension's Phone setup panel */
 .pbx-forwarding { display: flex; flex-direction: column; gap: 8px; margin-top: 14px; max-width: 520px; }
 .pbx-forwarding .ticket-action-btn { align-self: flex-start; }
+
+/* Something to notice before acting, e.g. a call that would be refused */
+.pbx-warning {
+  display: inline-block;
+  padding: 4px 10px;
+  border-left: 3px solid var(--warn);
+  color: var(--text);
+}
