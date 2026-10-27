@@ -1,0 +1,74 @@
+:root {
+  --bg: #f4f6f8;
+  --card: #ffffff;
+  --text: #1c2430;
+  --muted: #5b6675;
+  --line: #d9dee5;
+  --call: #1f8a4c;
+  --hangup: #c0392b;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #11161c;
+    --card: #1a2129;
+    --text: #e6ebf1;
+    --muted: #9aa6b4;
+    --line: #2c3540;
+    --call: #2ea862;
+    --hangup: #d9534f;
+  }
+}
+* { box-sizing: border-box; }
+body {
+  margin: 0;
+  min-height: 100vh;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 16px;
+  background: var(--bg);
+  color: var(--text);
+  font: 16px/1.5 -apple-system, system-ui, "Segoe UI", Roboto, sans-serif;
+}
+.card {
+  width: 100%;
+  max-width: 420px;
+  padding: 24px;
+  background: var(--card);
+  border: 1px solid var(--line);
+  border-radius: 14px;
+}
+h1 { margin: 0 0 6px; font-size: 22px; }
+.hint { margin: 0 0 16px; color: var(--muted); }
+.small { margin-top: 18px; font-size: 13px; }
+.field { display: flex; flex-direction: column; gap: 6px; margin-bottom: 12px; color: var(--muted); font-size: 14px; }
+.field input {
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--bg);
+  color: var(--text);
+  font-size: 16px;
+}
+.row { display: flex; align-items: center; gap: 8px; margin-bottom: 12px; font-size: 14px; }
+.buttons { display: flex; gap: 10px; margin-top: 8px; }
+button {
+  flex: 1;
+  padding: 14px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--bg);
+  color: var(--text);
+  font-family: inherit;
+  font-size: 17px;
+  font-weight: 600;
+  cursor: pointer;
+}
+button.call { background: var(--call); border-color: var(--call); color: #fff; }
+button.hangup { background: var(--hangup); border-color: var(--hangup); color: #fff; }
+button[hidden] { display: none; }
+.status { min-height: 1.5em; margin: 14px 0 0; font-weight: 600; }
+.videos { position: relative; margin-top: 14px; }
+.videos[hidden] { display: none; }
+#remote { width: 100%; border-radius: 10px; background: #000; }
+#local { position: absolute; right: 8px; bottom: 8px; width: 30%; border-radius: 8px; border: 2px solid var(--card); }

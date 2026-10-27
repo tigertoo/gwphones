@@ -9,6 +9,7 @@ import SaveToast, { busyText } from "./SaveToast";
 const SECTIONS = [
   { key: "status", label: "Status" },
   { key: "call", label: "Click to Call" },
+  { key: "links", label: "Call Links" },
   { key: "extensions", label: "Extensions" },
   { key: "trunks", label: "Trunks & Outbound" },
   { key: "inbound", label: "Inbound & Ring Groups" },
@@ -87,6 +88,7 @@ export default function PbxPanel({ apiBase, callNumber }) {
       [/reset-voicemail-pin$/, "Setting a new voicemail PIN…"],
       [/^\/apply$/, "Applying to the phone system…"],
       [/^\/click-to-call$/, "Ringing your extension…"],
+      [/^\/call-links/, method === "DELETE" ? "Deleting the link…" : "Saving the link and applying…"],
     ]).replace(/^Saving…$/, "Saving and applying to the phone system…").replace(/^Deleting…$/, "Deleting and applying…") });
     try {
       const res = await fetch(`${apiBase}/api/pbx${path}`, {
@@ -141,6 +143,7 @@ export default function PbxPanel({ apiBase, callNumber }) {
 
       {section === "status" && <StatusSection {...props} />}
       {section === "call" && <ClickToCallSection {...props} initialNumber={callNumber} />}
+      {section === "links" && <CallLinksSection {...props} />}
       {section === "extensions" && <ExtensionsSection {...props} />}
       {section === "trunks" && <TrunksSection {...props} />}
       {section === "inbound" && <InboundSection {...props} />}
@@ -809,6 +812,148 @@ function ClickToCallSection({ config, send, busy, apiBase, initialNumber }) {
         <button className="ticket-action-btn" onClick={registerTel}>Open tel: links here</button>
       ) : <p className="pbx-hint">This browser can&rsquo;t do this.</p>}
       {handler && <p className="pbx-hint">{handler}</p>}
+    </section>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Call links: a URL anyone can open to call from their browser
+// ---------------------------------------------------------------------------
+
+const EMPTY_LINK = { label: "", target: "", video: false, max_minutes: 30, enabled: true };
+
+function linkSnippets(link) {
+  const esc = (v) => v.replace(/&/g, "&amp;").replace(/"/g, "&quot;").replace(/</g, "&lt;");
+  return {
+    signature: `<a href="${esc(link.url)}">Call me from your browser</a>`,
+    button: `<a href="${esc(link.url)}" target="_blank" rel="noopener" style="display:inline-block;padding:12px 20px;border-radius:8px;background:#1f8a4c;color:#fff;text-decoration:none;font:600 16px sans-serif">Call us</a>`,
+    iframe: `<iframe src="${esc(link.url)}" allow="microphone; camera" width="420" height="520" style="border:0"></iframe>`,
+  };
+}
+
+function CallLinksSection({ config, send, busy, apiBase }) {
+  const [data, setData] = useState(null);
+  const [form, setForm] = useState(null); // null | { ...fields, id? }
+  const [open, setOpen] = useState(null); // id whose snippets are showing
+
+  const load = useCallback(async () => {
+    const res = await fetch(`${apiBase}/api/pbx/call-links`);
+    if (res.ok) setData(await res.json());
+  }, [apiBase]);
+  useEffect(() => { load(); }, [load, config]);
+
+  const targets = [
+    ...config.extensions.filter((e) => e.enabled).map((e) => ({ value: e.ext, label: `Extension ${e.ext} ${e.name}` })),
+    ...config.ring_groups.map((g) => ({ value: g.number, label: `Ring group ${g.number} ${g.name}` })),
+  ];
+  const targetName = (t) => targets.find((x) => x.value === t)?.label || `${t} (switched off or gone)`;
+
+  const save = async (ev) => {
+    ev.preventDefault();
+    const body = { ...form, target: form.target || targets[0]?.value || "", max_minutes: Number(form.max_minutes) };
+    const ok = form.id
+      ? await send("PUT", `/call-links/${form.id}`, body, "Call link saved.")
+      : await send("POST", "/call-links", body, "Call link created. Copy its URL or a snippet below.");
+    if (ok) { setForm(null); load(); }
+  };
+
+  if (!data) return <section className="panel"><p className="panel-empty">Loading…</p></section>;
+
+  return (
+    <section className="panel">
+      <h2>Call links</h2>
+      <p className="pbx-hint">
+        A link anyone can open to call an extension or ring group from their browser, with no app or account: for an
+        email signature, a website or a QR code. Browsers can only reach the targets of links that are switched on,
+        never an outside line. At most 2 calls at once per link and 5 in all.
+      </p>
+      {!data.ready && (
+        <div className="pbx-warning">Set PBX_PROVISION_BASE_URL and PBX_PUBLIC_HOST in the dashboard&rsquo;s .env, and set up
+          /call/ and /pbx-ws in nginx (see the README), before links can work.</div>
+      )}
+      {!form && <button className="ticket-action-btn ticket-action-btn-primary pbx-gap" onClick={() => setForm({ ...EMPTY_LINK })}>New call link</button>}
+
+      {form && (
+        <form className="pbx-forwarding" onSubmit={save}>
+          <label className="pbx-field"><span>Name (shown on the page and on the phone)</span>
+            <input className="idea-input" maxLength={40} placeholder="e.g. Sales website" value={form.label}
+              onChange={(e) => setForm({ ...form, label: e.target.value })} />
+          </label>
+          <label className="pbx-field"><span>Rings</span>
+            <select className="idea-select pbx-select" value={form.target || targets[0]?.value || ""}
+              onChange={(e) => setForm({ ...form, target: e.target.value })}>
+              {targets.map((t) => <option key={t.value} value={t.value}>{t.label}</option>)}
+            </select>
+          </label>
+          <label className="pbx-field"><span>Longest call (minutes)</span>
+            <input className="idea-input pbx-num-input" type="number" min={1} max={data.max_minutes} value={form.max_minutes}
+              onChange={(e) => setForm({ ...form, max_minutes: e.target.value })} />
+          </label>
+          <label className="pbx-toggle">
+            <input type="checkbox" checked={form.video} onChange={(e) => setForm({ ...form, video: e.target.checked })} />
+            Allow video{!data.video_on && " (also turn on video calls under Extensions)"}
+          </label>
+          <label className="pbx-toggle">
+            <input type="checkbox" checked={form.enabled} onChange={(e) => setForm({ ...form, enabled: e.target.checked })} />
+            Switched on
+          </label>
+          <div className="pbx-actions">
+            <button className="ticket-action-btn ticket-action-btn-primary" disabled={busy || !form.label.trim()}>
+              {form.id ? "Save" : "Create link"}</button>
+            <button type="button" className="ticket-action-btn" onClick={() => setForm(null)}>Cancel</button>
+          </div>
+        </form>
+      )}
+
+      {data.links.length === 0 ? <p className="panel-empty">No call links yet.</p> : (
+        <table className="users-table pbx-gap">
+          <thead><tr><th>Name</th><th>Rings</th><th>Options</th><th>Last opened</th><th>Actions</th></tr></thead>
+          <tbody>
+            {data.links.flatMap((l) => {
+              const rows = [
+                <tr key={l.id} className={l.live ? "" : "pbx-row-disabled"}>
+                  <td>{l.label}{!l.live && <div className="pbx-hint">{l.enabled ? "Not working: its target is off or gone" : "Switched off"}</div>}</td>
+                  <td>{targetName(l.target)}</td>
+                  <td>{l.video ? "Video, " : ""}{l.max_minutes} min</td>
+                  <td>{l.last_opened_at ? new Date(l.last_opened_at).toLocaleString() : <span className="pbx-hint">Never</span>}</td>
+                  <td className="pbx-actions">
+                    <button className="ticket-action-btn" onClick={() => setOpen(open === l.id ? null : l.id)}>
+                      {open === l.id ? "Hide" : "Link & snippets"}</button>
+                    <button className="ticket-action-btn" onClick={() => setForm({ ...l })}>Edit</button>
+                    <button className="ticket-action-btn" disabled={busy}
+                      onClick={async () => window.confirm(`Give "${l.label}" a new URL? The current one stops working straight away, wherever it's been shared.`) &&
+                        (await send("POST", `/call-links/${l.id}/new-url`, null, "New URL made. Update it wherever the link is shared.")) && load()}
+                    >New URL</button>
+                    <button className="ticket-action-btn idea-delete-btn" disabled={busy}
+                      onClick={async () => window.confirm(`Delete "${l.label}"? The link stops working wherever it's been shared.`) &&
+                        (await send("DELETE", `/call-links/${l.id}`, null, "Call link deleted.")) && load()}
+                    >Delete</button>
+                  </td>
+                </tr>,
+              ];
+              if (open === l.id) {
+                const sn = linkSnippets(l);
+                rows.push(
+                  <tr key={`${l.id}-snippets`}>
+                    <td colSpan={5} className="ticket-action-panel">
+                      <CopyField label="Link" value={l.url} />
+                      {l.qr && <img className="pbx-qr-img" src={l.qr} alt={`QR code for ${l.label}`} />}
+                      <div className="ticket-action-label">Email signature</div>
+                      <CopyField label="HTML" value={sn.signature} />
+                      <div className="ticket-action-label">Website button (opens the call in a new tab)</div>
+                      <CopyField label="HTML" value={sn.button} />
+                      <div className="ticket-action-label">Website, built into the page</div>
+                      <CopyField label="HTML" value={sn.iframe} />
+                      <p className="pbx-hint">Built in only works if the website allows it; the button always works.</p>
+                    </td>
+                  </tr>
+                );
+              }
+              return rows;
+            })}
+          </tbody>
+        </table>
+      )}
     </section>
   );
 }
