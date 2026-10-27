@@ -91,6 +91,10 @@ PORTAL_DIALPLAN = os.path.join(GENERATED_DIR, "extensions_portal.conf")
 # context so they can't clash with anything defined there by hand.
 VOICEMAIL_CONF = os.path.join(GENERATED_DIR, "voicemail_portal.conf")
 VM_CONTEXT = "portal"
+# Where phones' SUBSCRIBEs for busy lamps (BLF) and presence are looked
+# up: only the hints, so a phone can watch an extension but can't reach
+# anything else in the dialplan this way.
+HINTS_CONTEXT = "portal-hints"
 VOICEMAIL_NUMBER = "*97"  # check your own voicemail (static dialplan)
 # Asterisk hands each "new voicemail" email to asterisk/vm-mail.sh (mailcmd
 # in voicemail.conf), which drops it here; the dashboard sends it on
@@ -377,7 +381,8 @@ def build_extensions_conf(conn) -> str:
                 f"auth={r['ext']}",
                 f"aors={r['ext']}",
                 f"callerid=\"{r['name']}\" <{r['ext']}>",
-                f"mailboxes={r['ext']}@{VM_CONTEXT}"]
+                f"mailboxes={r['ext']}@{VM_CONTEXT}",
+                f"subscribe_context={HINTS_CONTEXT}"]
         if video:
             out.append(f"allow={VIDEO_CODECS}")  # added to the template's audio codecs
         if r["outbound_cid"]:
@@ -482,8 +487,12 @@ def build_portal_dialplan(conn) -> str:
            f"VOXBEAM_PREFIX={s['voxbeam_prefix']}",
            f"LCR_TOKEN={_lcr_token(conn)}",
            "",
-           "; ---- Ring groups (included into from-internal) ----",
-           "[portal-ringgroups]"]
+           "; ---- Busy lamps (BLF) and presence: one hint per extension ----",
+           f"[{HINTS_CONTEXT}]"]
+    out += [f"exten => {e},hint,PJSIP/{e}" for e in sorted(active)]
+    out += ["",
+            "; ---- Ring groups (included into from-internal) ----",
+            "[portal-ringgroups]"]
 
     for g in conn.execute("SELECT * FROM ring_groups ORDER BY number"):
         members = [m for m in _members(g) if m in active]
