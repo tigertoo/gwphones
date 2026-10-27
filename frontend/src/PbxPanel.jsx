@@ -479,6 +479,17 @@ function ExtensionsSection({ config, status, send, busy, apiBase, reload }) {
   return (
     <section className="panel">
       <h2>Extensions</h2>
+      <label className="pbx-toggle pbx-gap">
+        <input
+          type="checkbox"
+          checked={config.settings.video}
+          disabled={busy}
+          onChange={(ev) => send("PUT", "/settings", { ...config.settings, video: ev.target.checked },
+            ev.target.checked ? "Video calls between extensions turned on." : "Video calls turned off: calls are audio only.")}
+        />
+        Video calls between extensions
+      </label>
+      <span className="pbx-hint"> Groundwire and Linphone (VP8/H.264). Calls to and from outside numbers stay audio only.</span>
       <form className="idea-form-row pbx-add-row" onSubmit={add}>
         <input
           className="idea-input pbx-num-input"
