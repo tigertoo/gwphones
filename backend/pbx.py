@@ -131,7 +131,7 @@ ROUTE_CHOICES = ["default", *TRUNKS, "cheapest", "off"]
 ALL_ROUTES = [("irishvoip", ""), *[("voxbeam", p) for p in VOXBEAM_ROUTES]]
 LCR_URL = "http://127.0.0.1:8010/lcr/route"
 
-VIDEO_CODECS = "vp8,h264"  # what Groundwire and Linphone both offer
+VIDEO_CODECS = "h264,vp8"  # both apps offer these; H.264 first: iPhones encode it in hardware
 
 DEFAULT_SETTINGS = {
     "outbound_cid": "",
