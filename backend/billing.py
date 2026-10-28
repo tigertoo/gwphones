@@ -257,7 +257,9 @@ def classify(row: dict) -> dict:
         call["direction"] = "internal"
     if call.get("status") != "free":
         if call["direction"] != "out":
-            call["status"], call["reason"] = "free", "Inbound call" if call["direction"] == "in" else "Internal call"
+            call["status"], call["reason"] = "free", ("Inbound call" if call["direction"] == "in" else
+                                                      "Call link" if (channel or "").startswith("PJSIP/webguest-") else
+                                                      "Internal call")
         elif row["disposition"] != "ANSWERED" or call["billsec"] <= 0:
             call["status"], call["reason"] = "failed", _not_connected(row["disposition"], call["billsec"])
         elif not call["number"]:

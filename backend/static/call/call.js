@@ -57,7 +57,7 @@
         sockets: [socket],
         uri: `sip:${cfg.user}@${cfg.domain}`,
         password: cfg.password,
-        display_name: name || "Web visitor",
+        display_name: name || "Visitor",  // the PBX shows "Web <name> (<link>)"
         register: false,
         session_timers: false,
         user_agent: "Call link",
