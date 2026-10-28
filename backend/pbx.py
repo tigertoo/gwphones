@@ -743,7 +743,7 @@ def _ivr_contexts(conn, active) -> List[str]:
             out += [f"exten => {e},1,Goto(portal-call-ext,{e},1)" for e in sorted(active)]
         retry = f" same => n,GotoIf($[${{TRIES}} < {int(m['retries'])}]?s,menu)"
         out += ["exten => t,1,NoOp(No key pressed)", retry, *give_up,
-                "exten => i,1,Playback(option-is-invalid)", retry, *give_up]
+                "exten => i,1,Playback(invalid)", retry, *give_up]
     return out
 
 
