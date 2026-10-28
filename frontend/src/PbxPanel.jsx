@@ -1,5 +1,6 @@
 import React, { useEffect, useState, useCallback } from "react";
 import BillingPanel from "./BillingPanel";
+import IvrSection from "./IvrSection";
 import SaveToast, { busyText } from "./SaveToast";
 
 // Phone System tab: manages the Asterisk PBX on this VPS through the
@@ -13,6 +14,7 @@ const SECTIONS = [
   { key: "extensions", label: "Extensions" },
   { key: "trunks", label: "Trunks & Outbound" },
   { key: "inbound", label: "Inbound & Ring Groups" },
+  { key: "ivr", label: "IVR Menus" },
   { key: "billing", label: "Billing" },
 ];
 const STATUS_POLL_MS = 5000;
@@ -89,12 +91,15 @@ export default function PbxPanel({ apiBase, callNumber }) {
       [/^\/apply$/, "Applying to the phone system…"],
       [/^\/click-to-call$/, "Ringing your extension…"],
       [/^\/call-links/, method === "DELETE" ? "Deleting the link…" : "Saving the link and applying…"],
+      [/\/greeting$/, method === "DELETE" ? "Removing the greeting…" : "Sending the greeting…"],
     ]).replace(/^Saving…$/, "Saving and applying to the phone system…").replace(/^Deleting…$/, "Deleting and applying…") });
     try {
+      // Bytes (an IVR greeting) go as they are, anything else as JSON.
+      const raw = body instanceof Uint8Array;
       const res = await fetch(`${apiBase}/api/pbx${path}`, {
         method,
-        headers: { "Content-Type": "application/json" },
-        body: body ? JSON.stringify(body) : undefined,
+        headers: { "Content-Type": raw ? "application/octet-stream" : "application/json" },
+        body: raw ? body : body ? JSON.stringify(body) : undefined,
       });
       const data = await res.json().catch(() => ({}));
       if (!res.ok) {
@@ -147,6 +152,7 @@ export default function PbxPanel({ apiBase, callNumber }) {
       {section === "extensions" && <ExtensionsSection {...props} />}
       {section === "trunks" && <TrunksSection {...props} />}
       {section === "inbound" && <InboundSection {...props} />}
+      {section === "ivr" && <IvrSection {...props} />}
       {section === "billing" && <BillingPanel apiBase={apiBase} />}
     </div>
   );
@@ -845,6 +851,7 @@ function CallLinksSection({ config, send, busy, apiBase }) {
   const targets = [
     ...config.extensions.filter((e) => e.enabled).map((e) => ({ value: e.ext, label: `Extension ${e.ext} ${e.name}` })),
     ...config.ring_groups.map((g) => ({ value: g.number, label: `Ring group ${g.number} ${g.name}` })),
+    ...config.ivr_menus.map((m) => ({ value: m.number, label: `IVR menu ${m.number} ${m.name}` })),
   ];
   const targetName = (t) => targets.find((x) => x.value === t)?.label || `${t} (switched off or gone)`;
 
@@ -863,7 +870,7 @@ function CallLinksSection({ config, send, busy, apiBase }) {
     <section className="panel">
       <h2>Call links</h2>
       <p className="pbx-hint">
-        A link anyone can open to call an extension or ring group from their browser, with no app or account: for an
+        A link anyone can open to call an extension, ring group or IVR menu (with a keypad) from their browser, with no app or account: for an
         email signature, a website or a QR code. Browsers can only reach the targets of links that are switched on,
         never an outside line. At most 2 calls at once per link and 5 in all.
       </p>
@@ -1219,6 +1226,9 @@ function DestinationSelect({ config, value, onChange }) {
           <option key={e.ext} value={e.ext}>{e.ext} · {e.name}{e.enabled ? "" : " (disabled)"}</option>
         ))}
       </optgroup>
+      <optgroup label="IVR menus">
+        {config.ivr_menus.map((m) => <option key={m.number} value={m.number}>{m.number} · {m.name}</option>)}
+      </optgroup>
     </select>
   );
 }
@@ -1229,7 +1239,8 @@ function InboundSection({ config, send, busy }) {
   const [route, setRoute] = useState({ did: "", label: "", target: config.settings.inbound_default });
   const [group, setGroup] = useState(null); // null | { ...fields, isNew }
   const nameOf = (n) =>
-    config.ring_groups.find((g) => g.number === n)?.name || config.extensions.find((e) => e.ext === n)?.name || "?";
+    config.ring_groups.find((g) => g.number === n)?.name || config.extensions.find((e) => e.ext === n)?.name ||
+    config.ivr_menus.find((m) => m.number === n)?.name || "?";
   const extName = (n) => config.extensions.find((e) => e.ext === n);
 
   const saveGroup = async () => {

@@ -14,6 +14,7 @@
     callBtn.hidden = calling;
     hangupBtn.hidden = !calling;
     muteBtn.hidden = !calling;
+    if ($("keypad")) $("keypad").hidden = !calling;
     $("name").disabled = calling;
     if ($("video")) $("video").disabled = calling;
   };
@@ -138,6 +139,21 @@
       muteBtn.textContent = "Unmute";
     }
   });
+
+  // Menus (IVR): keys as in-band RFC 4733 events, which Asterisk's
+  // WebRTC endpoint expects (JsSIP's default is SIP INFO).
+  const press = (key) => {
+    if (session && session.isEstablished()) session.sendDTMF(key, { transportType: "RFC2833" });
+  };
+  if ($("keypad")) {
+    $("keypad").addEventListener("click", (e) => {
+      const key = e.target.closest("button")?.dataset.key;
+      if (key) press(key);
+    });
+    document.addEventListener("keydown", (e) => {
+      if (/^[0-9*#]$/.test(e.key) && e.target.id !== "name") press(e.key);
+    });
+  }
 
   window.addEventListener("beforeunload", () => { if (session) session.terminate(); });
 })();

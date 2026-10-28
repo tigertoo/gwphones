@@ -860,6 +860,14 @@
   text-decoration: line-through;
 }
 
+.pbx-key-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
+  gap: 8px 16px;
+}
+.pbx-key-row { display: flex; align-items: center; gap: 8px; }
+.pbx-key-row .pbx-select { flex: 1; min-width: 0; }
+.pbx-greeting { display: flex; flex-wrap: wrap; gap: 6px; white-space: normal; margin: 6px 0; }
 .pbx-member-grid {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(170px, 1fr));

@@ -28,6 +28,7 @@ open to that group (astctlpermissions = 0660 in asterisk.conf).
 import os
 import re
 import html
+import json
 import base64
 import email
 import email.policy
@@ -126,6 +127,14 @@ STATIC_DIALPLAN = os.path.join(ASTERISK_DIR, "extensions.conf")
 # groups live in their own 6XX range so the two can never collide.
 EXT_MIN, EXT_MAX = 200, 299
 GROUP_MIN, GROUP_MAX = 600, 699
+# IVR menus: 5XX (7XX is Asterisk's default parking lot).
+MENU_MIN, MENU_MAX = 500, 599
+MENU_KEYS = "1234567890*#"
+MAX_MENU_HOPS = 20  # menus entered in one call, so a fallback loop ends
+# Greetings, one per menu (ivr-<number>.ulaw: 8 kHz mu-law, no header).
+# The dashboard page converts uploads and recordings to that, so nothing
+# here ever reads an uploaded audio file; any bytes are valid mu-law.
+IVR_DIR = os.path.join(GENERATED_DIR, "ivr")
 
 # The trunks themselves (host, IP matching) are defined by hand in
 # pjsip.conf. Here we only decide whether/in what order they're used for
@@ -294,7 +303,15 @@ def get_db() -> sqlite3.Connection:
                max_minutes INTEGER NOT NULL DEFAULT 30,
                enabled INTEGER NOT NULL DEFAULT 1,
                created_at TEXT NOT NULL,
-               last_opened_at TEXT);"""
+               last_opened_at TEXT);
+           CREATE TABLE IF NOT EXISTS ivr_menus (
+               number TEXT PRIMARY KEY,
+               name TEXT NOT NULL,
+               options TEXT NOT NULL DEFAULT '{}',
+               fallback TEXT NOT NULL DEFAULT '',
+               timeout INTEGER NOT NULL DEFAULT 6,
+               retries INTEGER NOT NULL DEFAULT 3,
+               direct_dial INTEGER NOT NULL DEFAULT 0);"""
     )
     if fresh:
         os.chmod(PBX_DB_PATH, 0o600)  # holds SIP passwords
@@ -402,13 +419,25 @@ def _members(row) -> List[str]:
     return [m for m in (row["members"] or "").split(",") if m]
 
 
+def menu_options(row) -> Dict[str, str]:
+    try:
+        return {k: v for k, v in json.loads(row["options"] or "{}").items() if k in MENU_KEYS and v}
+    except (ValueError, AttributeError):
+        return {}
+
+
+def greeting_path(number: str) -> str:
+    return os.path.join(IVR_DIR, f"ivr-{number}.ulaw")
+
+
 def live_call_links(conn) -> List[sqlite3.Row]:
-    """Enabled links whose target still answers: an enabled extension or a
-    ring group."""
+    """Enabled links whose target still answers: an enabled extension, a
+    ring group or an IVR menu."""
     exts = {r["ext"] for r in conn.execute("SELECT ext FROM extensions WHERE enabled = 1")}
     groups = {r["number"] for r in conn.execute("SELECT number FROM ring_groups")}
+    menus = {r["number"] for r in conn.execute("SELECT number FROM ivr_menus")}
     return [r for r in conn.execute("SELECT * FROM call_links WHERE enabled = 1 ORDER BY id")
-            if r["target"] in exts or r["target"] in groups]
+            if r["target"] in exts or r["target"] in groups or r["target"] in menus]
 
 
 def web_guest_password(conn) -> str:
@@ -643,6 +672,7 @@ def _weblinks_context(conn, active) -> List[str]:
            f"[{WEBLINKS_CONTEXT}]"]
     for r in live_call_links(conn):
         target = (f"Goto(portal-call-ext,{r['target']},1)" if r["target"] in active
+                  else f"Goto(portal-ivr-{r['target']},s,1)" if MENU_MIN <= int(r["target"]) <= MENU_MAX
                   else f"Goto(portal-ringgroups,{r['target']},1)")
         label = re.sub(r"[^A-Za-z0-9 .'_-]", "", r["label"])[:30]
         out += [f"exten => wl-{r['token']},1,NoOp(Call link {r['id']}: {label})",
@@ -657,6 +687,63 @@ def _weblinks_context(conn, active) -> List[str]:
                 f" same => n,{target}",
                 " same => n(busy),Congestion(5)",
                 " same => n,Hangup()"]
+    return out
+
+
+def _menu_goto(target: str, active, groups, menus) -> Optional[str]:
+    """Where an IVR key or fallback sends the call, or None if that's gone
+    (switched off or deleted): the key then counts as a wrong one."""
+    if target == "hangup":
+        return "Hangup()"
+    if target.startswith("vm:"):
+        return f"VoiceMail({target[3:]}@{VM_CONTEXT},u)" if target[3:] in active else None
+    if target in active:
+        return f"Goto(portal-call-ext,{target},1)"
+    if target in groups:
+        return f"Goto(portal-ringgroups,{target},1)"
+    if target in menus:
+        return f"Goto(portal-ivr-{target},s,1)"
+    return None
+
+
+def _ivr_contexts(conn, active) -> List[str]:
+    """One context per menu, [portal-ivr-5XX], entered at s: the greeting,
+    then wait for a key. No includes, ever: browsers (call links) reach
+    these too, so a menu must offer only what's listed in it. A wrong key or
+    no key repeats the greeting, then the fallback (or goodbye). Optional
+    direct dial: any switched-on extension, by its number (a key 2 then
+    waits a few seconds for more digits first)."""
+    groups = {r["number"] for r in conn.execute("SELECT number FROM ring_groups")}
+    menus = {r["number"]: r for r in conn.execute("SELECT * FROM ivr_menus ORDER BY number")}
+    out = []
+    for n, m in menus.items():
+        greeting = greeting_path(n)
+        fallback = _menu_goto(m["fallback"], active, groups, menus) if m["fallback"] else None
+        give_up = [f" same => n,{fallback}"] if fallback else [" same => n,Playback(vm-goodbye)", " same => n,Hangup()"]
+        label = re.sub(r"[^A-Za-z0-9 .'_-]", "", m["name"])
+        out += ["", f"[portal-ivr-{n}]",
+                f"exten => s,1,NoOp(IVR menu {n}: {label})",
+                " same => n,Set(MENUHOPS=$[0${MENUHOPS} + 1])",
+                f" same => n,GotoIf($[${{MENUHOPS}} > {MAX_MENU_HOPS}]?bye)",
+                ' same => n,ExecIf($["${CHANNEL(state)}" != "Up"]?Answer())',
+                " same => n,ExecIf($[${MENUHOPS} = 1]?Wait(1))  ; so the greeting's start isn't cut off",
+                " same => n,Set(TRIES=0)",
+                " same => n,Set(TIMEOUT(digit)=3)",
+                " same => n(menu),Set(TRIES=$[${TRIES} + 1])",
+                (f" same => n,Background({greeting[:-len('.ulaw')]})" if os.path.exists(greeting)
+                 else " same => n,Background(beep)  ; no greeting yet"),
+                f" same => n,WaitExten({int(m['timeout'])})",
+                " same => n(bye),Hangup()"]
+        for key, target in sorted(menu_options(m).items()):
+            goto = _menu_goto(target, active, groups, menus)
+            if goto:
+                out += [f"exten => {key},1,{goto}"] + ([] if goto == "Hangup()" else [" same => n,Hangup()"])
+        if m["direct_dial"]:
+            # A key 2 still works: Asterisk waits TIMEOUT(digit) for more.
+            out += [f"exten => {e},1,Goto(portal-call-ext,{e},1)" for e in sorted(active)]
+        retry = f" same => n,GotoIf($[${{TRIES}} < {int(m['retries'])}]?s,menu)"
+        out += ["exten => t,1,NoOp(No key pressed)", retry, *give_up,
+                "exten => i,1,Playback(option-is-invalid)", retry, *give_up]
     return out
 
 
@@ -734,6 +821,11 @@ def build_portal_dialplan(conn) -> str:
         if g["voicemail"] in active:
             out.append(f" same => n,VoiceMail({g['voicemail']}@{VM_CONTEXT},u)")
         out.append(" same => n,Hangup()")
+    # IVR menus are dialled like ring groups (phones, inbound routes): same
+    # included context, so the static extensions.conf needs no change.
+    out += [f"exten => {r['number']},1,Goto(portal-ivr-{r['number']},s,1)"
+            for r in conn.execute("SELECT number FROM ivr_menus ORDER BY number")]
+    out += _ivr_contexts(conn, active)
 
     enabled = [t for t in s["trunk_order"].split(",") if t in TRUNKS and s.get(f"trunk_{t}_enabled") == "1"]
     out += ["", "; ---- Outbound: one extension per kind of number ----",
@@ -923,9 +1015,10 @@ def normalize_did(did: str) -> str:
 def _valid_target(conn, target: str) -> str:
     target = (target or "").strip()
     if conn.execute("SELECT 1 FROM extensions WHERE ext = ?", (target,)).fetchone() or \
-       conn.execute("SELECT 1 FROM ring_groups WHERE number = ?", (target,)).fetchone():
+       conn.execute("SELECT 1 FROM ring_groups WHERE number = ?", (target,)).fetchone() or \
+       conn.execute("SELECT 1 FROM ivr_menus WHERE number = ?", (target,)).fetchone():
         return target
-    raise HTTPException(400, f"{target or 'That'} isn't an existing extension or ring group.")
+    raise HTTPException(400, f"{target or 'That'} isn't an existing extension, ring group or IVR menu.")
 
 
 def _used_as_target(conn, number: str) -> Optional[str]:
@@ -935,7 +1028,15 @@ def _used_as_target(conn, number: str) -> Optional[str]:
     if r:
         return f"the destination for inbound number {r['did']}"
     r = conn.execute("SELECT label FROM call_links WHERE target = ?", (number,)).fetchone()
-    return f"the destination of call link \"{r['label']}\"" if r else None
+    if r:
+        return f"the destination of call link \"{r['label']}\""
+    for m in conn.execute("SELECT * FROM ivr_menus ORDER BY number"):
+        if m["number"] == number:
+            continue  # a menu pointing at itself ("9 to hear this again") doesn't hold it
+        uses = {m["fallback"], *menu_options(m).values()}
+        if number in uses or f"vm:{number}" in uses:
+            return f"used in IVR menu {m['number']} ({m['name']})"
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -961,6 +1062,10 @@ def api_config():
                              "ring_time": r["ring_time"], "members": _members(r), "voicemail": r["voicemail"]}
                             for r in conn.execute("SELECT * FROM ring_groups ORDER BY number")],
             "inbound_routes": [dict(r) for r in conn.execute("SELECT * FROM inbound_routes ORDER BY did")],
+            "ivr_menus": [{"number": r["number"], "name": r["name"], "options": menu_options(r),
+                           "fallback": r["fallback"], "timeout": r["timeout"], "retries": r["retries"],
+                           "direct_dial": bool(r["direct_dial"]), "greeting": os.path.exists(greeting_path(r["number"]))}
+                          for r in conn.execute("SELECT * FROM ivr_menus ORDER BY number")],
             "settings": {
                 "outbound_cid": s["outbound_cid"],
                 "max_outbound": int(s["max_outbound"]),
@@ -978,7 +1083,8 @@ def api_config():
             "trunks": {k: {"label": v["label"], "host": v["host"]} for k, v in TRUNKS.items()},
             "number_types": NUMBER_TYPES,
             "voxbeam_routes": VOXBEAM_ROUTES,
-            "limits": {"ext_min": EXT_MIN, "ext_max": EXT_MAX, "group_min": GROUP_MIN, "group_max": GROUP_MAX},
+            "limits": {"ext_min": EXT_MIN, "ext_max": EXT_MAX, "group_min": GROUP_MIN, "group_max": GROUP_MAX,
+                       "menu_min": MENU_MIN, "menu_max": MENU_MAX},
         }
 
 

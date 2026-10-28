@@ -72,3 +72,6 @@ button[hidden] { display: none; }
 .videos[hidden] { display: none; }
 #remote { width: 100%; border-radius: 10px; background: #000; }
 #local { position: absolute; right: 8px; bottom: 8px; width: 30%; border-radius: 8px; border: 2px solid var(--card); }
+.keypad { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; margin-top: 14px; }
+.keypad[hidden] { display: none; }
+.keypad button { padding: 12px; font-size: 20px; }

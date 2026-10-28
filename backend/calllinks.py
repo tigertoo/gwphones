@@ -27,8 +27,8 @@ from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import FileResponse, HTMLResponse
 from pydantic import BaseModel
 
-from pbx import (NAME_RE, PROVISION_BASE_URL, PUBLIC_HOST, WEB_GUEST, _client_ip, _lock, _now, apply_config,
-                 changes_log, get_db, get_settings, live_call_links, web_guest_password)
+from pbx import (MENU_MAX, MENU_MIN, NAME_RE, PROVISION_BASE_URL, PUBLIC_HOST, WEB_GUEST, _client_ip, _lock, _now,
+                 apply_config, changes_log, get_db, get_settings, live_call_links, web_guest_password)
 
 router = APIRouter(prefix="/api/pbx")
 public_router = APIRouter(prefix="/call")
@@ -75,8 +75,9 @@ def _clean(conn, req: CallLinkRequest) -> tuple:
         raise HTTPException(400, "Give the link a short name (letters, numbers, spaces, . ' _ -), e.g. Sales website.")
     target = req.target.strip()
     if not (conn.execute("SELECT 1 FROM extensions WHERE ext = ?", (target,)).fetchone()
-            or conn.execute("SELECT 1 FROM ring_groups WHERE number = ?", (target,)).fetchone()):
-        raise HTTPException(400, f"There's no extension or ring group {target}.")
+            or conn.execute("SELECT 1 FROM ring_groups WHERE number = ?", (target,)).fetchone()
+            or conn.execute("SELECT 1 FROM ivr_menus WHERE number = ?", (target,)).fetchone()):
+        raise HTTPException(400, f"There's no extension, ring group or IVR menu {target}.")
     if not 1 <= req.max_minutes <= MAX_MINUTES:
         raise HTTPException(400, f"The maximum call length must be 1-{MAX_MINUTES} minutes.")
     return label, target
@@ -172,6 +173,10 @@ def call_static(name: str):
                         headers={"Cache-Control": "public, max-age=3600", "X-Content-Type-Options": "nosniff"})
 
 
+KEYPAD = ('<div id="keypad" class="keypad" hidden>' +
+          "".join(f'<button type="button" data-key="{k}">{k}</button>' for k in "123456789*0#") + "</div>")
+
+
 @public_router.get("/{token}", response_class=HTMLResponse)
 def call_page(token: str, request: Request):
     ip = _client_ip(request)
@@ -188,6 +193,7 @@ def call_page(token: str, request: Request):
     config = {"ws": WS_URL, "domain": PUBLIC_HOST, "user": WEB_GUEST, "password": password,
               "target": f"wl-{token}", "label": link["label"], "video": bool(link["video"]),
               "maxMinutes": link["max_minutes"]}
+    keypad = MENU_MIN <= int(link["target"]) <= MENU_MAX  # a menu: the visitor presses keys
     # JSON in a script element, with "</" escaped so it can't close it.
     data = json.dumps(config).replace("</", "<\\/")
     label = re.sub(r"[^A-Za-z0-9 .'_-]", "", link["label"])
@@ -204,6 +210,7 @@ def call_page(token: str, request: Request):
   <button id="mute" hidden>Mute</button>
 </div>
 <p id="status" class="status" role="status" aria-live="polite"></p>
+{KEYPAD if keypad else ''}
 <div id="videos" class="videos" hidden><video id="remote" autoplay playsinline></video><video id="local" autoplay playsinline muted></video></div>
 <audio id="audio" autoplay></audio>
 <p class="hint small">Calls are limited to {link['max_minutes']} minutes. In an app's built-in browser (Gmail, LinkedIn)
