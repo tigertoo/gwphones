@@ -135,6 +135,12 @@ MAX_MENU_HOPS = 20  # menus entered in one call, so a fallback loop ends
 # The dashboard page converts uploads and recordings to that, so nothing
 # here ever reads an uploaded audio file; any bytes are valid mu-law.
 IVR_DIR = os.path.join(GENERATED_DIR, "ivr")
+# Business hours schedules: 4XX. Open or closed by the clock in PBX_TIMEZONE
+# (the VPS's own clock may be in another zone).
+HOURS_MIN, HOURS_MAX = 400, 499
+PBX_TIMEZONE = os.environ.get("PBX_TIMEZONE", "Europe/Dublin")
+if not re.fullmatch(r"[A-Za-z0-9_+/-]{1,64}", PBX_TIMEZONE):  # it goes into the dialplan
+    PBX_TIMEZONE = "Europe/Dublin"
 
 # The trunks themselves (host, IP matching) are defined by hand in
 # pjsip.conf. Here we only decide whether/in what order they're used for
@@ -311,7 +317,15 @@ def get_db() -> sqlite3.Connection:
                fallback TEXT NOT NULL DEFAULT '',
                timeout INTEGER NOT NULL DEFAULT 6,
                retries INTEGER NOT NULL DEFAULT 3,
-               direct_dial INTEGER NOT NULL DEFAULT 0);"""
+               direct_dial INTEGER NOT NULL DEFAULT 0);
+           CREATE TABLE IF NOT EXISTS business_hours (
+               number TEXT PRIMARY KEY,
+               name TEXT NOT NULL,
+               week TEXT NOT NULL DEFAULT '{}',
+               holidays TEXT NOT NULL DEFAULT '[]',
+               open_target TEXT NOT NULL,
+               closed_target TEXT NOT NULL,
+               override TEXT NOT NULL DEFAULT '');"""
     )
     if fresh:
         os.chmod(PBX_DB_PATH, 0o600)  # holds SIP passwords
@@ -430,14 +444,65 @@ def greeting_path(number: str) -> str:
     return os.path.join(IVR_DIR, f"ivr-{number}.ulaw")
 
 
+# ---- Destinations: what a number in the dashboard (an inbound route, a
+# call link, an IVR key, a schedule's open/closed) can be, in one place.
+
+def destinations(conn) -> dict:
+    return {"exts": {r["ext"] for r in conn.execute("SELECT ext FROM extensions")},
+            "active": {r["ext"] for r in conn.execute("SELECT ext FROM extensions WHERE enabled = 1")},
+            "groups": {r["number"] for r in conn.execute("SELECT number FROM ring_groups")},
+            "menus": {r["number"] for r in conn.execute("SELECT number FROM ivr_menus")},
+            "hours": {r["number"] for r in conn.execute("SELECT number FROM business_hours")}}
+
+
+def target_goto(target: str, d: dict) -> Optional[str]:
+    """The dialplan step that sends a call to target, or None if it's gone
+    (deleted, or an extension switched off)."""
+    if target == "hangup":
+        return "Hangup()"
+    if target.startswith("vm:"):
+        return f"VoiceMail({target[3:]}@{VM_CONTEXT},u)" if target[3:] in d["active"] else None
+    if target in d["active"]:
+        return f"Goto(portal-call-ext,{target},1)"
+    if target in d["groups"]:
+        return f"Goto(portal-ringgroups,{target},1)"
+    if target in d["menus"]:
+        return f"Goto(portal-ivr-{target},s,1)"
+    if target in d["hours"]:
+        return f"Goto(portal-hours-{target},s,1)"
+    return None
+
+
+def check_target(conn, target: str, *, extras: bool = False, schedules: bool = True, itself: str = "") -> str:
+    """target, if it's somewhere a call can be sent, else a 400. extras: an
+    extension's voicemail (vm:201) and hang up too. schedules=False for a
+    schedule's own targets: one schedule handing to another has no hop
+    count to stop a loop. itself: a menu may send callers back to itself."""
+    target = (target or "").strip()
+    d = destinations(conn)
+    ok = (target in d["exts"] or target in d["groups"] or target in d["menus"]
+          or (schedules and target in d["hours"]) or (itself and target == itself)
+          or (extras and (target == "hangup" or (target.startswith("vm:") and target[3:] in d["exts"]))))
+    if not ok:
+        what = "an extension, ring group or IVR menu" + (" or business hours" if schedules else "")
+        raise HTTPException(400, f"{target or 'That'} isn't {what}" + (", voicemail box or hang up." if extras else "."))
+    return target
+
+
+def needs_keypad(conn, target: str) -> bool:
+    """A call link reaching a menu, straight away or through business hours,
+    shows a keypad."""
+    menus = {r["number"] for r in conn.execute("SELECT number FROM ivr_menus")}
+    h = conn.execute("SELECT open_target, closed_target FROM business_hours WHERE number = ?", (target,)).fetchone()
+    return target in menus or bool(h and (h["open_target"] in menus or h["closed_target"] in menus))
+
+
 def live_call_links(conn) -> List[sqlite3.Row]:
     """Enabled links whose target still answers: an enabled extension, a
-    ring group or an IVR menu."""
-    exts = {r["ext"] for r in conn.execute("SELECT ext FROM extensions WHERE enabled = 1")}
-    groups = {r["number"] for r in conn.execute("SELECT number FROM ring_groups")}
-    menus = {r["number"] for r in conn.execute("SELECT number FROM ivr_menus")}
+    ring group, an IVR menu or business hours."""
+    d = destinations(conn)
     return [r for r in conn.execute("SELECT * FROM call_links WHERE enabled = 1 ORDER BY id")
-            if r["target"] in exts or r["target"] in groups or r["target"] in menus]
+            if not r["target"].startswith("vm:") and r["target"] != "hangup" and target_goto(r["target"], d)]
 
 
 def web_guest_password(conn) -> str:
@@ -670,10 +735,9 @@ def _weblinks_context(conn, active) -> List[str]:
     and cut short before it's shown on the phone."""
     out = ["; ---- Call links: what browsers (endpoint webguest) can reach, nothing else ----",
            f"[{WEBLINKS_CONTEXT}]"]
+    d = destinations(conn)
     for r in live_call_links(conn):
-        target = (f"Goto(portal-call-ext,{r['target']},1)" if r["target"] in active
-                  else f"Goto(portal-ivr-{r['target']},s,1)" if MENU_MIN <= int(r["target"]) <= MENU_MAX
-                  else f"Goto(portal-ringgroups,{r['target']},1)")
+        target = target_goto(r["target"], d)
         label = re.sub(r"[^A-Za-z0-9 .'_-]", "", r["label"])[:30]
         out += [f"exten => wl-{r['token']},1,NoOp(Call link {r['id']}: {label})",
                 f" same => n,Set(GROUP(weblink)=link{r['id']})",
@@ -690,22 +754,6 @@ def _weblinks_context(conn, active) -> List[str]:
     return out
 
 
-def _menu_goto(target: str, active, groups, menus) -> Optional[str]:
-    """Where an IVR key or fallback sends the call, or None if that's gone
-    (switched off or deleted): the key then counts as a wrong one."""
-    if target == "hangup":
-        return "Hangup()"
-    if target.startswith("vm:"):
-        return f"VoiceMail({target[3:]}@{VM_CONTEXT},u)" if target[3:] in active else None
-    if target in active:
-        return f"Goto(portal-call-ext,{target},1)"
-    if target in groups:
-        return f"Goto(portal-ringgroups,{target},1)"
-    if target in menus:
-        return f"Goto(portal-ivr-{target},s,1)"
-    return None
-
-
 def _ivr_contexts(conn, active) -> List[str]:
     """One context per menu, [portal-ivr-5XX], entered at s: the greeting,
     then wait for a key. No includes, ever: browsers (call links) reach
@@ -713,12 +761,12 @@ def _ivr_contexts(conn, active) -> List[str]:
     no key repeats the greeting, then the fallback (or goodbye). Optional
     direct dial: any switched-on extension, by its number (a key 2 then
     waits a few seconds for more digits first)."""
-    groups = {r["number"] for r in conn.execute("SELECT number FROM ring_groups")}
-    menus = {r["number"]: r for r in conn.execute("SELECT * FROM ivr_menus ORDER BY number")}
+    d = destinations(conn)
     out = []
-    for n, m in menus.items():
+    for m in conn.execute("SELECT * FROM ivr_menus ORDER BY number"):
+        n = m["number"]
         greeting = greeting_path(n)
-        fallback = _menu_goto(m["fallback"], active, groups, menus) if m["fallback"] else None
+        fallback = target_goto(m["fallback"], d) if m["fallback"] else None
         give_up = [f" same => n,{fallback}"] if fallback else [" same => n,Playback(vm-goodbye)", " same => n,Hangup()"]
         label = re.sub(r"[^A-Za-z0-9 .'_-]", "", m["name"])
         out += ["", f"[portal-ivr-{n}]",
@@ -735,7 +783,7 @@ def _ivr_contexts(conn, active) -> List[str]:
                 f" same => n,WaitExten({int(m['timeout'])})",
                 " same => n(bye),Hangup()"]
         for key, target in sorted(menu_options(m).items()):
-            goto = _menu_goto(target, active, groups, menus)
+            goto = target_goto(target, d)
             if goto:
                 out += [f"exten => {key},1,{goto}"] + ([] if goto == "Hangup()" else [" same => n,Hangup()"])
         if m["direct_dial"]:
@@ -744,6 +792,71 @@ def _ivr_contexts(conn, active) -> List[str]:
         retry = f" same => n,GotoIf($[${{TRIES}} < {int(m['retries'])}]?s,menu)"
         out += ["exten => t,1,NoOp(No key pressed)", retry, *give_up,
                 "exten => i,1,Playback(invalid)", retry, *give_up]
+    return out
+
+
+DAYS = ["mon", "tue", "wed", "thu", "fri", "sat", "sun"]  # %u: 1 = Monday
+
+
+def hours_week(row) -> Dict[str, list]:
+    try:
+        week = json.loads(row["week"] or "{}")
+        return {day: [list(r) for r in week.get(day, [])] for day in DAYS}
+    except (ValueError, TypeError, AttributeError):
+        return {day: [] for day in DAYS}
+
+
+def hours_holidays(row) -> List[str]:
+    try:
+        return [h for h in json.loads(row["holidays"] or "[]") if isinstance(h, str)]
+    except ValueError:
+        return []
+
+
+def _hhmm(t: str) -> int:
+    return int(t[:2]) * 100 + int(t[3:])
+
+
+def hours_open_now(row, now: Optional[datetime] = None) -> bool:
+    """Same rule as the dialplan: the override, then holidays (closed all
+    day), then the day's ranges, start included, end not."""
+    from zoneinfo import ZoneInfo
+    if row["override"] in ("open", "closed"):
+        return row["override"] == "open"
+    now = (now or datetime.now(timezone.utc)).astimezone(ZoneInfo(PBX_TIMEZONE))
+    if now.strftime("%Y-%m-%d") in hours_holidays(row):
+        return False
+    t = now.hour * 100 + now.minute
+    return any(_hhmm(a) <= t < _hhmm(b) for a, b in hours_week(row)[DAYS[now.weekday()]])
+
+
+def _hours_contexts(conn) -> List[str]:
+    """One context per schedule, [portal-hours-4XX], entered at s: open or
+    closed by the time in PBX_TIMEZONE, as day + time (%u%H%M: Monday 9:30
+    is 10930), compared as numbers, so the dashboard's open/closed badge
+    uses exactly the same rule. No includes (browsers reach these too). A
+    target that's gone hands over to the other one."""
+    d = destinations(conn)
+    tz = PBX_TIMEZONE
+    out = []
+    for h in conn.execute("SELECT * FROM business_hours ORDER BY number"):
+        n = h["number"]
+        label = re.sub(r"[^A-Za-z0-9 .'_-]", "", h["name"])
+        open_goto, closed_goto = target_goto(h["open_target"], d), target_goto(h["closed_target"], d)
+        open_goto, closed_goto = open_goto or closed_goto or "Hangup()", closed_goto or open_goto or "Hangup()"
+        out += ["", f"[portal-hours-{n}]",
+                f"exten => s,1,NoOp(Business hours {n}: {label})"]
+        if h["override"] in ("open", "closed"):
+            out.append(f" same => n,Goto({h['override']})  ; set by hand in the dashboard")
+        else:
+            out += [f" same => n,Set(HDATE=${{STRFTIME(${{EPOCH}},{tz},%Y-%m-%d)}})",
+                    f" same => n,Set(HNOW=${{STRFTIME(${{EPOCH}},{tz},%u%H%M)}})"]
+            out += [f' same => n,GotoIf($["${{HDATE}}" = "{day}"]?closed)  ; holiday' for day in hours_holidays(h)]
+            for i, day in enumerate(DAYS, start=1):
+                out += [f" same => n,GotoIf($[${{HNOW}} >= {i}{_hhmm(a):04d} & ${{HNOW}} < {i}{_hhmm(b):04d}]?open)"
+                        f"  ; {day} {a}-{b}" for a, b in hours_week(h)[day]]
+        out += [f" same => n(closed),{closed_goto}", " same => n,Hangup()",
+                f" same => n(open),{open_goto}", " same => n,Hangup()"]
     return out
 
 
@@ -825,7 +938,9 @@ def build_portal_dialplan(conn) -> str:
     # included context, so the static extensions.conf needs no change.
     out += [f"exten => {r['number']},1,Goto(portal-ivr-{r['number']},s,1)"
             for r in conn.execute("SELECT number FROM ivr_menus ORDER BY number")]
-    out += _ivr_contexts(conn, active)
+    out += [f"exten => {r['number']},1,Goto(portal-hours-{r['number']},s,1)"
+            for r in conn.execute("SELECT number FROM business_hours ORDER BY number")]
+    out += _ivr_contexts(conn, active) + _hours_contexts(conn)
 
     enabled = [t for t in s["trunk_order"].split(",") if t in TRUNKS and s.get(f"trunk_{t}_enabled") == "1"]
     out += ["", "; ---- Outbound: one extension per kind of number ----",
@@ -1013,12 +1128,7 @@ def normalize_did(did: str) -> str:
 
 
 def _valid_target(conn, target: str) -> str:
-    target = (target or "").strip()
-    if conn.execute("SELECT 1 FROM extensions WHERE ext = ?", (target,)).fetchone() or \
-       conn.execute("SELECT 1 FROM ring_groups WHERE number = ?", (target,)).fetchone() or \
-       conn.execute("SELECT 1 FROM ivr_menus WHERE number = ?", (target,)).fetchone():
-        return target
-    raise HTTPException(400, f"{target or 'That'} isn't an existing extension, ring group or IVR menu.")
+    return check_target(conn, target)
 
 
 def _used_as_target(conn, number: str) -> Optional[str]:
@@ -1036,6 +1146,9 @@ def _used_as_target(conn, number: str) -> Optional[str]:
         uses = {m["fallback"], *menu_options(m).values()}
         if number in uses or f"vm:{number}" in uses:
             return f"used in IVR menu {m['number']} ({m['name']})"
+    for h in conn.execute("SELECT * FROM business_hours ORDER BY number"):
+        if number in (h["open_target"], h["closed_target"]) or f"vm:{number}" in (h["open_target"], h["closed_target"]):
+            return f"used in business hours {h['number']} ({h['name']})"
     return None
 
 
@@ -1066,6 +1179,12 @@ def api_config():
                            "fallback": r["fallback"], "timeout": r["timeout"], "retries": r["retries"],
                            "direct_dial": bool(r["direct_dial"]), "greeting": os.path.exists(greeting_path(r["number"]))}
                           for r in conn.execute("SELECT * FROM ivr_menus ORDER BY number")],
+            "business_hours": [{"number": r["number"], "name": r["name"], "week": hours_week(r),
+                                "holidays": hours_holidays(r), "open_target": r["open_target"],
+                                "closed_target": r["closed_target"], "override": r["override"],
+                                "open_now": hours_open_now(r)}
+                               for r in conn.execute("SELECT * FROM business_hours ORDER BY number")],
+            "timezone": PBX_TIMEZONE,
             "settings": {
                 "outbound_cid": s["outbound_cid"],
                 "max_outbound": int(s["max_outbound"]),
@@ -1084,7 +1203,7 @@ def api_config():
             "number_types": NUMBER_TYPES,
             "voxbeam_routes": VOXBEAM_ROUTES,
             "limits": {"ext_min": EXT_MIN, "ext_max": EXT_MAX, "group_min": GROUP_MIN, "group_max": GROUP_MAX,
-                       "menu_min": MENU_MIN, "menu_max": MENU_MAX},
+                       "menu_min": MENU_MIN, "menu_max": MENU_MAX, "hours_min": HOURS_MIN, "hours_max": HOURS_MAX},
         }
 
 

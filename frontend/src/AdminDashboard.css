@@ -868,6 +868,12 @@
 .pbx-key-row { display: flex; align-items: center; gap: 8px; }
 .pbx-key-row .pbx-select { flex: 1; min-width: 0; }
 .pbx-greeting { display: flex; flex-wrap: wrap; gap: 6px; white-space: normal; margin: 6px 0; }
+.pbx-week { display: flex; flex-direction: column; gap: 6px; }
+.pbx-week-row { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.pbx-week-day { width: 120px; }
+.pbx-week-ranges { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
+.pbx-week-range { display: inline-flex; align-items: center; gap: 4px; }
+.pbx-week-range .idea-input { width: auto; padding: 4px 6px; }
 .pbx-member-grid {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(170px, 1fr));

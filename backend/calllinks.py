@@ -27,8 +27,9 @@ from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import FileResponse, HTMLResponse
 from pydantic import BaseModel
 
-from pbx import (MENU_MAX, MENU_MIN, NAME_RE, PROVISION_BASE_URL, PUBLIC_HOST, WEB_GUEST, _client_ip, _lock, _now,
-                 apply_config, changes_log, get_db, get_settings, live_call_links, web_guest_password)
+from pbx import (NAME_RE, PROVISION_BASE_URL, PUBLIC_HOST, WEB_GUEST, _client_ip, _lock, _now,
+                 apply_config, changes_log, check_target, get_db, get_settings, live_call_links, needs_keypad,
+                 web_guest_password)
 
 router = APIRouter(prefix="/api/pbx")
 public_router = APIRouter(prefix="/call")
@@ -73,11 +74,7 @@ def _clean(conn, req: CallLinkRequest) -> tuple:
     label = req.label.strip()
     if not NAME_RE.match(label):
         raise HTTPException(400, "Give the link a short name (letters, numbers, spaces, . ' _ -), e.g. Sales website.")
-    target = req.target.strip()
-    if not (conn.execute("SELECT 1 FROM extensions WHERE ext = ?", (target,)).fetchone()
-            or conn.execute("SELECT 1 FROM ring_groups WHERE number = ?", (target,)).fetchone()
-            or conn.execute("SELECT 1 FROM ivr_menus WHERE number = ?", (target,)).fetchone()):
-        raise HTTPException(400, f"There's no extension, ring group or IVR menu {target}.")
+    target = check_target(conn, req.target)
     if not 1 <= req.max_minutes <= MAX_MINUTES:
         raise HTTPException(400, f"The maximum call length must be 1-{MAX_MINUTES} minutes.")
     return label, target
@@ -190,10 +187,10 @@ def call_page(token: str, request: Request):
         conn.execute("UPDATE call_links SET last_opened_at = ? WHERE id = ?", (_now(), link["id"]))
         conn.commit()
         password = web_guest_password(conn)
+        keypad = needs_keypad(conn, link["target"])  # a menu: the visitor presses keys
     config = {"ws": WS_URL, "domain": PUBLIC_HOST, "user": WEB_GUEST, "password": password,
               "target": f"wl-{token}", "label": link["label"], "video": bool(link["video"]),
               "maxMinutes": link["max_minutes"]}
-    keypad = MENU_MIN <= int(link["target"]) <= MENU_MAX  # a menu: the visitor presses keys
     # JSON in a script element, with "</" escaped so it can't close it.
     data = json.dumps(config).replace("</", "<\\/")
     label = re.sub(r"[^A-Za-z0-9 .'_-]", "", link["label"])

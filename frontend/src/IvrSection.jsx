@@ -7,7 +7,7 @@ import { MAX_SECONDS, playMulaw, startRecording, toMulaw } from "./ivrAudio";
 const KEYS = ["1", "2", "3", "4", "5", "6", "7", "8", "9", "0", "*", "#"];
 const EMPTY_MENU = { number: "", name: "", options: {}, fallback: "", timeout: 6, retries: 3, direct_dial: false };
 
-function TargetSelect({ config, self, value, onChange, empty }) {
+export function TargetSelect({ config, self, value, onChange, empty, schedules = true }) {
   return (
     <select className="idea-select pbx-select" value={value} onChange={(e) => onChange(e.target.value)}>
       <option value="">{empty}</option>
@@ -24,6 +24,11 @@ function TargetSelect({ config, self, value, onChange, empty }) {
           <option key={m.number} value={m.number}>{m.number} · {m.name}{m.number === self ? " (this one again)" : ""}</option>
         ))}
       </optgroup>
+      {schedules && (
+        <optgroup label="Business hours">
+          {config.business_hours.map((h) => <option key={h.number} value={h.number}>{h.number} · {h.name}</option>)}
+        </optgroup>
+      )}
       <optgroup label="Leave a voicemail">
         {config.extensions.map((e) => <option key={e.ext} value={`vm:${e.ext}`}>Voicemail {e.ext} · {e.name}</option>)}
       </optgroup>
@@ -37,7 +42,7 @@ export function describeTarget(config, t) {
   if (t === "hangup") return "hang up";
   if (t.startsWith("vm:")) return `voicemail ${t.slice(3)}`;
   const name = config.extensions.find((e) => e.ext === t)?.name || config.ring_groups.find((g) => g.number === t)?.name
-    || config.ivr_menus.find((m) => m.number === t)?.name;
+    || config.ivr_menus.find((m) => m.number === t)?.name || config.business_hours.find((h) => h.number === t)?.name;
   return name ? `${t} ${name}` : `${t} (gone)`;
 }
 

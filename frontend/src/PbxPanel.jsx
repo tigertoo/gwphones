@@ -1,6 +1,7 @@
 import React, { useEffect, useState, useCallback } from "react";
 import BillingPanel from "./BillingPanel";
 import IvrSection from "./IvrSection";
+import HoursSection from "./HoursSection";
 import SaveToast, { busyText } from "./SaveToast";
 
 // Phone System tab: manages the Asterisk PBX on this VPS through the
@@ -15,6 +16,7 @@ const SECTIONS = [
   { key: "trunks", label: "Trunks & Outbound" },
   { key: "inbound", label: "Inbound & Ring Groups" },
   { key: "ivr", label: "IVR Menus" },
+  { key: "hours", label: "Business Hours" },
   { key: "billing", label: "Billing" },
 ];
 const STATUS_POLL_MS = 5000;
@@ -92,6 +94,7 @@ export default function PbxPanel({ apiBase, callNumber }) {
       [/^\/click-to-call$/, "Ringing your extension…"],
       [/^\/call-links/, method === "DELETE" ? "Deleting the link…" : "Saving the link and applying…"],
       [/\/greeting$/, method === "DELETE" ? "Removing the greeting…" : "Sending the greeting…"],
+      [/\/override$/, "Switching and applying…"],
     ]).replace(/^Saving…$/, "Saving and applying to the phone system…").replace(/^Deleting…$/, "Deleting and applying…") });
     try {
       // Bytes (an IVR greeting) go as they are, anything else as JSON.
@@ -153,6 +156,7 @@ export default function PbxPanel({ apiBase, callNumber }) {
       {section === "trunks" && <TrunksSection {...props} />}
       {section === "inbound" && <InboundSection {...props} />}
       {section === "ivr" && <IvrSection {...props} />}
+      {section === "hours" && <HoursSection {...props} />}
       {section === "billing" && <BillingPanel apiBase={apiBase} />}
     </div>
   );
@@ -852,6 +856,7 @@ function CallLinksSection({ config, send, busy, apiBase }) {
     ...config.extensions.filter((e) => e.enabled).map((e) => ({ value: e.ext, label: `Extension ${e.ext} ${e.name}` })),
     ...config.ring_groups.map((g) => ({ value: g.number, label: `Ring group ${g.number} ${g.name}` })),
     ...config.ivr_menus.map((m) => ({ value: m.number, label: `IVR menu ${m.number} ${m.name}` })),
+    ...config.business_hours.map((h) => ({ value: h.number, label: `Business hours ${h.number} ${h.name}` })),
   ];
   const targetName = (t) => targets.find((x) => x.value === t)?.label || `${t} (switched off or gone)`;
 
@@ -1229,6 +1234,9 @@ function DestinationSelect({ config, value, onChange }) {
       <optgroup label="IVR menus">
         {config.ivr_menus.map((m) => <option key={m.number} value={m.number}>{m.number} · {m.name}</option>)}
       </optgroup>
+      <optgroup label="Business hours">
+        {config.business_hours.map((h) => <option key={h.number} value={h.number}>{h.number} · {h.name}</option>)}
+      </optgroup>
     </select>
   );
 }
@@ -1240,7 +1248,7 @@ function InboundSection({ config, send, busy }) {
   const [group, setGroup] = useState(null); // null | { ...fields, isNew }
   const nameOf = (n) =>
     config.ring_groups.find((g) => g.number === n)?.name || config.extensions.find((e) => e.ext === n)?.name ||
-    config.ivr_menus.find((m) => m.number === n)?.name || "?";
+    config.ivr_menus.find((m) => m.number === n)?.name || config.business_hours.find((h) => h.number === n)?.name || "?";
   const extName = (n) => config.extensions.find((e) => e.ext === n);
 
   const saveGroup = async () => {

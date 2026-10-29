@@ -19,7 +19,7 @@ from fastapi.responses import Response
 from pydantic import BaseModel
 
 from pbx import (IVR_DIR, MENU_KEYS, MENU_MAX, MENU_MIN, _clean_name, _in_range, _lock, _used_as_target,
-                 apply_config, get_db, greeting_path)
+                 apply_config, check_target, get_db, greeting_path)
 
 router = APIRouter(prefix="/api/pbx")
 
@@ -39,20 +39,9 @@ class MenuRequest(BaseModel):
 
 
 def _target(conn, target: str, number: str) -> str:
-    """An extension, ring group, menu, an extension's voicemail (vm:201)
-    or hangup. Any existing extension: a switched-off one is skipped (the
-    key counts as wrong) until it's back on."""
-    target = (target or "").strip()
-    if target == "hangup":
-        return target
-    ext = target[3:] if target.startswith("vm:") else target
-    if conn.execute("SELECT 1 FROM extensions WHERE ext = ?", (ext,)).fetchone():
-        return target
-    if target == ext and (conn.execute("SELECT 1 FROM ring_groups WHERE number = ?", (target,)).fetchone()
-                          or target == number
-                          or conn.execute("SELECT 1 FROM ivr_menus WHERE number = ?", (target,)).fetchone()):
-        return target
-    raise HTTPException(400, f"{target or 'That'} isn't an extension, voicemail box, ring group or IVR menu.")
+    """Any existing extension: a switched-off one is skipped (the key
+    counts as wrong) until it's back on. A menu may point at itself."""
+    return check_target(conn, target, extras=True, itself=number)
 
 
 def _clean(conn, req: MenuRequest, number: str) -> dict:
