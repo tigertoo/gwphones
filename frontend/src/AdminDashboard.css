@@ -874,6 +874,8 @@
 .pbx-week-ranges { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
 .pbx-week-range { display: inline-flex; align-items: center; gap: 4px; }
 .pbx-week-range .idea-input { width: auto; padding: 4px 6px; }
+.pbx-recording { color: var(--critical); font-weight: 600; }
+.pbx-audio { width: 100%; max-width: 520px; }
 .pbx-member-grid {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(170px, 1fr));

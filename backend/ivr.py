@@ -18,7 +18,7 @@ from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import Response
 from pydantic import BaseModel
 
-from pbx import (IVR_DIR, MENU_KEYS, MENU_MAX, MENU_MIN, _clean_name, _in_range, _lock, _used_as_target,
+from pbx import (MENU_KEYS, MENU_MAX, MENU_MIN, _clean_name, _in_range, _lock, _used_as_target,
                  apply_config, check_target, get_db, greeting_path)
 
 router = APIRouter(prefix="/api/pbx")
@@ -124,25 +124,19 @@ def _menu_or_404(conn, number: str):
         raise HTTPException(404, "Menu not found.")
 
 
-def _store_greeting(number: str, audio: bytes) -> dict:
-    with _lock, get_db() as conn:
-        _menu_or_404(conn, number)
-        os.makedirs(IVR_DIR, exist_ok=True)
-        path = greeting_path(number)
-        # Next to the file, not in /tmp: os.replace can't cross filesystems.
-        tmp = path + ".tmp"
-        with open(tmp, "wb") as f:
-            f.write(audio)
-        os.chmod(tmp, 0o640)  # the folder's setgid bit gives it to the asterisk group
-        os.replace(tmp, path)
-        return apply_config(conn, f"New greeting for IVR menu {number} ({len(audio) // 8000}s)")
+def write_ulaw(path: str, audio: bytes):
+    """Stores converted audio where Asterisk can play it."""
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    # Next to the file, not in /tmp: os.replace can't cross filesystems.
+    tmp = path + ".tmp"
+    with open(tmp, "wb") as f:
+        f.write(audio)
+    os.chmod(tmp, 0o640)  # the folder's setgid bit gives it to the asterisk group
+    os.replace(tmp, path)
 
 
-@router.put("/ivr/{number}/greeting")
-async def api_set_greeting(number: str, request: Request):
-    """The body is the greeting as 8 kHz mu-law (see the module docstring).
-    Saving runs in a thread: the lock and the reload would otherwise hold
-    up every other request, /lcr/route (mid-call) included."""
+async def read_ulaw(request: Request) -> bytes:
+    """The request body: audio the page converted (see the module docstring)."""
     if int(request.headers.get("content-length") or 0) > GREETING_MAX_BYTES:
         raise HTTPException(400, f"Greetings can be up to {GREETING_MAX_SECONDS // 60} minutes long.")
     audio = await request.body()
@@ -150,6 +144,21 @@ async def api_set_greeting(number: str, request: Request):
         raise HTTPException(400, f"Greetings can be up to {GREETING_MAX_SECONDS // 60} minutes long.")
     if len(audio) < GREETING_MIN_BYTES:
         raise HTTPException(400, "That greeting is too short.")
+    return audio
+
+
+def _store_greeting(number: str, audio: bytes) -> dict:
+    with _lock, get_db() as conn:
+        _menu_or_404(conn, number)
+        write_ulaw(greeting_path(number), audio)
+        return apply_config(conn, f"New greeting for IVR menu {number} ({len(audio) // 8000}s)")
+
+
+@router.put("/ivr/{number}/greeting")
+async def api_set_greeting(number: str, request: Request):
+    """Saving runs in a thread: the lock and the reload would otherwise hold
+    up every other request, /lcr/route (mid-call) included."""
+    audio = await read_ulaw(request)
     return await asyncio.to_thread(_store_greeting, number, audio)
 
 

@@ -46,7 +46,8 @@ export function describeTarget(config, t) {
   return name ? `${t} ${name}` : `${t} (gone)`;
 }
 
-function Greeting({ menu, send, busy, apiBase }) {
+// A greeting (or the recording notice) at path: upload, record, play, remove.
+export function Greeting({ path, has, label, what = "greeting", send, busy, apiBase }) {
   const [recording, setRecording] = useState(null); // stop function while recording
   const [playing, setPlaying] = useState(null); // stop function while playing
   const [error, setError] = useState("");
@@ -54,7 +55,7 @@ function Greeting({ menu, send, busy, apiBase }) {
   useEffect(() => () => playing?.(), [playing]);
 
   const upload = async (bytes) =>
-    send("PUT", `/ivr/${menu.number}/greeting`, bytes, `Greeting saved (${Math.round(bytes.length / 8000)} seconds).`);
+    send("PUT", path, bytes, `Saved (${Math.round(bytes.length / 8000)} seconds).`);
 
   const fromFile = async (e) => {
     const file = e.target.files[0];
@@ -91,32 +92,29 @@ function Greeting({ menu, send, busy, apiBase }) {
   const play = async () => {
     if (playing) { playing(); setPlaying(null); return; }
     setError("");
-    const res = await fetch(`${apiBase}/api/pbx/ivr/${menu.number}/greeting`);
-    if (!res.ok) { setError("Couldn't load the greeting."); return; }
+    const res = await fetch(`${apiBase}/api/pbx${path}`);
+    if (!res.ok) { setError(`Couldn't load the ${what}.`); return; }
     const stop = playMulaw(new Uint8Array(await res.arrayBuffer()), () => setPlaying(null));
     setPlaying(() => stop);
   };
 
   return (
     <div className="pbx-gap">
-      <div className="ticket-action-label">
-        Greeting: {menu.greeting ? "set" : <span className="pbx-hint">none yet, callers hear a beep</span>}
-      </div>
+      <div className="ticket-action-label">{label}</div>
       <div className="pbx-actions pbx-greeting">
-        {menu.greeting && <button className="ticket-action-btn" onClick={play}>{playing ? "Stop" : "Play"}</button>}
+        {has && <button className="ticket-action-btn" onClick={play}>{playing ? "Stop" : "Play"}</button>}
         <button className="ticket-action-btn" disabled={busy || !!recording} onClick={() => fileRef.current.click()}>Upload a file</button>
         <input ref={fileRef} type="file" accept="audio/*" hidden onChange={fromFile} />
         <button className={`ticket-action-btn ${recording ? "idea-delete-btn" : ""}`} disabled={busy} onClick={record}>
           {recording ? "Stop and save" : "Record"}
         </button>
-        {menu.greeting && (
+        {has && (
           <button className="ticket-action-btn idea-delete-btn" disabled={busy || !!recording}
-            onClick={() => window.confirm(`Remove the greeting of menu ${menu.number}?`) &&
-              send("DELETE", `/ivr/${menu.number}/greeting`, null, "Greeting removed.")}
+            onClick={() => window.confirm(`Remove the ${what}?`) && send("DELETE", path, null, "Removed.")}
           >Remove</button>
         )}
       </div>
-      {recording && <p className="pbx-hint">Recording… say the whole greeting, then press Stop and save.</p>}
+      {recording && <p className="pbx-hint">Recording… say the whole {what}, then press Stop and save.</p>}
       {error && <div className="pbx-warning">{error}</div>}
       <p className="pbx-hint">
         Up to {MAX_SECONDS / 60} minutes, from any audio file your browser can play (WAV, MP3, M4A…) or recorded here.
@@ -172,7 +170,8 @@ export default function IvrSection({ config, send, busy, apiBase }) {
                 <span key={k} className="pbx-chip">{k} → {describeTarget(config, m.options[k])}</span>
               ))}
             </div>
-            <Greeting menu={m} send={send} busy={busy} apiBase={apiBase} />
+            <Greeting path={`/ivr/${m.number}/greeting`} has={m.greeting} send={send} busy={busy} apiBase={apiBase}
+              label={<>Greeting: {m.greeting ? "set" : <span className="pbx-hint">none yet, callers hear a beep</span>}</>} />
             <div className="idea-item-foot">
               <button className="ticket-action-btn" onClick={() => setForm({ ...m, isNew: false })}>Edit</button>
               <button className="ticket-action-btn idea-delete-btn" disabled={busy}

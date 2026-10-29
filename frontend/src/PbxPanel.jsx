@@ -2,6 +2,7 @@ import React, { useEffect, useState, useCallback } from "react";
 import BillingPanel from "./BillingPanel";
 import IvrSection from "./IvrSection";
 import HoursSection from "./HoursSection";
+import RecordingsSection from "./RecordingsSection";
 import SaveToast, { busyText } from "./SaveToast";
 
 // Phone System tab: manages the Asterisk PBX on this VPS through the
@@ -17,6 +18,7 @@ const SECTIONS = [
   { key: "inbound", label: "Inbound & Ring Groups" },
   { key: "ivr", label: "IVR Menus" },
   { key: "hours", label: "Business Hours" },
+  { key: "recordings", label: "Recordings" },
   { key: "billing", label: "Billing" },
 ];
 const STATUS_POLL_MS = 5000;
@@ -95,6 +97,9 @@ export default function PbxPanel({ apiBase, callNumber }) {
       [/^\/call-links/, method === "DELETE" ? "Deleting the link…" : "Saving the link and applying…"],
       [/\/greeting$/, method === "DELETE" ? "Removing the greeting…" : "Sending the greeting…"],
       [/\/override$/, "Switching and applying…"],
+      [/^\/recordings\/start$/, "Starting the recording…"],
+      [/^\/recordings\/file\//, "Deleting the recording…"],
+      [/\/recording$/, "Saving and applying…"],
     ]).replace(/^Saving…$/, "Saving and applying to the phone system…").replace(/^Deleting…$/, "Deleting and applying…") });
     try {
       // Bytes (an IVR greeting) go as they are, anything else as JSON.
@@ -157,6 +162,7 @@ export default function PbxPanel({ apiBase, callNumber }) {
       {section === "inbound" && <InboundSection {...props} />}
       {section === "ivr" && <IvrSection {...props} />}
       {section === "hours" && <HoursSection {...props} />}
+      {section === "recordings" && <RecordingsSection {...props} />}
       {section === "billing" && <BillingPanel apiBase={apiBase} />}
     </div>
   );
@@ -168,7 +174,7 @@ export default function PbxPanel({ apiBase, callNumber }) {
 
 const KIND_NAMES = { mobile: "mobiles", landline: "landlines", freephone: "freephone", international: "international" };
 
-function StatusSection({ config, status }) {
+function StatusSection({ config, status, send, busy }) {
   if (!status) return <section className="panel"><p className="panel-empty">Checking Asterisk…</p></section>;
   if (!status.asterisk_running) {
     return (
@@ -248,7 +254,7 @@ function StatusSection({ config, status }) {
         ) : (
           <table className="users-table">
             <thead>
-              <tr><th>Channel</th><th>Caller</th><th>Dialled</th><th>State</th><th>Duration</th></tr>
+              <tr><th>Channel</th><th>Caller</th><th>Dialled</th><th>State</th><th>Duration</th><th>Recording</th></tr>
             </thead>
             <tbody>
               {status.channels.map((c) => (
@@ -258,6 +264,15 @@ function StatusSection({ config, status }) {
                   <td>{c.exten || "—"}</td>
                   <td>{c.state}</td>
                   <td>{formatDuration(c.duration_seconds)}</td>
+                  <td>
+                    {c.recording ? <span className="pbx-chip pbx-recording">● Recording</span>
+                      : c.recordable ? (
+                        <button className="ticket-action-btn" disabled={busy}
+                          title="Records from now on. The other person isn't told automatically."
+                          onClick={() => send("POST", "/recordings/start", { channel: c.channel }, "Recording this call from now on.")}
+                        >Record</button>
+                      ) : null}
+                  </td>
                 </tr>
               ))}
             </tbody>
@@ -710,6 +725,12 @@ function ExtensionsSection({ config, status, send, busy, apiBase, reload }) {
                     <VoicemailEmail ext={e.ext} current={e.voicemail_email} send={send} busy={busy} />
                     <OutboundCid ext={e.ext} current={e.outbound_cid} fallback={config.settings.outbound_cid}
                       dids={config.inbound_routes.map((r) => r.did)} send={send} busy={busy} />
+                    <label className="pbx-toggle pbx-gap">
+                      <input type="checkbox" checked={e.record} disabled={busy}
+                        onChange={(ev) => send("PUT", `/extensions/${e.ext}/recording`, { always: ev.target.checked },
+                          ev.target.checked ? `Every call ${e.ext} answers or makes is recorded from now on.` : `${e.ext}'s calls are no longer recorded.`)} />
+                      Record every call (see Recordings for the notice callers hear)
+                    </label>
                     <Forwarding ext={e.ext} current={forwarding.extensions[e.ext]} available={forwarding.available}
                       send={send} busy={busy} reload={loadForwarding} />
                     {!creds.server && <p className="pbx-hint">Set PBX_PUBLIC_HOST in the dashboard's .env to show the server name here.</p>}

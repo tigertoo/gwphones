@@ -139,6 +139,14 @@ IVR_DIR = os.path.join(GENERATED_DIR, "ivr")
 # transfer a call to 700, pick it up again on the slot it reads out.
 PARK_LOT, PARK_CONTEXT, PARK_EXT = "default", "parkedcalls", "700"
 PARK_SLOTS = [str(n) for n in range(701, 721)]
+# Call recording: Asterisk (MixMonitor) writes 8 kHz mu-law files here,
+# named <time>_<ext>_<other party>_<in|out|int|req>_<uniqueid>.ulaw; the
+# dashboard lists, plays (as WAV), deletes and expires them. A folder of
+# its own, mode 2770 asterisk:asterisk (README, "Call recording").
+REC_DIR = os.environ.get("PBX_RECORDINGS_DIR", "/var/spool/asterisk/monitor/portal")
+REC_NAME_RE = re.compile(r"(\d{8}-\d{6})_(\d{3})_(\d{0,20}|unknown)_(in|out|int|req)_([0-9.]{1,40})\.ulaw")
+# Told to outside callers when calls may be recorded (an IVR-style greeting).
+REC_NOTICE = os.path.join(IVR_DIR, "recording-notice.ulaw")
 # Business hours schedules: 4XX. Open or closed by the clock in PBX_TIMEZONE
 # (the VPS's own clock may be in another zone).
 HOURS_MIN, HOURS_MAX = 400, 499
@@ -184,6 +192,7 @@ DEFAULT_SETTINGS = {
     "trunk_irishvoip_enabled": "1",
     "trunk_voxbeam_enabled": "1",
     "inbound_default": "201",
+    "rec_days": "90",  # recordings older than this are deleted
     "route_mobile": "irishvoip",
     "route_landline": "default",
     "route_freephone": "irishvoip",
@@ -337,7 +346,8 @@ def get_db() -> sqlite3.Connection:
                    "extensions ADD COLUMN vm_email TEXT NOT NULL DEFAULT ''",
                    "extensions ADD COLUMN setup_email TEXT NOT NULL DEFAULT ''",
                    "extensions ADD COLUMN outbound_cid TEXT NOT NULL DEFAULT ''",
-                   "ring_groups ADD COLUMN voicemail TEXT NOT NULL DEFAULT ''"):
+                   "ring_groups ADD COLUMN voicemail TEXT NOT NULL DEFAULT ''",
+                   "extensions ADD COLUMN record INTEGER NOT NULL DEFAULT 0"):
         try:
             conn.execute(f"ALTER TABLE {column}")
         except sqlite3.OperationalError:
@@ -606,7 +616,10 @@ def _route_check(kind: str) -> List[str]:
 
 def _outbound_block(s: Dict[str, str], exten: str, trunks: List[str], refused: bool = False) -> List[str]:
     out = [f"exten => {exten},1,Set(GROUP(outbound)=calls)",
-           " same => n,GotoIf($[${GROUP_COUNT(calls@outbound)} > ${MAX_OUTBOUND}]?busy)"]
+           " same => n,GotoIf($[${GROUP_COUNT(calls@outbound)} > ${MAX_OUTBOUND}]?busy)",
+           *REC_EXT_LINES,
+           ' same => n,ExecIf($["${RECEXT}" = "" & "${C2C}" != ""]?Set(__RECEXT=${C2C}))',
+           " same => n,Set(__RECTO=${ARG1})"]
     out += [' same => n,Set(OUT_CID=${IF($["${EXT_CID}" != ""]?${EXT_CID}:${OUTBOUND_CID})})',
             ' same => n,ExecIf($["${OUT_CID}" != ""]?Set(CALLERID(num)=${OUT_CID}))']
     if exten in NUMBER_TYPES and not refused:
@@ -620,7 +633,7 @@ def _outbound_block(s: Dict[str, str], exten: str, trunks: List[str], refused: b
     elif not trunks and exten != "international":
         out += [" same => n,NoOp(No enabled trunk for these numbers)", " same => n,Goto(busy)"]
     for i, t in enumerate(trunks):
-        out.append(f" same => n,Dial(PJSIP/{TRUNKS[t]['dial']}@{t},60)")
+        out.append(f" same => n,Dial(PJSIP/{TRUNKS[t]['dial']}@{t},60,{REC_DIAL})")
         if i < len(trunks) - 1:
             # Only fall through to the next trunk if this one couldn't take
             # the call at all (down, refused, congested), never after a
@@ -673,7 +686,8 @@ def _call_ext_context() -> List[str]:
         f" same => n,Set(FWD=${{DB({cf}/${{EXTEN}})}})",
         ' same => n,GotoIf($["${FWD}" != ""]?fwd)',
         f' same => n,GotoIf($["${{DB({DND_FAMILY}/${{EXTEN}})}}" = "1"]?busy)',
-        " same => n,Dial(PJSIP/${EXTEN},30)",
+        *REC_EXT_LINES,
+        f" same => n,Dial(PJSIP/${{EXTEN}},30,{REC_DIAL})",
         ' same => n,GotoIf($["${DIALSTATUS}" = "ANSWER"]?done)',
         ' same => n,GotoIf($["${DIALSTATUS}" = "BUSY"]?busy)',
         f" same => n,Set(FWD=${{DB({cfu}/${{EXTEN}})}})",
@@ -691,6 +705,46 @@ def _call_ext_context() -> List[str]:
         " same => n,Goto(from-internal,${FWD},1)",
         " same => n(done),Hangup()",
     ]
+
+
+# Who's calling, for recordings: the extension that started the call, kept
+# on every channel the call creates (__ = inherited). Click to call sets it
+# from C2C (its dialling leg isn't an extension's channel).
+REC_EXT_LINES = [" same => n,Set(RC=${CHANNEL(name)})",
+                 ' same => n,ExecIf($["${RECEXT}" = "" & ${REGEX("^PJSIP/2[0-9][0-9]-" ${RC})}]?Set(__RECEXT=${RC:6:3}))']
+REC_DIAL = "U(portal-rec)"  # Dial option: runs [portal-rec] on the answering channel
+
+
+def _rec_context(notice: bool) -> List[str]:
+    """Run by Dial (option U) on the channel that answers, before the two
+    are connected. An extension answering: recorded if it, or the
+    extension calling it, records everything. An outside number answering
+    (a call out): recorded if the calling extension records, and then that
+    person hears the notice first. MixMonitor's b: only while connected."""
+    tz = PBX_TIMEZONE
+    return ["; ---- Call recording: which answered calls are recorded ----",
+            "[portal-rec]",
+            "exten => s,1,Set(RC=${CHANNEL(name)})",
+            " same => n,Set(RC=${CUT(RC,-,1)})",
+            " same => n,Set(CALLEE=${CUT(RC,/,2)})",
+            ' same => n,GotoIf($[${REGEX("^2[0-9][0-9]$" ${CALLEE})}]?toext)',
+            ' same => n,GotoIf($["${RECEXT}" = "" | "${REC_${RECEXT}}" = ""]?done)',
+            " same => n,Set(RX=${RECEXT})",
+            " same => n,Set(RO=${RECTO})",
+            " same => n,Set(RD=out)",
+            *([f" same => n,Playback({REC_NOTICE[:-len('.ulaw')]})  ; told before they're connected"] if notice else []),
+            " same => n,Goto(rec)",
+            ' same => n(toext),GotoIf($["${REC_${CALLEE}}${REC_${RECEXT}}" = ""]?done)',
+            " same => n,Set(RX=${CALLEE})",
+            " same => n,Set(RO=${CALLERID(num)})",
+            # Recorded for the extension calling, not this one: file it under that one.
+            ' same => n,ExecIf($["${REC_${CALLEE}}" = ""]?Set(RX=${RECEXT}))',
+            ' same => n,ExecIf($["${REC_${CALLEE}}" = ""]?Set(RO=${CALLEE}))',
+            ' same => n,Set(RD=${IF($["${RECEXT}" = ""]?in:int)})',
+            " same => n(rec),Set(RO=${FILTER(0-9,${RO})})",
+            ' same => n,ExecIf($["${RO}" = ""]?Set(RO=unknown))',
+            f" same => n,MixMonitor({REC_DIR}/${{STRFTIME(${{EPOCH}},{tz},%Y%m%d-%H%M%S)}}_${{RX}}_${{RO:0:20}}_${{RD}}_${{UNIQUEID}}.ulaw,b)",
+            " same => n(done),Return()"]
 
 
 def _features_context() -> List[str]:
@@ -735,7 +789,7 @@ def _features_context() -> List[str]:
     return out
 
 
-def _weblinks_context(conn, active) -> List[str]:
+def _weblinks_context(conn, active, notice: bool = False) -> List[str]:
     """One entry per live call link, wl-<token>; anything else a browser
     asks for doesn't exist here (404). Limits: calls at once per link and
     in all, and the link's maximum length. The visitor's name is filtered
@@ -755,6 +809,7 @@ def _weblinks_context(conn, active) -> List[str]:
                 " same => n,Set(WNAME=${FILTER(A-Za-z0-9 ._,${CALLERID(name)})})",
                 f" same => n,Set(CALLERID(name)=Web ${{WNAME:0:24}} ({label}))",
                 " same => n,Set(CALLERID(num)=web)",
+                *([f" same => n,Playback({REC_NOTICE[:-len('.ulaw')]})  ; calls may be recorded"] if notice else []),
                 f" same => n,{target}",
                 " same => n(busy),Congestion(5)",
                 " same => n,Hangup()"]
@@ -908,13 +963,18 @@ def build_portal_dialplan(conn) -> str:
     # Each extension's own caller ID, for calls it forwards to outside numbers.
     out += [f"EXTCID_{r['ext']}={r['outbound_cid']}"
             for r in conn.execute("SELECT ext, outbound_cid FROM extensions WHERE enabled = 1 AND outbound_cid != '' ORDER BY ext")]
+    # Extensions whose calls are all recorded (see [portal-rec]).
+    out += [f"REC_{r['ext']}=1" for r in conn.execute("SELECT ext FROM extensions WHERE enabled = 1 AND record = 1 ORDER BY ext")]
     out += ["",
             "; ---- Busy lamps (BLF) and presence: one hint per extension ----",
             f"[{HINTS_CONTEXT}]"]
     out += [f"exten => {e},hint,PJSIP/{e}" for e in sorted(active)]
     out += [f"exten => {n},hint,park:{n}@{PARK_LOT}" for n in PARK_SLOTS]  # lit while a call is parked there
     out += [""] + _call_ext_context() + [""] + _features_context() + [""] + _click_to_call_contexts()
-    out += [""] + _weblinks_context(conn, active)
+    notice = os.path.exists(REC_NOTICE) and bool(conn.execute(
+        "SELECT 1 FROM extensions WHERE enabled = 1 AND record = 1").fetchone())
+    out += [""] + _weblinks_context(conn, active, notice)
+    out += [""] + _rec_context(notice)
     out += ["",
             "; ---- Ring groups (included into from-internal) ----",
             "[portal-ringgroups]"]
@@ -923,20 +983,21 @@ def build_portal_dialplan(conn) -> str:
         members = [m for m in _members(g) if m in active]
         n, t = g["number"], g["ring_time"]
         out.append(f"exten => {n},1,NoOp(Ring group {n}: {g['name']})")
+        out += REC_EXT_LINES
         # Members on do not disturb are left out, at the time of the call.
         if not members:
             out.append(" same => n,NoOp(No active members)")
         elif g["strategy"] == "hunt":
             for i, m in enumerate(members):
                 out += [f' same => n,GotoIf($["${{DB({DND_FAMILY}/{m})}}" = "1"]?skip{i})',
-                        f" same => n,Dial(PJSIP/{m},{t})",
+                        f" same => n,Dial(PJSIP/{m},{t},{REC_DIAL})",
                         ' same => n,ExecIf($["${DIALSTATUS}" = "ANSWER"]?Hangup())',
                         f" same => n(skip{i}),NoOp()"]
         else:
             out.append(" same => n,Set(RG=)")
             out += [f' same => n,ExecIf($["${{DB({DND_FAMILY}/{m})}}" != "1"]?Set(RG=${{RG}}&PJSIP/{m}))' for m in members]
             out += [' same => n,GotoIf($["${RG}" = ""]?nobody)',
-                    f" same => n,Dial(${{RG:1}},{t})",
+                    f" same => n,Dial(${{RG:1}},{t},{REC_DIAL})",
                     ' same => n,ExecIf($["${DIALSTATUS}" = "ANSWER"]?Hangup())',
                     " same => n(nobody),NoOp()"]
         if g["voicemail"] in active:
@@ -963,11 +1024,14 @@ def build_portal_dialplan(conn) -> str:
     out += ["",
             "; ---- Inbound: DID-specific routes, then the default ----",
             "[portal-inbound]"]
+    # Outside callers hear the recording notice first, while any
+    # extension records everything.
+    told = [f" same => n,Playback({REC_NOTICE[:-len('.ulaw')]})"] if notice else []
     for r in conn.execute("SELECT * FROM inbound_routes ORDER BY did"):
-        out.append(f"exten => {r['did']},1,Goto(from-internal,{r['target']},1)")
+        out += [f"exten => {r['did']},1,NoOp(Inbound {r['did']})", *told, f" same => n,Goto(from-internal,{r['target']},1)"]
     default = s["inbound_default"]
-    out.append(f"exten => _X.,1,Goto(from-internal,{default},1)")
-    out.append(f"exten => s,1,Goto(from-internal,{default},1)")
+    for x in ("_X.", "s"):
+        out += [f"exten => {x},1,NoOp(Inbound)", *told, f" same => n,Goto(from-internal,{default},1)"]
     out.append("")
     return "\n".join(out)
 
@@ -1079,7 +1143,29 @@ def parse_channels(output: str) -> List[dict]:
         except ValueError:
             duration = 0
         channels.append({"channel": f[0], "context": f[1], "exten": f[2], "state": f[4],
-                         "application": f[5], "caller_id": f[7], "duration_seconds": duration})
+                         "application": f[5], "caller_id": f[7], "duration_seconds": duration,
+                         "bridge": f[12] if len(f) > 13 else "", "uniqueid": f[13] if len(f) > 13 else ""})
+    return channels
+
+
+def recording_ids() -> set:
+    """Uniqueids with a recording file: a call being recorded has one."""
+    try:
+        return {m.group(5) for m in map(REC_NAME_RE.fullmatch, os.listdir(REC_DIR)) if m}
+    except OSError:
+        return set()
+
+
+def _mark_recording(channels: List[dict]) -> List[dict]:
+    """recording: this channel is being recorded. recordable: an
+    extension's channel in a call, which the Record button can record."""
+    ids = recording_ids() if channels else set()
+    # A recording is made on one of the call's channels (the one that
+    # answered, or the extension's for the button): mark the whole call.
+    bridges = {c["bridge"] for c in channels if c["bridge"] and c["uniqueid"] in ids}
+    for c in channels:
+        c["recording"] = bool(c["uniqueid"]) and (c["uniqueid"] in ids or c["bridge"] in bridges)
+        c["recordable"] = bool(re.match(r"PJSIP/2[0-9][0-9]-", c["channel"])) and c["state"] == "Up"
     return channels
 
 
@@ -1095,7 +1181,7 @@ def get_status() -> dict:
         "checked_at": _now(),
         "extensions": {k: v for k, v in contacts.items() if k.isdigit()},
         "trunks": {k: contacts.get(k, {"status": "Unknown", "rtt_ms": None, "address": None}) for k in TRUNKS},
-        "channels": parse_channels(asterisk_cli("core show channels concise") or ""),
+        "channels": _mark_recording(parse_channels(asterisk_cli("core show channels concise") or "")),
         "last_apply": _last_apply,
     }
 
@@ -1176,7 +1262,7 @@ def api_config():
         return {
             "extensions": [{"ext": r["ext"], "name": r["name"], "enabled": bool(r["enabled"]),
                             "voicemail_email": r["vm_email"], "setup_email": r["setup_email"],
-                            "outbound_cid": r["outbound_cid"],
+                            "outbound_cid": r["outbound_cid"], "record": bool(r["record"]),
                             "created_at": r["created_at"], "updated_at": r["updated_at"]}
                            for r in conn.execute("SELECT * FROM extensions ORDER BY ext")],
             "ring_groups": [{"number": r["number"], "name": r["name"], "strategy": r["strategy"],
