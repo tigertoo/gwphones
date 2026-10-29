@@ -576,10 +576,13 @@ function ExtensionsSection({ config, status, send, busy, apiBase, reload }) {
             <tr><td><code>*8</code></td><td>Answer any ringing extension</td></tr>
             <tr><td><code>**</code>ext, e.g. <code>**202</code></td><td>Answer that extension's ringing call</td></tr>
             <tr><td><code>*97</code> / <code>*98</code></td><td>Your voicemail / any mailbox</td></tr>
+            <tr><td><code>700</code></td><td>Park a call: transfer it to 700 and note the slot read out (701–720)</td></tr>
+            <tr><td><code>701</code>–<code>720</code></td><td>Pick up the call parked in that slot</td></tr>
           </tbody>
         </table>
         <p className="pbx-hint">Forward to an extension or an Irish number in national format, e.g. *720871234567.
-          Transfers use the app's or phone's own transfer button.</p>
+          Transfers use the app's or phone's own transfer button. A parked call nobody picks up rings the phone that
+          parked it again after 45 seconds. Add 701, 702… as Quick Dials (BLF) in Groundwire to see which slots are in use.</p>
       </details>
       <form className="idea-form-row pbx-add-row" onSubmit={add}>
         <input

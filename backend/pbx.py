@@ -135,6 +135,10 @@ MAX_MENU_HOPS = 20  # menus entered in one call, so a fallback loop ends
 # The dashboard page converts uploads and recordings to that, so nothing
 # here ever reads an uploaded audio file; any bytes are valid mu-law.
 IVR_DIR = os.path.join(GENERATED_DIR, "ivr")
+# Call park: Asterisk's own lot (res_parking.conf, left at its defaults):
+# transfer a call to 700, pick it up again on the slot it reads out.
+PARK_LOT, PARK_CONTEXT, PARK_EXT = "default", "parkedcalls", "700"
+PARK_SLOTS = [str(n) for n in range(701, 721)]
 # Business hours schedules: 4XX. Open or closed by the clock in PBX_TIMEZONE
 # (the VPS's own clock may be in another zone).
 HOURS_MIN, HOURS_MAX = 400, 499
@@ -696,8 +700,11 @@ def _features_context() -> List[str]:
     out = ["; ---- Feature codes (included into from-internal) ----",
            "; *78/*79 do not disturb on/off; *72<number>/*73 forward always;",
            "; *90<number>/*91 forward when busy; *52<number>/*53 forward when",
-           "; unanswered; *8 answer any ringing extension; **2XX answer that one.",
-           "[portal-features]"]
+           "; unanswered; *8 answer any ringing extension; **2XX answer that one;",
+           f"; {PARK_EXT} park (transfer a call to it), {PARK_SLOTS[0]}-{PARK_SLOTS[-1]} pick a parked call up.",
+           "[portal-features]",
+           # Phones only: browsers and menus never reach this context.
+           f"include => {PARK_CONTEXT}"]
     me = [" same => n,Set(ME=${CHANNEL(name)})",
           " same => n,Set(ME=${CUT(ME,-,1)})",
           " same => n,Set(ME=${CUT(ME,/,2)})",
@@ -905,6 +912,7 @@ def build_portal_dialplan(conn) -> str:
             "; ---- Busy lamps (BLF) and presence: one hint per extension ----",
             f"[{HINTS_CONTEXT}]"]
     out += [f"exten => {e},hint,PJSIP/{e}" for e in sorted(active)]
+    out += [f"exten => {n},hint,park:{n}@{PARK_LOT}" for n in PARK_SLOTS]  # lit while a call is parked there
     out += [""] + _call_ext_context() + [""] + _features_context() + [""] + _click_to_call_contexts()
     out += [""] + _weblinks_context(conn, active)
     out += ["",
