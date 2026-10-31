@@ -607,9 +607,9 @@ def _route_check(kind: str) -> List[str]:
                 f' same => n,GotoIf($["${{R}}" = "irishvoip"]?iv{i})']
         out += [f' same => n,GotoIf($["${{R}}" = "{p}"]?vb{i})' for p in VOXBEAM_ROUTES]
         out += [" same => n,Goto(done)",  # empty (no more routes) or not a route we know
-                f" same => n(vb{i}),Dial(PJSIP/${{R}}${{ARG2}}@voxbeam,60)",
+                f" same => n(vb{i}),Dial(PJSIP/${{R}}${{ARG2}}@voxbeam,60,{REC_DIAL})",
                 f" same => n,Goto(next{i})",
-                f" same => n(iv{i}),Dial(PJSIP/${{ARG1}}@irishvoip,60)",
+                f" same => n(iv{i}),Dial(PJSIP/${{ARG1}}@irishvoip,60,{REC_DIAL})",
                 f' same => n(next{i}),GotoIf($["${{DIALSTATUS}}" != "CHANUNAVAIL" & "${{DIALSTATUS}}" != "CONGESTION"]?done)']
     return out + [" same => n,Goto(done)", " same => n(nocheck),NoOp(Route check didn't answer: ${LCR})"]
 
