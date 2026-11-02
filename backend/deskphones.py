@@ -18,7 +18,13 @@ Only <mac>.cfg is served; everything else a Yealink asks for
 (y0000000000XX.cfg, <mac>-local.cfg, <mac>.boot...) gets a 404, which the
 phone treats as "nothing there". Key names follow Yealink's
 auto-provisioning guide for T3x/T4x/T5x (firmware 8x); check a new model
-against "view config" before relying on it.
+against "view config" before relying on it. The older T41P/T46G (end of
+life, last firmware 8x) use the same names.
+
+Line keys: key 1 is the phone's own line; the next ones are busy lamps
+(BLF) for the other extensions, in order, and the rest up to
+MAX_LINE_KEYS are cleared, so a removed extension's key goes. A phone
+ignores keys it doesn't have (a T41P shows 6 a page).
 """
 
 import base64
@@ -39,9 +45,11 @@ router = APIRouter(prefix="/api/pbx")
 public_router = APIRouter(prefix="/prov/yealink")
 
 MAC_RE = re.compile(r"^[0-9a-f]{12}$")
-MODELS = ["T31P", "T31G", "T33G", "T34W", "T43U", "T44U", "T46U", "T48U", "T53", "T53W", "T54W", "T57W", "T58W"]
+MODELS = ["T41P", "T46G", "T31P", "T31G", "T33G", "T34W", "T43U", "T44U", "T46U", "T48U", "T53", "T53W", "T54W", "T57W", "T58W"]
 REPEAT_MINUTES = 60
 VOICEMAIL_NUMBER = "*97"
+MAX_LINE_KEYS = 27  # a T46G/T46U/T54W's 27 (3 pages of 9 or 10); more models have fewer
+PICKUP_PREFIX = "**"  # **2XX answers that extension's ringing call (pbx.py, feature codes)
 
 MAX_FAILURES = 10  # per IP per FAILURE_WINDOW seconds, then 429
 FAILURE_WINDOW = 600
@@ -92,7 +100,26 @@ def build_config(conn, phone) -> str:
               "account.1.srtp_encryption = 2",  # compulsory, as for the apps
               f"voice_mail.number.1 = {VOICEMAIL_NUMBER}",
               ""]
-    return "\n".join(lines)
+    return "\n".join(lines + _line_keys(conn, e["ext"]))
+
+
+def _line_keys(conn, own: str) -> list:
+    """Busy lamps for the other extensions: lit while that one is on a
+    call, flashing while it rings; pressing it calls it, or answers it
+    while it rings."""
+    others = [r for r in conn.execute("SELECT ext, name FROM extensions WHERE enabled = 1 AND ext != ? ORDER BY ext",
+                                      (own,))][:MAX_LINE_KEYS - 1]
+    lines = ["features.pickup.blf_visual_enable = 1", ""]
+    for n, r in enumerate(others, start=2):
+        name = re.sub(r"[\r\n]", " ", r["name"])
+        lines += [f"linekey.{n}.type = 16",  # BLF
+                  f"linekey.{n}.line = 1",
+                  f"linekey.{n}.value = {r['ext']}",
+                  f"linekey.{n}.label = {r['ext']} {name}",
+                  f"linekey.{n}.pickup_value = {PICKUP_PREFIX}{r['ext']}"]
+    for n in range(len(others) + 2, MAX_LINE_KEYS + 1):
+        lines += [f"linekey.{n}.type = 0", f"linekey.{n}.value = ", f"linekey.{n}.label = "]
+    return lines + [""]
 
 
 def _too_many(ip: str) -> bool:

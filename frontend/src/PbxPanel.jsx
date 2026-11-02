@@ -793,7 +793,9 @@ function DeskPhonesSection({ config, send, busy, apiBase }) {
         Add the phone here, then in Yealink RPS add its MAC with a server using the URL, username and password shown
         for it. Out of the box (or after a factory reset) the phone sets itself up, then checks for changes every{" "}
         {data.repeat_minutes} minutes and whenever it restarts. Best on its own extension: check your aor-ext
-        template allows more than one phone before sharing one with an app.
+        template allows more than one phone before sharing one with an app. The first key is its own line; the next
+        ones are busy lamps for the other extensions (lit while on a call, flashing while ringing: press to call, or to
+        answer it while it rings).
       </p>
       <form className="idea-form-row pbx-add-row" onSubmit={add}>
         <input
