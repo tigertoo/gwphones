@@ -1,5 +1,8 @@
 import React, { useEffect, useState, useCallback } from "react";
 import BillingPanel from "./BillingPanel";
+import IvrSection from "./IvrSection";
+import HoursSection from "./HoursSection";
+import RecordingsSection from "./RecordingsSection";
 import SaveToast, { busyText } from "./SaveToast";
 
 // Phone System tab: manages the Asterisk PBX on this VPS through the
@@ -8,10 +11,15 @@ import SaveToast, { busyText } from "./SaveToast";
 
 const SECTIONS = [
   { key: "status", label: "Status" },
+  { key: "call", label: "Click to Call" },
+  { key: "links", label: "Call Links" },
   { key: "extensions", label: "Extensions" },
   { key: "desk", label: "Desk Phones" },
   { key: "trunks", label: "Trunks & Outbound" },
   { key: "inbound", label: "Inbound & Ring Groups" },
+  { key: "ivr", label: "IVR Menus" },
+  { key: "hours", label: "Business Hours" },
+  { key: "recordings", label: "Recordings" },
   { key: "billing", label: "Billing" },
 ];
 const STATUS_POLL_MS = 5000;
@@ -40,8 +48,9 @@ function Result({ result }) {
   );
 }
 
-export default function PbxPanel({ apiBase }) {
-  const [section, setSection] = useState("status");
+export default function PbxPanel({ apiBase, callNumber }) {
+  const [section, setSection] = useState(callNumber ? "call" : "status");
+  useEffect(() => { if (callNumber) setSection("call"); }, [callNumber]);
   const [config, setConfig] = useState(null);
   const [status, setStatus] = useState(null);
   const [loadError, setLoadError] = useState(null);
@@ -86,12 +95,21 @@ export default function PbxPanel({ apiBase }) {
       [/reset-voicemail-pin$/, "Setting a new voicemail PIN…"],
       [/^\/apply$/, "Applying to the phone system…"],
       [/^\/desk-phones/, method === "DELETE" ? "Removing the phone…" : "Saving the desk phone…"],
+      [/^\/click-to-call$/, "Ringing your extension…"],
+      [/^\/call-links/, method === "DELETE" ? "Deleting the link…" : "Saving the link and applying…"],
+      [/\/greeting$/, method === "DELETE" ? "Removing the greeting…" : "Sending the greeting…"],
+      [/\/override$/, "Switching and applying…"],
+      [/^\/recordings\/start$/, "Starting the recording…"],
+      [/^\/recordings\/file\//, "Deleting the recording…"],
+      [/\/recording$/, "Saving and applying…"],
     ]).replace(/^Saving…$/, "Saving and applying to the phone system…").replace(/^Deleting…$/, "Deleting and applying…") });
     try {
+      // Bytes (an IVR greeting) go as they are, anything else as JSON.
+      const raw = body instanceof Uint8Array;
       const res = await fetch(`${apiBase}/api/pbx${path}`, {
         method,
-        headers: { "Content-Type": "application/json" },
-        body: body ? JSON.stringify(body) : undefined,
+        headers: { "Content-Type": raw ? "application/octet-stream" : "application/json" },
+        body: raw ? body : body ? JSON.stringify(body) : undefined,
       });
       const data = await res.json().catch(() => ({}));
       if (!res.ok) {
@@ -139,10 +157,15 @@ export default function PbxPanel({ apiBase }) {
       <SaveToast toast={toast} onClose={closeToast} />
 
       {section === "status" && <StatusSection {...props} />}
+      {section === "call" && <ClickToCallSection {...props} initialNumber={callNumber} />}
+      {section === "links" && <CallLinksSection {...props} />}
       {section === "extensions" && <ExtensionsSection {...props} />}
       {section === "desk" && <DeskPhonesSection {...props} />}
       {section === "trunks" && <TrunksSection {...props} />}
       {section === "inbound" && <InboundSection {...props} />}
+      {section === "ivr" && <IvrSection {...props} />}
+      {section === "hours" && <HoursSection {...props} />}
+      {section === "recordings" && <RecordingsSection {...props} />}
       {section === "billing" && <BillingPanel apiBase={apiBase} />}
     </div>
   );
@@ -154,7 +177,7 @@ export default function PbxPanel({ apiBase }) {
 
 const KIND_NAMES = { mobile: "mobiles", landline: "landlines", freephone: "freephone", international: "international" };
 
-function StatusSection({ config, status }) {
+function StatusSection({ config, status, send, busy }) {
   if (!status) return <section className="panel"><p className="panel-empty">Checking Asterisk…</p></section>;
   if (!status.asterisk_running) {
     return (
@@ -234,7 +257,7 @@ function StatusSection({ config, status }) {
         ) : (
           <table className="users-table">
             <thead>
-              <tr><th>Channel</th><th>Caller</th><th>Dialled</th><th>State</th><th>Duration</th></tr>
+              <tr><th>Channel</th><th>Caller</th><th>Dialled</th><th>State</th><th>Duration</th><th>Recording</th></tr>
             </thead>
             <tbody>
               {status.channels.map((c) => (
@@ -244,6 +267,15 @@ function StatusSection({ config, status }) {
                   <td>{c.exten || "—"}</td>
                   <td>{c.state}</td>
                   <td>{formatDuration(c.duration_seconds)}</td>
+                  <td>
+                    {c.recording ? <span className="pbx-chip pbx-recording">● Recording</span>
+                      : c.recordable ? (
+                        <button className="ticket-action-btn" disabled={busy}
+                          title="Records from now on. The other person isn't told automatically."
+                          onClick={() => send("POST", "/recordings/start", { channel: c.channel }, "Recording this call from now on.")}
+                        >Record</button>
+                      ) : null}
+                  </td>
                 </tr>
               ))}
             </tbody>
@@ -452,16 +484,74 @@ function OutboundCid({ ext, current, fallback, dids, send, busy }) {
         {dids.map((d) => <option key={d} value={d} />)}
       </datalist>
       <button className="ticket-action-btn" disabled={busy || clean === (current || "")}>Save</button>
-      <span className="pbx-hint">Shown to people this extension calls. Use a number on your Irish VoIP account. Leave blank for the default.</span>
+      <span className="pbx-hint">Shown to people this extension calls, e.g. a company number or the user's mobile so calls come back to them. Leave blank for the default.</span>
     </form>
   );
+}
+
+const FORWARD_FIELDS = [
+  ["always", "Forward all calls to"],
+  ["busy", "When busy, forward to"],
+  ["no_answer", "When not answered or offline, forward to"],
+];
+const NO_FORWARDING = { dnd: false, always: "", busy: "", no_answer: "" };
+
+function Forwarding({ ext, current, available, send, busy, reload }) {
+  const saved = current || NO_FORWARDING;
+  const [form, setForm] = useState(saved);
+  useEffect(() => setForm(current || NO_FORWARDING), [current]);
+  const changed = FORWARD_FIELDS.some(([k]) => form[k].trim() !== saved[k]) || form.dnd !== saved.dnd;
+  const save = async (ev) => {
+    ev.preventDefault();
+    if (await send("PUT", `/extensions/${ext}/forwarding`, form, `Call forwarding for ${ext} saved.`)) reload();
+  };
+  if (!available) return <p className="pbx-hint">Call forwarding: Asterisk isn't answering, so it can't be shown.</p>;
+  return (
+    <form className="pbx-forwarding" onSubmit={save}>
+      <div className="ticket-action-label">Call forwarding and do not disturb (also set from the phone, see feature codes)</div>
+      <label className="pbx-toggle">
+        <input type="checkbox" checked={form.dnd} onChange={(e) => setForm({ ...form, dnd: e.target.checked })} />
+        Do not disturb: callers get voicemail (or the busy forward), and ring groups skip {ext}
+      </label>
+      {FORWARD_FIELDS.map(([k, label]) => (
+        <label key={k} className="pbx-field">
+          <span>{label}</span>
+          <input
+            className="idea-input"
+            placeholder="Extension or Irish number, e.g. 202 or 087 123 4567"
+            value={form[k]}
+            onChange={(e) => setForm({ ...form, [k]: e.target.value })}
+          />
+        </label>
+      ))}
+      <button className="ticket-action-btn" disabled={busy || !changed}>Save forwarding</button>
+      <span className="pbx-hint"> Only extensions and Irish landlines and mobiles. Calls to outside numbers use the price cap and are billed to {ext}.</span>
+    </form>
+  );
+}
+
+function forwardingBadge(f) {
+  if (!f) return null;
+  if (f.dnd) return "Do not disturb";
+  if (f.always) return `Forwarded to ${f.always}`;
+  const parts = [f.busy && `busy → ${f.busy}`, f.no_answer && `no answer → ${f.no_answer}`].filter(Boolean);
+  return parts.length ? `Forwards ${parts.join(", ")}` : null;
 }
 
 function ExtensionsSection({ config, status, send, busy, apiBase, reload }) {
   const [draft, setDraft] = useState({ ext: "", name: "" });
   const [editing, setEditing] = useState(null); // { ext, name }
   const [creds, setCreds] = useState(null); // { ext, ...credentials }
+  const [forwarding, setForwarding] = useState({ available: true, extensions: {} });
   const { limits } = config;
+
+  const loadForwarding = useCallback(async () => {
+    try {
+      const res = await fetch(`${apiBase}/api/pbx/forwarding`);
+      if (res.ok) setForwarding(await res.json());
+    } catch { /* shown as unavailable on the next try */ }
+  }, [apiBase]);
+  useEffect(() => { loadForwarding(); }, [loadForwarding, config]);
 
   const add = async (e) => {
     e.preventDefault();
@@ -482,6 +572,36 @@ function ExtensionsSection({ config, status, send, busy, apiBase, reload }) {
   return (
     <section className="panel">
       <h2>Extensions</h2>
+      <label className="pbx-toggle pbx-gap">
+        <input
+          type="checkbox"
+          checked={config.settings.video}
+          disabled={busy}
+          onChange={(ev) => send("PUT", "/settings", { ...config.settings, video: ev.target.checked },
+            ev.target.checked ? "Video calls between extensions turned on." : "Video calls turned off: calls are audio only.")}
+        />
+        Video calls between extensions
+      </label>
+      <span className="pbx-hint"> Groundwire and Linphone (VP8/H.264). Calls to and from outside numbers stay audio only.</span>
+      <details className="pbx-gap">
+        <summary className="pbx-hint">Feature codes for the phones</summary>
+        <table className="users-table">
+          <tbody>
+            <tr><td><code>*78</code> / <code>*79</code></td><td>Do not disturb on / off</td></tr>
+            <tr><td><code>*72</code>number / <code>*73</code></td><td>Forward all calls / stop</td></tr>
+            <tr><td><code>*90</code>number / <code>*91</code></td><td>Forward when busy / stop</td></tr>
+            <tr><td><code>*52</code>number / <code>*53</code></td><td>Forward when not answered or offline / stop</td></tr>
+            <tr><td><code>*8</code></td><td>Answer any ringing extension</td></tr>
+            <tr><td><code>**</code>ext, e.g. <code>**202</code></td><td>Answer that extension's ringing call</td></tr>
+            <tr><td><code>*97</code> / <code>*98</code></td><td>Your voicemail / any mailbox</td></tr>
+            <tr><td><code>700</code></td><td>Park a call: transfer it to 700 and note the slot read out (701–720)</td></tr>
+            <tr><td><code>701</code>–<code>720</code></td><td>Pick up the call parked in that slot</td></tr>
+          </tbody>
+        </table>
+        <p className="pbx-hint">Forward to an extension or an Irish number in national format, e.g. *720871234567.
+          Transfers use the app's or phone's own transfer button. A parked call nobody picks up rings the phone that
+          parked it again after 45 seconds. Add 701, 702… as Quick Dials (BLF) in Groundwire to see which slots are in use.</p>
+      </details>
       <form className="idea-form-row pbx-add-row" onSubmit={add}>
         <input
           className="idea-input pbx-num-input"
@@ -535,6 +655,9 @@ function ExtensionsSection({ config, status, send, busy, apiBase, reload }) {
                     </span>
                   ) : e.name}
                   {e.outbound_cid && <div className="pbx-hint">Shows {e.outbound_cid}</div>}
+                  {forwardingBadge(forwarding.extensions[e.ext]) && (
+                    <div className="pbx-hint">{forwardingBadge(forwarding.extensions[e.ext])}</div>
+                  )}
                 </td>
                 <td>
                   {!e.enabled ? "—" : (
@@ -605,6 +728,14 @@ function ExtensionsSection({ config, status, send, busy, apiBase, reload }) {
                     <VoicemailEmail ext={e.ext} current={e.voicemail_email} send={send} busy={busy} />
                     <OutboundCid ext={e.ext} current={e.outbound_cid} fallback={config.settings.outbound_cid}
                       dids={config.inbound_routes.map((r) => r.did)} send={send} busy={busy} />
+                    <label className="pbx-toggle pbx-gap">
+                      <input type="checkbox" checked={e.record} disabled={busy}
+                        onChange={(ev) => send("PUT", `/extensions/${e.ext}/recording`, { always: ev.target.checked },
+                          ev.target.checked ? `Every call ${e.ext} answers or makes is recorded from now on.` : `${e.ext}'s calls are no longer recorded.`)} />
+                      Record every call (see Recordings for the notice callers hear)
+                    </label>
+                    <Forwarding ext={e.ext} current={forwarding.extensions[e.ext]} available={forwarding.available}
+                      send={send} busy={busy} reload={loadForwarding} />
                     {!creds.server && <p className="pbx-hint">Set PBX_PUBLIC_HOST in the dashboard's .env to show the server name here.</p>}
                   </td>
                 </tr>
@@ -769,6 +900,254 @@ function DeskPhonesSection({ config, send, busy, apiBase }) {
 }
 
 // ---------------------------------------------------------------------------
+// Click to call
+// ---------------------------------------------------------------------------
+
+const C2C_EXT_KEY = "pbx-click-to-call-ext";
+
+// tel:+353-87-123-4567;ext=12 -> +353871234567 (parameters dropped)
+export function numberFromTel(value) {
+  let v = value || "";
+  try { v = decodeURIComponent(v); } catch { /* use as is */ }
+  v = v.replace(/^tel:/i, "").split(";")[0];
+  return v.replace(/[^\d+*#]/g, "");
+}
+
+function ClickToCallSection({ config, send, busy, apiBase, initialNumber }) {
+  const enabled = config.extensions.filter((e) => e.enabled);
+  const [ext, setExt] = useState(() => {
+    try { return localStorage.getItem(C2C_EXT_KEY) || ""; } catch { return ""; }
+  });
+  const [number, setNumber] = useState(initialNumber || "");
+  const [route, setRoute] = useState(null);
+  const [handler, setHandler] = useState("");
+  useEffect(() => { if (initialNumber) setNumber(initialNumber); }, [initialNumber]);
+  const from = enabled.some((e) => e.ext === ext) ? ext : enabled[0]?.ext || "";
+  const isExt = /^2\d\d$/.test(number.trim());
+
+  // What the call would do, before it's made: the route and price, or why
+  // it would be refused. Numbers from tel: links come from any web page.
+  useEffect(() => {
+    const n = number.trim();
+    if (!n || /^2\d\d$/.test(n)) { setRoute(null); return undefined; }
+    const t = setTimeout(async () => {
+      try {
+        const res = await fetch(`${apiBase}/api/pbx/route-test?${new URLSearchParams({ number: n })}`);
+        if (res.ok) setRoute(await res.json());
+      } catch { setRoute(null); }
+    }, 400);
+    return () => clearTimeout(t);
+  }, [number, apiBase]);
+
+  const call = async (ev) => {
+    ev.preventDefault();
+    try { localStorage.setItem(C2C_EXT_KEY, from); } catch { /* not remembered */ }
+    await send("POST", "/click-to-call", { ext: from, number },
+      `Ringing extension ${from}. Answer it and the call to ${number.trim()} starts.`);
+  };
+
+  const registerTel = () => {
+    try {
+      navigator.registerProtocolHandler("tel", `${window.location.origin}${window.location.pathname}?call=%s`);
+      setHandler("Asked the browser. Accept its prompt, then tel: links open here with the number filled in.");
+    } catch (e) {
+      setHandler(`This browser wouldn't do it: ${e.message}`);
+    }
+  };
+
+  const r = route?.result;
+  const blocked = !isExt && route && (!route.recognised || !!r?.refuse || !!r?.note);
+  let preview = null;
+  if (isExt) preview = <span>Extension {number.trim()}</span>;
+  else if (route && !route.recognised) preview = <span className="pbx-warning">Not a number the phones can call.</span>;
+  else if (r?.note) preview = <span className="pbx-warning">Dial emergency numbers from the phone itself.</span>;
+  else if (r?.refuse) preview = <span className="pbx-warning">Would be refused: {r.refuse}</span>;
+  else if (r?.routes?.length) {
+    const first = r.candidates.find((c) => !c.dropped);
+    preview = <span>{r.kind}, via {r.routes[0].label}{first?.per_min ? `, €${first.per_min}/min` : ""}</span>;
+  }
+
+  return (
+    <section className="panel">
+      <h2>Click to call</h2>
+      <p className="pbx-hint">
+        Your extension rings first, showing the number. Answer it and the call goes out as if you&rsquo;d dialled it:
+        your caller ID, the price cap, billed to your extension. It rings even on do not disturb.
+      </p>
+      <form className="idea-form-row pbx-add-row" onSubmit={call}>
+        <select className="idea-select pbx-select" value={from} onChange={(e) => setExt(e.target.value)}>
+          {enabled.map((e) => <option key={e.ext} value={e.ext}>{e.ext} {e.name}</option>)}
+        </select>
+        <input
+          className="idea-input"
+          placeholder="Number, e.g. 087 123 4567, +44 20 8759 9036 or 202"
+          value={number}
+          onChange={(e) => setNumber(e.target.value)}
+        />
+        <button className="ticket-action-btn ticket-action-btn-primary"
+          disabled={busy || !from || !number.trim() || blocked}>Call</button>
+      </form>
+      {preview && <div className="pbx-hint">{preview}</div>}
+      {initialNumber && <p className="pbx-hint">Filled in from a tel: link. Check the number before you call.</p>}
+
+      <div className="ticket-action-label pbx-gap">Call from links on other web pages</div>
+      <p className="pbx-hint">
+        Make this dashboard the browser&rsquo;s handler for phone number (tel:) links, e.g. in a CRM. Clicking one opens
+        this page with the number filled in; it never calls until you press Call. Chrome, Edge and Firefox; not Safari.
+      </p>
+      {typeof navigator.registerProtocolHandler === "function" ? (
+        <button className="ticket-action-btn" onClick={registerTel}>Open tel: links here</button>
+      ) : <p className="pbx-hint">This browser can&rsquo;t do this.</p>}
+      {handler && <p className="pbx-hint">{handler}</p>}
+    </section>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Call links: a URL anyone can open to call from their browser
+// ---------------------------------------------------------------------------
+
+const EMPTY_LINK = { label: "", target: "", video: false, max_minutes: 30, enabled: true };
+
+function linkSnippets(link) {
+  const esc = (v) => v.replace(/&/g, "&amp;").replace(/"/g, "&quot;").replace(/</g, "&lt;");
+  return {
+    signature: `<a href="${esc(link.url)}">Call me from your browser</a>`,
+    button: `<a href="${esc(link.url)}" target="_blank" rel="noopener" style="display:inline-block;padding:12px 20px;border-radius:8px;background:#1f8a4c;color:#fff;text-decoration:none;font:600 16px sans-serif">Call us</a>`,
+    iframe: `<iframe src="${esc(link.url)}" allow="microphone; camera" width="420" height="520" style="border:0"></iframe>`,
+  };
+}
+
+function CallLinksSection({ config, send, busy, apiBase }) {
+  const [data, setData] = useState(null);
+  const [form, setForm] = useState(null); // null | { ...fields, id? }
+  const [open, setOpen] = useState(null); // id whose snippets are showing
+
+  const load = useCallback(async () => {
+    const res = await fetch(`${apiBase}/api/pbx/call-links`);
+    if (res.ok) setData(await res.json());
+  }, [apiBase]);
+  useEffect(() => { load(); }, [load, config]);
+
+  const targets = [
+    ...config.extensions.filter((e) => e.enabled).map((e) => ({ value: e.ext, label: `Extension ${e.ext} ${e.name}` })),
+    ...config.ring_groups.map((g) => ({ value: g.number, label: `Ring group ${g.number} ${g.name}` })),
+    ...config.ivr_menus.map((m) => ({ value: m.number, label: `IVR menu ${m.number} ${m.name}` })),
+    ...config.business_hours.map((h) => ({ value: h.number, label: `Business hours ${h.number} ${h.name}` })),
+  ];
+  const targetName = (t) => targets.find((x) => x.value === t)?.label || `${t} (switched off or gone)`;
+
+  const save = async (ev) => {
+    ev.preventDefault();
+    const body = { ...form, target: form.target || targets[0]?.value || "", max_minutes: Number(form.max_minutes) };
+    const ok = form.id
+      ? await send("PUT", `/call-links/${form.id}`, body, "Call link saved.")
+      : await send("POST", "/call-links", body, "Call link created. Copy its URL or a snippet below.");
+    if (ok) { setForm(null); load(); }
+  };
+
+  if (!data) return <section className="panel"><p className="panel-empty">Loading…</p></section>;
+
+  return (
+    <section className="panel">
+      <h2>Call links</h2>
+      <p className="pbx-hint">
+        A link anyone can open to call an extension, ring group or IVR menu (with a keypad) from their browser, with no app or account: for an
+        email signature, a website or a QR code. Browsers can only reach the targets of links that are switched on,
+        never an outside line. At most 2 calls at once per link and 5 in all.
+      </p>
+      {!data.ready && (
+        <div className="pbx-warning">Set PBX_PROVISION_BASE_URL and PBX_PUBLIC_HOST in the dashboard&rsquo;s .env, and set up
+          /call/ and /pbx-ws in nginx (see the README), before links can work.</div>
+      )}
+      {!form && <button className="ticket-action-btn ticket-action-btn-primary pbx-gap" onClick={() => setForm({ ...EMPTY_LINK })}>New call link</button>}
+
+      {form && (
+        <form className="pbx-forwarding" onSubmit={save}>
+          <label className="pbx-field"><span>Name (shown on the page and on the phone)</span>
+            <input className="idea-input" maxLength={40} placeholder="e.g. Sales website" value={form.label}
+              onChange={(e) => setForm({ ...form, label: e.target.value })} />
+          </label>
+          <label className="pbx-field"><span>Rings</span>
+            <select className="idea-select pbx-select" value={form.target || targets[0]?.value || ""}
+              onChange={(e) => setForm({ ...form, target: e.target.value })}>
+              {targets.map((t) => <option key={t.value} value={t.value}>{t.label}</option>)}
+            </select>
+          </label>
+          <label className="pbx-field"><span>Longest call (minutes)</span>
+            <input className="idea-input pbx-num-input" type="number" min={1} max={data.max_minutes} value={form.max_minutes}
+              onChange={(e) => setForm({ ...form, max_minutes: e.target.value })} />
+          </label>
+          <label className="pbx-toggle">
+            <input type="checkbox" checked={form.video} onChange={(e) => setForm({ ...form, video: e.target.checked })} />
+            Allow video{!data.video_on && " (also turn on video calls under Extensions)"}
+          </label>
+          <label className="pbx-toggle">
+            <input type="checkbox" checked={form.enabled} onChange={(e) => setForm({ ...form, enabled: e.target.checked })} />
+            Switched on
+          </label>
+          <div className="pbx-actions">
+            <button className="ticket-action-btn ticket-action-btn-primary" disabled={busy || !form.label.trim()}>
+              {form.id ? "Save" : "Create link"}</button>
+            <button type="button" className="ticket-action-btn" onClick={() => setForm(null)}>Cancel</button>
+          </div>
+        </form>
+      )}
+
+      {data.links.length === 0 ? <p className="panel-empty">No call links yet.</p> : (
+        <table className="users-table pbx-gap">
+          <thead><tr><th>Name</th><th>Rings</th><th>Options</th><th>Last opened</th><th>Actions</th></tr></thead>
+          <tbody>
+            {data.links.flatMap((l) => {
+              const rows = [
+                <tr key={l.id} className={l.live ? "" : "pbx-row-disabled"}>
+                  <td>{l.label}{!l.live && <div className="pbx-hint">{l.enabled ? "Not working: its target is off or gone" : "Switched off"}</div>}</td>
+                  <td>{targetName(l.target)}</td>
+                  <td>{l.video ? "Video, " : ""}{l.max_minutes} min</td>
+                  <td>{l.last_opened_at ? new Date(l.last_opened_at).toLocaleString() : <span className="pbx-hint">Never</span>}</td>
+                  <td className="pbx-actions">
+                    <button className="ticket-action-btn" onClick={() => setOpen(open === l.id ? null : l.id)}>
+                      {open === l.id ? "Hide" : "Link & snippets"}</button>
+                    <button className="ticket-action-btn" onClick={() => setForm({ ...l })}>Edit</button>
+                    <button className="ticket-action-btn" disabled={busy}
+                      onClick={async () => window.confirm(`Give "${l.label}" a new URL? The current one stops working straight away, wherever it's been shared.`) &&
+                        (await send("POST", `/call-links/${l.id}/new-url`, null, "New URL made. Update it wherever the link is shared.")) && load()}
+                    >New URL</button>
+                    <button className="ticket-action-btn idea-delete-btn" disabled={busy}
+                      onClick={async () => window.confirm(`Delete "${l.label}"? The link stops working wherever it's been shared.`) &&
+                        (await send("DELETE", `/call-links/${l.id}`, null, "Call link deleted.")) && load()}
+                    >Delete</button>
+                  </td>
+                </tr>,
+              ];
+              if (open === l.id) {
+                const sn = linkSnippets(l);
+                rows.push(
+                  <tr key={`${l.id}-snippets`}>
+                    <td colSpan={5} className="ticket-action-panel">
+                      <CopyField label="Link" value={l.url} />
+                      {l.qr && <img className="pbx-qr-img" src={l.qr} alt={`QR code for ${l.label}`} />}
+                      <div className="ticket-action-label">Email signature</div>
+                      <CopyField label="HTML" value={sn.signature} />
+                      <div className="ticket-action-label">Website button (opens the call in a new tab)</div>
+                      <CopyField label="HTML" value={sn.button} />
+                      <div className="ticket-action-label">Website, built into the page</div>
+                      <CopyField label="HTML" value={sn.iframe} />
+                      <p className="pbx-hint">Built in only works if the website allows it; the button always works.</p>
+                    </td>
+                  </tr>
+                );
+              }
+              return rows;
+            })}
+          </tbody>
+        </table>
+      )}
+    </section>
+  );
+}
+
+// ---------------------------------------------------------------------------
 // Trunks & outbound
 // ---------------------------------------------------------------------------
 
@@ -886,7 +1265,7 @@ function TrunksSection({ config, status, send, busy, apiBase }) {
             value={form.outbound_cid}
             onChange={(e) => setForm({ ...form, outbound_cid: e.target.value })}
           />
-          <small className="pbx-hint">Use a number on your Irish VoIP account. Carriers can reject calls showing a number you don't own. An extension can have its own under Phone setup.</small>
+          <small className="pbx-hint">Shown on outbound calls from extensions without their own. An extension can have its own under Phone setup.</small>
         </label>
         <label className="pbx-field">
           <span>Voxbeam route</span>
@@ -1029,6 +1408,12 @@ function DestinationSelect({ config, value, onChange }) {
           <option key={e.ext} value={e.ext}>{e.ext} · {e.name}{e.enabled ? "" : " (disabled)"}</option>
         ))}
       </optgroup>
+      <optgroup label="IVR menus">
+        {config.ivr_menus.map((m) => <option key={m.number} value={m.number}>{m.number} · {m.name}</option>)}
+      </optgroup>
+      <optgroup label="Business hours">
+        {config.business_hours.map((h) => <option key={h.number} value={h.number}>{h.number} · {h.name}</option>)}
+      </optgroup>
     </select>
   );
 }
@@ -1039,7 +1424,8 @@ function InboundSection({ config, send, busy }) {
   const [route, setRoute] = useState({ did: "", label: "", target: config.settings.inbound_default });
   const [group, setGroup] = useState(null); // null | { ...fields, isNew }
   const nameOf = (n) =>
-    config.ring_groups.find((g) => g.number === n)?.name || config.extensions.find((e) => e.ext === n)?.name || "?";
+    config.ring_groups.find((g) => g.number === n)?.name || config.extensions.find((e) => e.ext === n)?.name ||
+    config.ivr_menus.find((m) => m.number === n)?.name || config.business_hours.find((h) => h.number === n)?.name || "?";
   const extName = (n) => config.extensions.find((e) => e.ext === n);
 
   const saveGroup = async () => {

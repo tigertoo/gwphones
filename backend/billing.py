@@ -234,6 +234,13 @@ def classify(row: dict) -> dict:
     if trunk_out:
         call["direction"] = "out"
         call["trunk"] = trunk_out.group(1)
+        # An outside caller forwarded to an outside number by an extension
+        # (portal-call-ext sets userfield fwd:<ext>): that extension pays.
+        # A forward that an extension's own call set going is the caller's.
+        # Click to call dials from a Local channel (userfield c2c:<ext>).
+        fwd = re.fullmatch(r"(?:fwd|c2c):(\d+)", row.get("userfield") or "")
+        if not call["ext"] and fwd:
+            call["ext"] = fwd.group(1)
         target = DIAL_TARGET.match(row["lastdata"] or "")
         if target and target.group(2) == call["trunk"]:
             call["number"], call["route"], kind = normalise_number(call["trunk"], target.group(1))
@@ -250,7 +257,9 @@ def classify(row: dict) -> dict:
         call["direction"] = "internal"
     if call.get("status") != "free":
         if call["direction"] != "out":
-            call["status"], call["reason"] = "free", "Inbound call" if call["direction"] == "in" else "Internal call"
+            call["status"], call["reason"] = "free", ("Inbound call" if call["direction"] == "in" else
+                                                      "Call link" if (channel or "").startswith("PJSIP/webguest-") else
+                                                      "Internal call")
         elif row["disposition"] != "ANSWERED" or call["billsec"] <= 0:
             call["status"], call["reason"] = "failed", _not_connected(row["disposition"], call["billsec"])
         elif not call["number"]:
