@@ -47,7 +47,7 @@ from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import Response
 from pydantic import BaseModel
 
-from pbx import EMAIL_RE, TRUNKS, VOXBEAM_ROUTES, changes_log, normalize_did
+from pbx import EMAIL_RE, TRUNKS, VOXBEAM_ROUTES, changes_log, channel_ext, normalize_did
 from pbx import get_db as get_pbx_db
 
 BILLING_DB = os.environ.get("PBX_BILLING_DB", "/var/lib/admin-dashboard/billing.db")
@@ -181,7 +181,6 @@ def from_micro(micro: Optional[int], places: int = 4) -> Optional[str]:
 CDR_FIELDS = ["accountcode", "src", "dst", "dcontext", "clid", "channel", "dstchannel", "lastapp", "lastdata",
               "start", "answer", "end", "duration", "billsec", "disposition", "amaflags", "uniqueid", "userfield"]
 TRUNK_CHANNEL = re.compile(r"^PJSIP/(%s)-" % "|".join(map(re.escape, TRUNKS)))
-EXT_CHANNEL = re.compile(r"^PJSIP/(\d+)-")
 DIAL_TARGET = re.compile(r"^PJSIP/([^@,&]+)@([A-Za-z0-9_-]+)")
 
 
@@ -224,14 +223,13 @@ def classify(row: dict) -> dict:
     channel, dstchannel = row["channel"], row["dstchannel"]
     trunk_out = TRUNK_CHANNEL.match(dstchannel or "")
     trunk_in = TRUNK_CHANNEL.match(channel or "")
-    ext = EXT_CHANNEL.match(channel or "")
     call = {
         "uniqueid": row["uniqueid"], "dstchannel": dstchannel or "", "start_utc": _cdr_time(row["start"]),
         "answer_utc": _cdr_time(row["answer"]), "end_utc": _cdr_time(row["end"]),
         "duration": int(row["duration"] or 0), "billsec": int(row["billsec"] or 0),
         "disposition": row["disposition"], "dialled": row["dst"], "caller": row["clid"] or row["src"],
         "channel": channel, "lastdata": row["lastdata"],
-        "ext": ext.group(1) if ext else None, "trunk": None, "route": "", "number": None,
+        "ext": channel_ext(channel), "trunk": None, "route": "", "number": None,
     }
     if trunk_out:
         call["direction"] = "out"
@@ -253,8 +251,7 @@ def classify(row: dict) -> dict:
     elif trunk_in:
         call["direction"], call["trunk"] = "in", trunk_in.group(1)
         call["number"] = (row["dst"] or "").lstrip("+")
-        target_ext = EXT_CHANNEL.match(dstchannel or "")
-        call["ext"] = target_ext.group(1) if target_ext else None
+        call["ext"] = channel_ext(dstchannel)
     else:
         call["direction"] = "internal"
     if call.get("status") != "free":

@@ -231,6 +231,22 @@ def all_tenant_names(conn) -> List[TenantNames]:
     """Every tenant, the main one first."""
     return [TenantNames(r["id"], r["code"]) for r in conn.execute("SELECT id, code FROM tenants ORDER BY id")]
 
+
+# Phones' logins (endpoint names) and the extensions they are. Today a
+# login is the extension itself (201); when logins become tenant code +
+# extension (1001201), only these change. The dialplan never works it out:
+# each endpoint carries PBX_EXT and PBX_TENANT (set_var), which Asterisk
+# sets on its channels both ways, calling and called.
+def endpoint_ext(endpoint: str) -> Optional[str]:
+    return endpoint if re.fullmatch(r"2[0-9]{2}", endpoint or "") else None
+
+
+def channel_ext(channel: str) -> Optional[str]:
+    """The extension a channel (PJSIP/201-0000001a) is a call of, or None:
+    a trunk, a browser, a Local channel."""
+    m = re.fullmatch(r"PJSIP/([^-/]+)-[0-9a-f]+", channel or "")
+    return endpoint_ext(m.group(1)) if m else None
+
 VIDEO_CODECS = "h264,vp8"  # both apps offer these; H.264 first: iPhones encode it in hardware
 
 DEFAULT_SETTINGS = {
@@ -670,7 +686,9 @@ def build_extensions_conf(conn) -> str:
                 f"mailboxes={r['ext']}@{t.vm}",
                 f"subscribe_context={t.hints}",
                 f"named_call_group={t.pickup}",
-                f"named_pickup_group={t.pickup}"]
+                f"named_pickup_group={t.pickup}",
+                f"set_var=PBX_EXT={r['ext']}",
+                f"set_var=PBX_TENANT={t.code}"]
         if video:
             out.append(f"allow={VIDEO_CODECS}")  # added to the template's audio codecs
         if r["outbound_cid"]:
@@ -808,8 +826,7 @@ def _call_ext_context(t: TenantNames) -> List[str]:
 # Who's calling, for recordings: the extension that started the call, kept
 # on every channel the call creates (__ = inherited). Click to call sets it
 # from C2C (its dialling leg isn't an extension's channel).
-REC_EXT_LINES = [" same => n,Set(RC=${CHANNEL(name)})",
-                 ' same => n,ExecIf($["${RECEXT}" = "" & ${REGEX("^PJSIP/2[0-9][0-9]-" ${RC})}]?Set(__RECEXT=${RC:6:3}))']
+REC_EXT_LINES = [' same => n,ExecIf($["${RECEXT}" = "" & "${PBX_EXT}" != ""]?Set(__RECEXT=${PBX_EXT}))']
 REC_DIAL = "U(portal-rec)"  # Dial option: runs [portal-rec] on the answering channel
 
 
@@ -822,10 +839,8 @@ def _rec_context(notice: bool) -> List[str]:
     tz = PBX_TIMEZONE
     return ["; ---- Call recording: which answered calls are recorded ----",
             "[portal-rec]",
-            "exten => s,1,Set(RC=${CHANNEL(name)})",
-            " same => n,Set(RC=${CUT(RC,-,1)})",
-            " same => n,Set(CALLEE=${CUT(RC,/,2)})",
-            ' same => n,GotoIf($[${REGEX("^2[0-9][0-9]$" ${CALLEE})}]?toext)',
+            "exten => s,1,Set(CALLEE=${PBX_EXT})  ; empty unless an extension answered",
+            ' same => n,GotoIf($["${CALLEE}" != ""]?toext)',
             ' same => n,GotoIf($["${RECEXT}" = "" | "${REC_${RECEXT}}" = ""]?done)',
             " same => n,Set(RX=${RECEXT})",
             " same => n,Set(RO=${RECTO})",
@@ -847,8 +862,8 @@ def _rec_context(notice: bool) -> List[str]:
 
 def _features_context(t: TenantNames) -> List[str]:
     """Feature codes, dialled from an extension. ME is the extension that
-    dialled, from the channel name (PJSIP/201-0000000e), never the caller
-    ID, which a phone could set to anything."""
+    dialled, from its endpoint (PBX_EXT), never the caller ID, which a
+    phone could set to anything."""
     out = ["; ---- Feature codes (included into from-internal) ----",
            "; *78/*79 do not disturb on/off; *72<number>/*73 forward always;",
            "; *90<number>/*91 forward when busy; *52<number>/*53 forward when",
@@ -857,9 +872,7 @@ def _features_context(t: TenantNames) -> List[str]:
            f"[{t.features}]",
            # Phones only: browsers and menus never reach this context.
            f"include => {t.park_context}"]
-    me = [" same => n,Set(ME=${CHANNEL(name)})",
-          " same => n,Set(ME=${CUT(ME,-,1)})",
-          " same => n,Set(ME=${CUT(ME,/,2)})",
+    me = [" same => n,Set(ME=${PBX_EXT})",
           f' same => n,GotoIf($[${{REGEX("^2[0-9][0-9]$" ${{ME}})}}]?:bad)']
     end = [" same => n,Hangup()", " same => n(bad),Playback(invalid)", " same => n,Hangup()"]
     out += ["exten => *78,1,Answer()"] + me + [
@@ -1287,7 +1300,7 @@ def _mark_recording(channels: List[dict]) -> List[dict]:
     bridges = {c["bridge"] for c in channels if c["bridge"] and c["uniqueid"] in ids}
     for c in channels:
         c["recording"] = bool(c["uniqueid"]) and (c["uniqueid"] in ids or c["bridge"] in bridges)
-        c["recordable"] = bool(re.match(r"PJSIP/2[0-9][0-9]-", c["channel"])) and c["state"] == "Up"
+        c["recordable"] = channel_ext(c["channel"]) is not None and c["state"] == "Up"
     return channels
 
 
@@ -1301,7 +1314,7 @@ def get_status() -> dict:
         "asterisk_running": True,
         "version": version.strip().splitlines()[0] if version.strip() else "",
         "checked_at": _now(),
-        "extensions": {k: v for k, v in contacts.items() if k.isdigit()},
+        "extensions": {endpoint_ext(k): v for k, v in contacts.items() if endpoint_ext(k)},
         "trunks": {k: contacts.get(k, {"status": "Unknown", "rtt_ms": None, "address": None}) for k in TRUNKS},
         "channels": _mark_recording(parse_channels(asterisk_cli("core show channels concise") or "")),
         "last_apply": _last_apply,

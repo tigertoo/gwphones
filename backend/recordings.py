@@ -21,7 +21,7 @@ from fastapi.responses import Response
 from pydantic import BaseModel
 
 from ivr import read_ulaw, write_ulaw
-from pbx import (PBX_TIMEZONE, REC_DIR, REC_NAME_RE, REC_NOTICE, _lock, _set_setting, apply_config, asterisk_cli,
+from pbx import (PBX_TIMEZONE, REC_DIR, REC_NAME_RE, REC_NOTICE, _lock, _set_setting, apply_config, asterisk_cli, channel_ext,
                  changes_log, get_db, get_settings, get_status)
 
 router = APIRouter(prefix="/api/pbx")
@@ -190,7 +190,8 @@ def _channel_field(info: str, label: str) -> str:
 def api_start_recording(req: StartRecording):
     """Only an extension's channel in a call that's up, as listed right now
     (so the name passed to the CLI is one Asterisk gave us)."""
-    if not re.fullmatch(r"PJSIP/2[0-9]{2}-[0-9a-f]{8}", req.channel):
+    ext = channel_ext(req.channel)
+    if not ext or not re.fullmatch(r"PJSIP/[0-9]{3,7}-[0-9a-f]{8}", req.channel):
         raise HTTPException(400, "Only an extension's call can be recorded.")
     status = get_status()
     chan = next((c for c in status["channels"] if c["channel"] == req.channel), None)
@@ -204,7 +205,7 @@ def api_start_recording(req: StartRecording):
     if not re.fullmatch(r"[0-9.]{1,40}", uniqueid):
         raise HTTPException(409, "Couldn't read that call from Asterisk. Has it just ended?")
     started = datetime.now(timezone.utc).astimezone(ZoneInfo(PBX_TIMEZONE)).strftime("%Y%m%d-%H%M%S")
-    name = f"{started}_{req.channel[6:9]}_{other}_req_{uniqueid}.ulaw"
+    name = f"{started}_{ext}_{other}_req_{uniqueid}.ulaw"
     out = asterisk_cli(f"mixmonitor start {req.channel} {os.path.join(REC_DIR, name)},b")
     if out is None or "No such" in out or "rror" in out:
         raise HTTPException(500, f"Asterisk didn't start recording: {(out or 'not reachable').strip()[:200]}")
