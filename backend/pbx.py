@@ -45,7 +45,7 @@ import subprocess
 import threading
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 from xml.sax.saxutils import escape as xml_escape
 
 import httpx
@@ -1209,13 +1209,20 @@ def asterisk_cli(command: str, timeout: int = 8) -> Optional[str]:
     return out
 
 
-def apply_config(conn, reason: str) -> dict:
-    """Regenerate both include files and reload Asterisk."""
+def generate_config(conn) -> Dict[str, str]:
+    """Every file the dashboard generates for Asterisk, by path, in the
+    order they're written."""
+    return {EXT_CONF: build_extensions_conf(conn),
+            PORTAL_DIALPLAN: build_portal_dialplan(conn),
+            VOICEMAIL_CONF: build_voicemail_conf(conn)}
+
+
+def _deliver_local(files: Dict[str, str]) -> Tuple[bool, List[str]]:
+    """This server: write the files, then reload what reads them."""
     messages, ok = [], True
     try:
-        _write_conf(EXT_CONF, build_extensions_conf(conn))
-        _write_conf(PORTAL_DIALPLAN, build_portal_dialplan(conn))
-        _write_conf(VOICEMAIL_CONF, build_voicemail_conf(conn))
+        for path, content in files.items():
+            _write_conf(path, content)
     except OSError as e:
         ok = False
         messages.append(f"Saved, but couldn't write the Asterisk config files: {e}")
@@ -1230,6 +1237,25 @@ def apply_config(conn, reason: str) -> dict:
         out = asterisk_cli("voicemail reload")
         if out is None or "No such command" in out:
             messages.append("Voicemail didn't reload: is app_voicemail installed (apt install asterisk-voicemail)?")
+    return ok, messages
+
+
+# Where a tenant's config goes, by tenants.node: "" is this server, the
+# only one so far. Another Asterisk server (or the standby) is another
+# entry here that sends the same files over and reloads them there.
+NODES = {"": _deliver_local}
+
+
+def apply_to_node(node: str, files: Dict[str, str]) -> Tuple[bool, List[str]]:
+    deliver = NODES.get(node)
+    if deliver is None:
+        return False, [f"Saved, but there's no Asterisk server called {node!r} to apply it to."]
+    return deliver(files)
+
+
+def apply_config(conn, reason: str) -> dict:
+    """Regenerate the config and apply it to this server's Asterisk."""
+    ok, messages = apply_to_node("", generate_config(conn))
     _last_apply.update({"at": _now(), "ok": ok, "messages": messages})
     changes_log.info(f"{reason} -> {'applied' if ok else 'NOT applied: ' + '; '.join(messages)}")
     return {"ok": ok, "messages": messages}
