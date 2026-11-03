@@ -189,6 +189,10 @@ MAIN_TENANT, MAIN_TENANT_CODE = 1, "1001"
 TENANT_TABLES = ("extensions", "ring_groups", "inbound_routes", "provision_tokens", "call_links", "ivr_menus",
                  "business_hours")
 
+# Settings each tenant has its own of (tenant_settings); everything else in
+# settings (trunks, routes, video, the default inbound route) is the server's.
+TENANT_SETTINGS = ("outbound_cid", "max_outbound", "rec_days", "cap_default", *[f"cap_{t}" for t in NUMBER_TYPES])
+
 VIDEO_CODECS = "h264,vp8"  # both apps offer these; H.264 first: iPhones encode it in hardware
 
 DEFAULT_SETTINGS = {
@@ -353,7 +357,12 @@ def get_db() -> sqlite3.Connection:
                status TEXT NOT NULL DEFAULT 'active',
                sip_host TEXT NOT NULL DEFAULT '',
                node TEXT NOT NULL DEFAULT '',
-               created_at TEXT NOT NULL);"""
+               created_at TEXT NOT NULL);
+           CREATE TABLE IF NOT EXISTS tenant_settings (
+               tenant_id INTEGER NOT NULL,
+               key TEXT NOT NULL,
+               value TEXT NOT NULL,
+               PRIMARY KEY (tenant_id, key));"""
     )
     if fresh:
         os.chmod(PBX_DB_PATH, 0o600)  # holds SIP passwords
@@ -374,6 +383,7 @@ def get_db() -> sqlite3.Connection:
         conn.execute("INSERT INTO tenants (id, code, name, created_at) VALUES (?, ?, ?, ?)",
                      (MAIN_TENANT, MAIN_TENANT_CODE, "Main", _now()))
         conn.commit()
+    _move_tenant_settings(conn)
     if conn.execute("SELECT 1 FROM settings WHERE key = 'imported'").fetchone() is None:
         _import_existing(conn)
     missing = conn.execute("SELECT ext FROM extensions WHERE vm_pin IS NULL").fetchall()
@@ -388,15 +398,35 @@ def _new_pin() -> str:
     return "".join(secrets.choice("0123456789") for _ in range(6))
 
 
-def get_settings(conn) -> Dict[str, str]:
+def get_settings(conn, tenant: int = MAIN_TENANT) -> Dict[str, str]:
+    """The server's settings with the tenant's own (TENANT_SETTINGS) on top."""
     s = dict(DEFAULT_SETTINGS)
     s.update({r["key"]: r["value"] for r in conn.execute("SELECT key, value FROM settings")})
+    s.update({r["key"]: r["value"] for r in conn.execute("SELECT key, value FROM tenant_settings WHERE tenant_id = ?",
+                                                           (tenant,))})
     return s
 
 
-def _set_setting(conn, key: str, value: str):
-    conn.execute("INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
-                 (key, str(value)))
+def _set_setting(conn, key: str, value: str, tenant: int = MAIN_TENANT):
+    if key in TENANT_SETTINGS:
+        conn.execute("INSERT INTO tenant_settings (tenant_id, key, value) VALUES (?, ?, ?) "
+                     "ON CONFLICT(tenant_id, key) DO UPDATE SET value = excluded.value", (tenant, key, str(value)))
+    else:
+        conn.execute("INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                     (key, str(value)))
+
+
+def _move_tenant_settings(conn):
+    """One-off (multi-tenant step 2): the per-tenant settings so far were
+    the main tenant's; move them out of the server-wide table."""
+    if conn.execute("SELECT 1 FROM settings WHERE key = 'tenant_settings_moved'").fetchone():
+        return
+    marks = ", ".join("?" * len(TENANT_SETTINGS))
+    conn.execute(f"INSERT OR IGNORE INTO tenant_settings (tenant_id, key, value) "
+                 f"SELECT ?, key, value FROM settings WHERE key IN ({marks})", (MAIN_TENANT, *TENANT_SETTINGS))
+    conn.execute(f"DELETE FROM settings WHERE key IN ({marks})", TENANT_SETTINGS)
+    _set_setting(conn, "tenant_settings_moved", "1")
+    conn.commit()
 
 
 def _parse_conf_sections(path: str) -> List[dict]:

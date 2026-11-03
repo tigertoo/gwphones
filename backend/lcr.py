@@ -63,8 +63,17 @@ def _read(path: str) -> sqlite3.Connection:
 
 
 def _pbx_settings() -> dict:
+    """As pbx.get_settings for the main tenant: the server's settings,
+    then the tenant's own (price caps among them) on top."""
+    from pbx import MAIN_TENANT
     with _read(PBX_DB_PATH) as conn:
-        return {r["key"]: r["value"] for r in conn.execute("SELECT key, value FROM settings")}
+        s = {r["key"]: r["value"] for r in conn.execute("SELECT key, value FROM settings")}
+        try:
+            s.update({r["key"]: r["value"] for r in conn.execute(
+                "SELECT key, value FROM tenant_settings WHERE tenant_id = ?", (MAIN_TENANT,))})
+        except sqlite3.OperationalError:
+            pass  # not migrated yet: still all in settings
+        return s
 
 
 def decide(kind: str, number: str) -> dict:
