@@ -457,6 +457,7 @@ def get_db() -> sqlite3.Connection:
                      (MAIN_TENANT, MAIN_TENANT_CODE, "Main", _now()))
         conn.commit()
     _move_tenant_settings(conn)
+    _key_by_tenant(conn)
     if conn.execute("SELECT 1 FROM settings WHERE key = 'imported'").fetchone() is None:
         _import_existing(conn)
     missing = conn.execute("SELECT rowid FROM extensions WHERE vm_pin IS NULL").fetchall()
@@ -500,6 +501,61 @@ def _move_tenant_settings(conn):
     conn.execute(f"DELETE FROM settings WHERE key IN ({marks})", TENANT_SETTINGS)
     _set_setting(conn, "tenant_settings_moved", "1")
     conn.commit()
+
+
+# Keyed by tenant + number, so two tenants can each have a 201 (multi-tenant
+# phase 2). Columns in the order the older layout ended up with, so rows
+# read the same. Inbound numbers, call links and setup tokens keep their
+# own keys: each is unique across tenants anyway.
+TENANT_KEYED = {
+    "extensions": ("ext", """(ext TEXT NOT NULL, name TEXT NOT NULL, password TEXT NOT NULL,
+        enabled INTEGER NOT NULL DEFAULT 1, created_at TEXT NOT NULL, updated_at TEXT NOT NULL, vm_pin TEXT,
+        vm_email TEXT NOT NULL DEFAULT '', setup_email TEXT NOT NULL DEFAULT '', outbound_cid TEXT NOT NULL DEFAULT '',
+        record INTEGER NOT NULL DEFAULT 0, tenant_id INTEGER NOT NULL DEFAULT 1, PRIMARY KEY (tenant_id, ext))"""),
+    "ring_groups": ("number", """(number TEXT NOT NULL, name TEXT NOT NULL, strategy TEXT NOT NULL DEFAULT 'ringall',
+        ring_time INTEGER NOT NULL DEFAULT 25, members TEXT NOT NULL DEFAULT '', voicemail TEXT NOT NULL DEFAULT '',
+        tenant_id INTEGER NOT NULL DEFAULT 1, PRIMARY KEY (tenant_id, number))"""),
+    "ivr_menus": ("number", """(number TEXT NOT NULL, name TEXT NOT NULL, options TEXT NOT NULL DEFAULT '{}',
+        fallback TEXT NOT NULL DEFAULT '', timeout INTEGER NOT NULL DEFAULT 6, retries INTEGER NOT NULL DEFAULT 3,
+        direct_dial INTEGER NOT NULL DEFAULT 0, tenant_id INTEGER NOT NULL DEFAULT 1, PRIMARY KEY (tenant_id, number))"""),
+    "business_hours": ("number", """(number TEXT NOT NULL, name TEXT NOT NULL, week TEXT NOT NULL DEFAULT '{}',
+        holidays TEXT NOT NULL DEFAULT '[]', open_target TEXT NOT NULL, closed_target TEXT NOT NULL,
+        override TEXT NOT NULL DEFAULT '', tenant_id INTEGER NOT NULL DEFAULT 1, PRIMARY KEY (tenant_id, number))"""),
+}
+
+
+def _keyed_by_tenant(conn, table: str) -> bool:
+    pk = sorted((r["pk"], r["name"]) for r in conn.execute(f"PRAGMA table_info({table})") if r["pk"])
+    return [name for _, name in pk] == ["tenant_id", TENANT_KEYED[table][0]]
+
+
+def _key_by_tenant(conn):
+    """One-off: rebuild the tables still keyed by number alone, all in one
+    transaction (copy, check the counts, swap), or none of them. A plain
+    read decides first, so connections after that take no lock."""
+    if all(_keyed_by_tenant(conn, t) for t in TENANT_KEYED):
+        return
+    conn.execute("BEGIN IMMEDIATE")
+    try:
+        done = []
+        for table, (_, columns) in TENANT_KEYED.items():
+            if _keyed_by_tenant(conn, table):
+                continue  # another process got there while this one waited
+            names = ", ".join(r["name"] for r in conn.execute(f"PRAGMA table_info({table})"))
+            before = conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
+            conn.execute(f"CREATE TABLE {table}_by_tenant {columns}")
+            conn.execute(f"INSERT INTO {table}_by_tenant ({names}) SELECT {names} FROM {table}")
+            if conn.execute(f"SELECT COUNT(*) FROM {table}_by_tenant").fetchone()[0] != before:
+                raise RuntimeError(f"{table}: rows went missing while re-keying")
+            conn.execute(f"DROP TABLE {table}")
+            conn.execute(f"ALTER TABLE {table}_by_tenant RENAME TO {table}")
+            done.append(f"{table} ({before})")
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    if done:
+        changes_log.info(f"Keyed by tenant and number: {', '.join(done)}")
 
 
 def _parse_conf_sections(path: str) -> List[dict]:
