@@ -368,8 +368,11 @@ def get_db() -> sqlite3.Connection:
             conn.execute(f"ALTER TABLE {column}")
         except sqlite3.OperationalError:
             pass  # already there
-    if conn.execute("INSERT OR IGNORE INTO tenants (id, code, name, created_at) VALUES (?, ?, ?, ?)",
-                    (MAIN_TENANT, MAIN_TENANT_CODE, "Main", _now())).rowcount:
+    # Look before writing: an INSERT that changes nothing would still leave
+    # a write transaction (and the database's lock) open on this connection.
+    if conn.execute("SELECT 1 FROM tenants WHERE id = ?", (MAIN_TENANT,)).fetchone() is None:
+        conn.execute("INSERT INTO tenants (id, code, name, created_at) VALUES (?, ?, ?, ?)",
+                     (MAIN_TENANT, MAIN_TENANT_CODE, "Main", _now()))
         conn.commit()
     if conn.execute("SELECT 1 FROM settings WHERE key = 'imported'").fetchone() is None:
         _import_existing(conn)
