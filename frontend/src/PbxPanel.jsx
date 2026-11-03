@@ -305,6 +305,18 @@ function StatusSection({ config, status, send, busy }) {
           </tbody>
         </table>
       </section>
+
+      <section className="panel pbx-gap">
+        <div className="idea-form-row">
+          <button className="ticket-action-btn" disabled={busy}
+            onClick={() => send("POST", "/apply", null, "Rewritten from the dashboard's settings and reloaded.")}>
+            Re-apply to Asterisk</button>
+          <span className="pbx-hint">
+            Rewrites Asterisk's config from the dashboard and reloads it, changing nothing: for example after editing
+            pjsip.conf by hand.{status.last_apply?.at ? ` Last applied ${new Date(status.last_apply.at).toLocaleString()}.` : ""}
+          </span>
+        </div>
+      </section>
     </>
   );
 }
