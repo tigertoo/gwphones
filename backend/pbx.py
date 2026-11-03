@@ -193,6 +193,44 @@ TENANT_TABLES = ("extensions", "ring_groups", "inbound_routes", "provision_token
 # settings (trunks, routes, video, the default inbound route) is the server's.
 TENANT_SETTINGS = ("outbound_cid", "max_outbound", "rec_days", "cap_default", *[f"cap_{t}" for t in NUMBER_TYPES])
 
+
+class TenantNames:
+    """Every Asterisk name (contexts, voicemail context, pickup group, park
+    lot) and folder that belongs to one tenant, so tenants can't reach each
+    other's. The main tenant keeps the names it had before there were
+    tenants (portal-..., voicemail "portal", park lot "default"); any other
+    gets t<code>-... and folders of its own."""
+
+    def __init__(self, tenant_id: int, code: str):
+        self.id, self.code = tenant_id, code
+        main = tenant_id == MAIN_TENANT
+        self.prefix = "portal" if main else f"t{code}"
+        self.vm = VM_CONTEXT if main else self.prefix
+        self.pickup = PICKUP_GROUP if main else self.prefix
+        self.hints = HINTS_CONTEXT if main else f"{self.prefix}-hints"
+        self.call_ext = f"{self.prefix}-call-ext"
+        self.features = f"{self.prefix}-features"
+        self.ringgroups = f"{self.prefix}-ringgroups"
+        self.park_lot = PARK_LOT if main else f"{self.prefix}-park"
+        self.park_context = PARK_CONTEXT if main else f"{self.prefix}-parkedcalls"
+        self.ivr_dir = IVR_DIR if main else os.path.join(IVR_DIR, self.prefix)
+        self.rec_dir = REC_DIR if main else os.path.join(REC_DIR, self.prefix)
+        self.notice = os.path.join(self.ivr_dir, "recording-notice.ulaw")
+
+    def ivr(self, number: str) -> str:
+        return f"{self.prefix}-ivr-{number}"
+
+    def hours(self, number: str) -> str:
+        return f"{self.prefix}-hours-{number}"
+
+
+MAIN_NAMES = TenantNames(MAIN_TENANT, MAIN_TENANT_CODE)
+
+
+def all_tenant_names(conn) -> List[TenantNames]:
+    """Every tenant, the main one first."""
+    return [TenantNames(r["id"], r["code"]) for r in conn.execute("SELECT id, code FROM tenants ORDER BY id")]
+
 VIDEO_CODECS = "h264,vp8"  # both apps offer these; H.264 first: iPhones encode it in hardware
 
 DEFAULT_SETTINGS = {
@@ -506,46 +544,49 @@ def menu_options(row) -> Dict[str, str]:
         return {}
 
 
-def greeting_path(number: str) -> str:
-    return os.path.join(IVR_DIR, f"ivr-{number}.ulaw")
+def greeting_path(number: str, t: TenantNames = MAIN_NAMES) -> str:
+    return os.path.join(t.ivr_dir, f"ivr-{number}.ulaw")
 
 
 # ---- Destinations: what a number in the dashboard (an inbound route, a
 # call link, an IVR key, a schedule's open/closed) can be, in one place.
+# Always within one tenant: its 201 is never another tenant's 201.
 
-def destinations(conn) -> dict:
-    return {"exts": {r["ext"] for r in conn.execute("SELECT ext FROM extensions")},
-            "active": {r["ext"] for r in conn.execute("SELECT ext FROM extensions WHERE enabled = 1")},
-            "groups": {r["number"] for r in conn.execute("SELECT number FROM ring_groups")},
-            "menus": {r["number"] for r in conn.execute("SELECT number FROM ivr_menus")},
-            "hours": {r["number"] for r in conn.execute("SELECT number FROM business_hours")}}
+def destinations(conn, tenant: int = MAIN_TENANT) -> dict:
+    q = lambda sql: conn.execute(sql, (tenant,))
+    return {"exts": {r["ext"] for r in q("SELECT ext FROM extensions WHERE tenant_id = ?")},
+            "active": {r["ext"] for r in q("SELECT ext FROM extensions WHERE enabled = 1 AND tenant_id = ?")},
+            "groups": {r["number"] for r in q("SELECT number FROM ring_groups WHERE tenant_id = ?")},
+            "menus": {r["number"] for r in q("SELECT number FROM ivr_menus WHERE tenant_id = ?")},
+            "hours": {r["number"] for r in q("SELECT number FROM business_hours WHERE tenant_id = ?")}}
 
 
-def target_goto(target: str, d: dict) -> Optional[str]:
+def target_goto(target: str, d: dict, t: TenantNames = MAIN_NAMES) -> Optional[str]:
     """The dialplan step that sends a call to target, or None if it's gone
-    (deleted, or an extension switched off)."""
+    (deleted, or an extension switched off). d and t: the same tenant's."""
     if target == "hangup":
         return "Hangup()"
     if target.startswith("vm:"):
-        return f"VoiceMail({target[3:]}@{VM_CONTEXT},u)" if target[3:] in d["active"] else None
+        return f"VoiceMail({target[3:]}@{t.vm},u)" if target[3:] in d["active"] else None
     if target in d["active"]:
-        return f"Goto(portal-call-ext,{target},1)"
+        return f"Goto({t.call_ext},{target},1)"
     if target in d["groups"]:
-        return f"Goto(portal-ringgroups,{target},1)"
+        return f"Goto({t.ringgroups},{target},1)"
     if target in d["menus"]:
-        return f"Goto(portal-ivr-{target},s,1)"
+        return f"Goto({t.ivr(target)},s,1)"
     if target in d["hours"]:
-        return f"Goto(portal-hours-{target},s,1)"
+        return f"Goto({t.hours(target)},s,1)"
     return None
 
 
-def check_target(conn, target: str, *, extras: bool = False, schedules: bool = True, itself: str = "") -> str:
+def check_target(conn, target: str, *, extras: bool = False, schedules: bool = True, itself: str = "",
+                 tenant: int = MAIN_TENANT) -> str:
     """target, if it's somewhere a call can be sent, else a 400. extras: an
     extension's voicemail (vm:201) and hang up too. schedules=False for a
     schedule's own targets: one schedule handing to another has no hop
     count to stop a loop. itself: a menu may send callers back to itself."""
     target = (target or "").strip()
-    d = destinations(conn)
+    d = destinations(conn, tenant)
     ok = (target in d["exts"] or target in d["groups"] or target in d["menus"]
           or (schedules and target in d["hours"]) or (itself and target == itself)
           or (extras and (target == "hangup" or (target.startswith("vm:") and target[3:] in d["exts"]))))
@@ -555,20 +596,22 @@ def check_target(conn, target: str, *, extras: bool = False, schedules: bool = T
     return target
 
 
-def needs_keypad(conn, target: str) -> bool:
+def needs_keypad(conn, target: str, tenant: int = MAIN_TENANT) -> bool:
     """A call link reaching a menu, straight away or through business hours,
     shows a keypad."""
-    menus = {r["number"] for r in conn.execute("SELECT number FROM ivr_menus")}
-    h = conn.execute("SELECT open_target, closed_target FROM business_hours WHERE number = ?", (target,)).fetchone()
+    menus = {r["number"] for r in conn.execute("SELECT number FROM ivr_menus WHERE tenant_id = ?", (tenant,))}
+    h = conn.execute("SELECT open_target, closed_target FROM business_hours WHERE number = ? AND tenant_id = ?",
+                     (target, tenant)).fetchone()
     return target in menus or bool(h and (h["open_target"] in menus or h["closed_target"] in menus))
 
 
 def live_call_links(conn) -> List[sqlite3.Row]:
-    """Enabled links whose target still answers: an enabled extension, a
-    ring group, an IVR menu or business hours."""
-    d = destinations(conn)
-    return [r for r in conn.execute("SELECT * FROM call_links WHERE enabled = 1 ORDER BY id")
-            if not r["target"].startswith("vm:") and r["target"] != "hangup" and target_goto(r["target"], d)]
+    """Enabled links (every tenant's) whose target still answers: an enabled
+    extension, a ring group, an IVR menu or business hours of its tenant."""
+    links = conn.execute("SELECT * FROM call_links WHERE enabled = 1 ORDER BY id").fetchall()
+    d = {tid: destinations(conn, tid) for tid in {r["tenant_id"] for r in links}}
+    return [r for r in links
+            if not r["target"].startswith("vm:") and r["target"] != "hangup" and target_goto(r["target"], d[r["tenant_id"]])]
 
 
 def web_guest_password(conn) -> str:
@@ -617,15 +660,17 @@ def build_extensions_conf(conn) -> str:
     out = ["; Generated by the admin dashboard (Phone System tab).",
            "; Do not edit by hand: changes here are overwritten on the next save.", ""]
     video = get_settings(conn)["video"] == "1"
+    names = {t.id: t for t in all_tenant_names(conn)}
     for r in conn.execute("SELECT * FROM extensions WHERE enabled = 1 ORDER BY ext"):
+        t = names[r["tenant_id"]]
         out += [f"[{r['ext']}](endpoint-ext)",
                 f"auth={r['ext']}",
                 f"aors={r['ext']}",
                 f"callerid=\"{r['name']}\" <{r['ext']}>",
-                f"mailboxes={r['ext']}@{VM_CONTEXT}",
-                f"subscribe_context={HINTS_CONTEXT}",
-                f"named_call_group={PICKUP_GROUP}",
-                f"named_pickup_group={PICKUP_GROUP}"]
+                f"mailboxes={r['ext']}@{t.vm}",
+                f"subscribe_context={t.hints}",
+                f"named_call_group={t.pickup}",
+                f"named_pickup_group={t.pickup}"]
         if video:
             out.append(f"allow={VIDEO_CODECS}")  # added to the template's audio codecs
         if r["outbound_cid"]:
@@ -700,13 +745,14 @@ def _outbound_block(s: Dict[str, str], exten: str, trunks: List[str], refused: b
 def build_voicemail_conf(conn) -> str:
     out = ["; Generated by the admin dashboard (Phone System tab).",
            "; Do not edit by hand: changes here are overwritten on the next save.",
-           "; Included from voicemail.conf. mailbox => PIN,name[,email,,options]", "",
-           f"[{VM_CONTEXT}]"]
-    for r in conn.execute("SELECT * FROM extensions WHERE enabled = 1 ORDER BY ext"):
-        line = f"{r['ext']} => {r['vm_pin']},{r['name']}"
-        if r["vm_email"]:
-            line += f",{r['vm_email']},,attach=yes"
-        out.append(line)
+           "; Included from voicemail.conf. mailbox => PIN,name[,email,,options]"]
+    for t in all_tenant_names(conn):
+        out += ["", f"[{t.vm}]"]
+        for r in conn.execute("SELECT * FROM extensions WHERE enabled = 1 AND tenant_id = ? ORDER BY ext", (t.id,)):
+            line = f"{r['ext']} => {r['vm_pin']},{r['name']}"
+            if r["vm_email"]:
+                line += f",{r['vm_email']},,attach=yes"
+            out.append(line)
     return "\n".join(out) + "\n"
 
 
@@ -721,7 +767,7 @@ def _lcr_token(conn) -> str:
     return token
 
 
-def _call_ext_context() -> List[str]:
+def _call_ext_context(t: TenantNames) -> List[str]:
     """A call for an extension (from another extension, a ring of an inbound
     route, or a forward): forward always, else do not disturb counts as busy,
     else ring it; busy goes to the busy forward, anything else unanswered to
@@ -732,7 +778,7 @@ def _call_ext_context() -> List[str]:
     cf, cfb, cfu = (FORWARD_FAMILIES[k] for k in ("always", "busy", "no_answer"))
     return [
         "; ---- Calls for an extension: do not disturb, forwarding, voicemail ----",
-        "[portal-call-ext]",
+        f"[{t.call_ext}]",
         "exten => _2XX,1,Set(HOPS=$[0${HOPS} + 1])",
         f" same => n,GotoIf($[${{HOPS}} > {MAX_FORWARD_HOPS}]?vm-u)  ; forwarded round in a loop",
         f" same => n,Set(FWD=${{DB({cf}/${{EXTEN}})}})",
@@ -744,11 +790,11 @@ def _call_ext_context() -> List[str]:
         ' same => n,GotoIf($["${DIALSTATUS}" = "BUSY"]?busy)',
         f" same => n,Set(FWD=${{DB({cfu}/${{EXTEN}})}})",
         ' same => n,GotoIf($["${FWD}" != ""]?fwd)',
-        f" same => n(vm-u),VoiceMail(${{EXTEN}}@{VM_CONTEXT},u)",
+        f" same => n(vm-u),VoiceMail(${{EXTEN}}@{t.vm},u)",
         " same => n,Hangup()",
         f" same => n(busy),Set(FWD=${{DB({cfb}/${{EXTEN}})}})",
         ' same => n,GotoIf($["${FWD}" != ""]?fwd)',
-        f" same => n,VoiceMail(${{EXTEN}}@{VM_CONTEXT},b)",
+        f" same => n,VoiceMail(${{EXTEN}}@{t.vm},b)",
         " same => n,Hangup()",
         ' same => n(fwd),GotoIf($["${FWD}" = "${EXTEN}"]?vm-u)',
         f' same => n,GotoIf($[${{REGEX("{FORWARD_TARGET_DIALPLAN_RE}" ${{FWD}})}}]?:vm-u)  ; set by hand to somewhere not allowed',
@@ -799,7 +845,7 @@ def _rec_context(notice: bool) -> List[str]:
             " same => n(done),Return()"]
 
 
-def _features_context() -> List[str]:
+def _features_context(t: TenantNames) -> List[str]:
     """Feature codes, dialled from an extension. ME is the extension that
     dialled, from the channel name (PJSIP/201-0000000e), never the caller
     ID, which a phone could set to anything."""
@@ -808,9 +854,9 @@ def _features_context() -> List[str]:
            "; *90<number>/*91 forward when busy; *52<number>/*53 forward when",
            "; unanswered; *8 answer any ringing extension; **2XX answer that one;",
            f"; {PARK_EXT} park (transfer a call to it), {PARK_SLOTS[0]}-{PARK_SLOTS[-1]} pick a parked call up.",
-           "[portal-features]",
+           f"[{t.features}]",
            # Phones only: browsers and menus never reach this context.
-           f"include => {PARK_CONTEXT}"]
+           f"include => {t.park_context}"]
     me = [" same => n,Set(ME=${CHANNEL(name)})",
           " same => n,Set(ME=${CUT(ME,-,1)})",
           " same => n,Set(ME=${CUT(ME,/,2)})",
@@ -841,16 +887,18 @@ def _features_context() -> List[str]:
     return out
 
 
-def _weblinks_context(conn, active, notice: bool = False) -> List[str]:
+def _weblinks_context(conn, notices: Dict[int, bool]) -> List[str]:
     """One entry per live call link, wl-<token>; anything else a browser
     asks for doesn't exist here (404). Limits: calls at once per link and
     in all, and the link's maximum length. The visitor's name is filtered
-    and cut short before it's shown on the phone."""
+    and cut short before it's shown on the phone. Each link reaches only its
+    own tenant's targets, and plays that tenant's notice (notices)."""
     out = ["; ---- Call links: what browsers (endpoint webguest) can reach, nothing else ----",
            f"[{WEBLINKS_CONTEXT}]"]
-    d = destinations(conn)
+    names = {t.id: t for t in all_tenant_names(conn)}
     for r in live_call_links(conn):
-        target = target_goto(r["target"], d)
+        t = names[r["tenant_id"]]
+        target = target_goto(r["target"], destinations(conn, t.id), t)
         label = re.sub(r"[^A-Za-z0-9 .'_-]", "", r["label"])[:30]
         out += [f"exten => wl-{r['token']},1,NoOp(Call link {r['id']}: {label})",
                 f" same => n,Set(GROUP(weblink)=link{r['id']})",
@@ -861,29 +909,29 @@ def _weblinks_context(conn, active, notice: bool = False) -> List[str]:
                 " same => n,Set(WNAME=${FILTER(A-Za-z0-9 ._,${CALLERID(name)})})",
                 f" same => n,Set(CALLERID(name)=Web ${{WNAME:0:24}} ({label}))",
                 " same => n,Set(CALLERID(num)=web)",
-                *([f" same => n,Playback({REC_NOTICE[:-len('.ulaw')]})  ; calls may be recorded"] if notice else []),
+                *([f" same => n,Playback({t.notice[:-len('.ulaw')]})  ; calls may be recorded"] if notices[t.id] else []),
                 f" same => n,{target}",
                 " same => n(busy),Congestion(5)",
                 " same => n,Hangup()"]
     return out
 
 
-def _ivr_contexts(conn, active) -> List[str]:
+def _ivr_contexts(conn, t: TenantNames) -> List[str]:
     """One context per menu, [portal-ivr-5XX], entered at s: the greeting,
     then wait for a key. No includes, ever: browsers (call links) reach
     these too, so a menu must offer only what's listed in it. A wrong key or
     no key repeats the greeting, then the fallback (or goodbye). Optional
     direct dial: any switched-on extension, by its number (a key 2 then
     waits a few seconds for more digits first)."""
-    d = destinations(conn)
+    d = destinations(conn, t.id)
     out = []
-    for m in conn.execute("SELECT * FROM ivr_menus ORDER BY number"):
+    for m in conn.execute("SELECT * FROM ivr_menus WHERE tenant_id = ? ORDER BY number", (t.id,)):
         n = m["number"]
-        greeting = greeting_path(n)
-        fallback = target_goto(m["fallback"], d) if m["fallback"] else None
+        greeting = greeting_path(n, t)
+        fallback = target_goto(m["fallback"], d, t) if m["fallback"] else None
         give_up = [f" same => n,{fallback}"] if fallback else [" same => n,Playback(vm-goodbye)", " same => n,Hangup()"]
         label = re.sub(r"[^A-Za-z0-9 .'_-]", "", m["name"])
-        out += ["", f"[portal-ivr-{n}]",
+        out += ["", f"[{t.ivr(n)}]",
                 f"exten => s,1,NoOp(IVR menu {n}: {label})",
                 " same => n,Set(MENUHOPS=$[0${MENUHOPS} + 1])",
                 f" same => n,GotoIf($[${{MENUHOPS}} > {MAX_MENU_HOPS}]?bye)",
@@ -897,12 +945,12 @@ def _ivr_contexts(conn, active) -> List[str]:
                 f" same => n,WaitExten({int(m['timeout'])})",
                 " same => n(bye),Hangup()"]
         for key, target in sorted(menu_options(m).items()):
-            goto = target_goto(target, d)
+            goto = target_goto(target, d, t)
             if goto:
                 out += [f"exten => {key},1,{goto}"] + ([] if goto == "Hangup()" else [" same => n,Hangup()"])
         if m["direct_dial"]:
             # A key 2 still works: Asterisk waits TIMEOUT(digit) for more.
-            out += [f"exten => {e},1,Goto(portal-call-ext,{e},1)" for e in sorted(active)]
+            out += [f"exten => {e},1,Goto({t.call_ext},{e},1)" for e in sorted(d["active"])]
         retry = f" same => n,GotoIf($[${{TRIES}} < {int(m['retries'])}]?s,menu)"
         out += ["exten => t,1,NoOp(No key pressed)", retry, *give_up,
                 "exten => i,1,Playback(invalid)", retry, *give_up]
@@ -944,21 +992,21 @@ def hours_open_now(row, now: Optional[datetime] = None) -> bool:
     return any(_hhmm(a) <= t < _hhmm(b) for a, b in hours_week(row)[DAYS[now.weekday()]])
 
 
-def _hours_contexts(conn) -> List[str]:
+def _hours_contexts(conn, t: TenantNames) -> List[str]:
     """One context per schedule, [portal-hours-4XX], entered at s: open or
     closed by the time in PBX_TIMEZONE, as day + time (%u%H%M: Monday 9:30
     is 10930), compared as numbers, so the dashboard's open/closed badge
     uses exactly the same rule. No includes (browsers reach these too). A
     target that's gone hands over to the other one."""
-    d = destinations(conn)
+    d = destinations(conn, t.id)
     tz = PBX_TIMEZONE
     out = []
-    for h in conn.execute("SELECT * FROM business_hours ORDER BY number"):
+    for h in conn.execute("SELECT * FROM business_hours WHERE tenant_id = ? ORDER BY number", (t.id,)):
         n = h["number"]
         label = re.sub(r"[^A-Za-z0-9 .'_-]", "", h["name"])
-        open_goto, closed_goto = target_goto(h["open_target"], d), target_goto(h["closed_target"], d)
+        open_goto, closed_goto = target_goto(h["open_target"], d, t), target_goto(h["closed_target"], d, t)
         open_goto, closed_goto = open_goto or closed_goto or "Hangup()", closed_goto or open_goto or "Hangup()"
-        out += ["", f"[portal-hours-{n}]",
+        out += ["", f"[{t.hours(n)}]",
                 f"exten => s,1,NoOp(Business hours {n}: {label})"]
         if h["override"] in ("open", "closed"):
             out.append(f" same => n,Goto({h['override']})  ; set by hand in the dashboard")
@@ -1000,9 +1048,49 @@ def _click_to_call_contexts() -> List[str]:
             " same => n,Goto(from-internal,${EXTEN:3},1)"]
 
 
+def _ringgroups_context(conn, t: TenantNames) -> List[str]:
+    """The tenant's ring groups, and its IVR menus and schedules by number
+    (so phones and inbound routes dial them like a group)."""
+    active = destinations(conn, t.id)["active"]
+    out = ["",
+           "; ---- Ring groups (included into from-internal) ----",
+           f"[{t.ringgroups}]"]
+    for g in conn.execute("SELECT * FROM ring_groups WHERE tenant_id = ? ORDER BY number", (t.id,)):
+        members = [m for m in _members(g) if m in active]
+        n, ring = g["number"], g["ring_time"]
+        out.append(f"exten => {n},1,NoOp(Ring group {n}: {g['name']})")
+        out += REC_EXT_LINES
+        # Members on do not disturb are left out, at the time of the call.
+        if not members:
+            out.append(" same => n,NoOp(No active members)")
+        elif g["strategy"] == "hunt":
+            for i, m in enumerate(members):
+                out += [f' same => n,GotoIf($["${{DB({DND_FAMILY}/{m})}}" = "1"]?skip{i})',
+                        f" same => n,Dial(PJSIP/{m},{ring},{REC_DIAL})",
+                        ' same => n,ExecIf($["${DIALSTATUS}" = "ANSWER"]?Hangup())',
+                        f" same => n(skip{i}),NoOp()"]
+        else:
+            out.append(" same => n,Set(RG=)")
+            out += [f' same => n,ExecIf($["${{DB({DND_FAMILY}/{m})}}" != "1"]?Set(RG=${{RG}}&PJSIP/{m}))' for m in members]
+            out += [' same => n,GotoIf($["${RG}" = ""]?nobody)',
+                    f" same => n,Dial(${{RG:1}},{ring},{REC_DIAL})",
+                    ' same => n,ExecIf($["${DIALSTATUS}" = "ANSWER"]?Hangup())',
+                    " same => n(nobody),NoOp()"]
+        if g["voicemail"] in active:
+            out.append(f" same => n,VoiceMail({g['voicemail']}@{t.vm},u)")
+        out.append(" same => n,Hangup()")
+    # IVR menus are dialled like ring groups (phones, inbound routes): same
+    # included context, so the static extensions.conf needs no change.
+    out += [f"exten => {r['number']},1,Goto({t.ivr(r['number'])},s,1)"
+            for r in conn.execute("SELECT number FROM ivr_menus WHERE tenant_id = ? ORDER BY number", (t.id,))]
+    out += [f"exten => {r['number']},1,Goto({t.hours(r['number'])},s,1)"
+            for r in conn.execute("SELECT number FROM business_hours WHERE tenant_id = ? ORDER BY number", (t.id,))]
+    return out
+
+
 def build_portal_dialplan(conn) -> str:
     s = get_settings(conn)
-    active = {r["ext"] for r in conn.execute("SELECT ext FROM extensions WHERE enabled = 1")}
+    tenants = all_tenant_names(conn)
 
     out = ["; Generated by the admin dashboard (Phone System tab).",
            "; Do not edit by hand: changes here are overwritten on the next save.",
@@ -1017,53 +1105,29 @@ def build_portal_dialplan(conn) -> str:
             for r in conn.execute("SELECT ext, outbound_cid FROM extensions WHERE enabled = 1 AND outbound_cid != '' ORDER BY ext")]
     # Extensions whose calls are all recorded (see [portal-rec]).
     out += [f"REC_{r['ext']}=1" for r in conn.execute("SELECT ext FROM extensions WHERE enabled = 1 AND record = 1 ORDER BY ext")]
-    out += ["",
-            "; ---- Busy lamps (BLF) and presence: one hint per extension ----",
-            f"[{HINTS_CONTEXT}]"]
-    out += [f"exten => {e},hint,PJSIP/{e}" for e in sorted(active)]
-    out += [f"exten => {n},hint,park:{n}@{PARK_LOT}" for n in PARK_SLOTS]  # lit while a call is parked there
-    out += [""] + _call_ext_context() + [""] + _features_context() + [""] + _click_to_call_contexts()
-    notice = os.path.exists(REC_NOTICE) and bool(conn.execute(
-        "SELECT 1 FROM extensions WHERE enabled = 1 AND record = 1").fetchone())
-    out += [""] + _weblinks_context(conn, active, notice)
-    out += [""] + _rec_context(notice)
-    out += ["",
-            "; ---- Ring groups (included into from-internal) ----",
-            "[portal-ringgroups]"]
+    # Per tenant from here on: each section once for every tenant, with its
+    # own names (TenantNames), reaching only its own extensions.
+    for t in tenants:
+        out += ["",
+                "; ---- Busy lamps (BLF) and presence: one hint per extension ----",
+                f"[{t.hints}]"]
+        out += [f"exten => {e},hint,PJSIP/{e}" for e in sorted(destinations(conn, t.id)["active"])]
+        out += [f"exten => {n},hint,park:{n}@{t.park_lot}" for n in PARK_SLOTS]  # lit while a call is parked there
+    for t in tenants:
+        out += [""] + _call_ext_context(t)
+    for t in tenants:
+        out += [""] + _features_context(t)
+    out += [""] + _click_to_call_contexts()
+    # The recording notice: played while any of the tenant's extensions records everything.
+    notices = {t.id: os.path.exists(t.notice) and bool(conn.execute(
+        "SELECT 1 FROM extensions WHERE enabled = 1 AND record = 1 AND tenant_id = ?", (t.id,)).fetchone())
+        for t in tenants}
+    out += [""] + _weblinks_context(conn, notices)
+    out += [""] + _rec_context(notices[MAIN_TENANT])
+    for t in tenants:
+        out += _ringgroups_context(conn, t) + _ivr_contexts(conn, t) + _hours_contexts(conn, t)
 
-    for g in conn.execute("SELECT * FROM ring_groups ORDER BY number"):
-        members = [m for m in _members(g) if m in active]
-        n, t = g["number"], g["ring_time"]
-        out.append(f"exten => {n},1,NoOp(Ring group {n}: {g['name']})")
-        out += REC_EXT_LINES
-        # Members on do not disturb are left out, at the time of the call.
-        if not members:
-            out.append(" same => n,NoOp(No active members)")
-        elif g["strategy"] == "hunt":
-            for i, m in enumerate(members):
-                out += [f' same => n,GotoIf($["${{DB({DND_FAMILY}/{m})}}" = "1"]?skip{i})',
-                        f" same => n,Dial(PJSIP/{m},{t},{REC_DIAL})",
-                        ' same => n,ExecIf($["${DIALSTATUS}" = "ANSWER"]?Hangup())',
-                        f" same => n(skip{i}),NoOp()"]
-        else:
-            out.append(" same => n,Set(RG=)")
-            out += [f' same => n,ExecIf($["${{DB({DND_FAMILY}/{m})}}" != "1"]?Set(RG=${{RG}}&PJSIP/{m}))' for m in members]
-            out += [' same => n,GotoIf($["${RG}" = ""]?nobody)',
-                    f" same => n,Dial(${{RG:1}},{t},{REC_DIAL})",
-                    ' same => n,ExecIf($["${DIALSTATUS}" = "ANSWER"]?Hangup())',
-                    " same => n(nobody),NoOp()"]
-        if g["voicemail"] in active:
-            out.append(f" same => n,VoiceMail({g['voicemail']}@{VM_CONTEXT},u)")
-        out.append(" same => n,Hangup()")
-    # IVR menus are dialled like ring groups (phones, inbound routes): same
-    # included context, so the static extensions.conf needs no change.
-    out += [f"exten => {r['number']},1,Goto(portal-ivr-{r['number']},s,1)"
-            for r in conn.execute("SELECT number FROM ivr_menus ORDER BY number")]
-    out += [f"exten => {r['number']},1,Goto(portal-hours-{r['number']},s,1)"
-            for r in conn.execute("SELECT number FROM business_hours ORDER BY number")]
-    out += _ivr_contexts(conn, active) + _hours_contexts(conn)
-
-    enabled = [t for t in s["trunk_order"].split(",") if t in TRUNKS and s.get(f"trunk_{t}_enabled") == "1"]
+    enabled =[t for t in s["trunk_order"].split(",") if t in TRUNKS and s.get(f"trunk_{t}_enabled") == "1"]
     out += ["", "; ---- Outbound: one extension per kind of number ----",
             "; ARG1 = national number, ARG2 = international (353..., 44...)",
             "; s = the trunk order (kept for dialplans that don't say the kind)",
@@ -1076,14 +1140,20 @@ def build_portal_dialplan(conn) -> str:
     out += ["",
             "; ---- Inbound: DID-specific routes, then the default ----",
             "[portal-inbound]"]
-    # Outside callers hear the recording notice first, while any
-    # extension records everything.
-    told = [f" same => n,Playback({REC_NOTICE[:-len('.ulaw')]})"] if notice else []
+    # Outside callers hear the recording notice first, while any of the
+    # number's tenant's extensions records everything. The main tenant's
+    # numbers go through from-internal as before; any other tenant's
+    # straight to its own target (from-internal is the main tenant's).
+    told = {t.id: [f" same => n,Playback({t.notice[:-len('.ulaw')]})"] if notices[t.id] else [] for t in tenants}
+    names = {t.id: t for t in tenants}
     for r in conn.execute("SELECT * FROM inbound_routes ORDER BY did"):
-        out += [f"exten => {r['did']},1,NoOp(Inbound {r['did']})", *told, f" same => n,Goto(from-internal,{r['target']},1)"]
-    default = s["inbound_default"]
+        tid = r["tenant_id"]
+        goto = (f"Goto(from-internal,{r['target']},1)" if tid == MAIN_TENANT
+                else target_goto(r["target"], destinations(conn, tid), names[tid]) or "Hangup()")
+        out += [f"exten => {r['did']},1,NoOp(Inbound {r['did']})", *told[tid], f" same => n,{goto}"]
+    default = s["inbound_default"]  # numbers not listed are the main tenant's
     for x in ("_X.", "s"):
-        out += [f"exten => {x},1,NoOp(Inbound)", *told, f" same => n,Goto(from-internal,{default},1)"]
+        out += [f"exten => {x},1,NoOp(Inbound)", *told[MAIN_TENANT], f" same => n,Goto(from-internal,{default},1)"]
     out.append("")
     return "\n".join(out)
 
