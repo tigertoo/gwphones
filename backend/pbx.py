@@ -30,6 +30,7 @@ import re
 import html
 import json
 import base64
+import contextvars
 import email
 import email.policy
 import email.utils
@@ -225,6 +226,24 @@ class TenantNames:
 
 
 MAIN_NAMES = TenantNames(MAIN_TENANT, MAIN_TENANT_CODE)
+
+# The tenant the dashboard is working on, per request: always the main one
+# until the tenant switcher (phase 2) sets it. Every save and lookup in the
+# dashboard goes through it; the config generators take tenants explicitly.
+_current_tenant = contextvars.ContextVar("pbx_tenant", default=MAIN_TENANT)
+
+
+def current_tenant() -> int:
+    return _current_tenant.get()
+
+
+def tenant_names(conn, tenant: int) -> TenantNames:
+    if tenant == MAIN_TENANT:
+        return MAIN_NAMES
+    r = conn.execute("SELECT code FROM tenants WHERE id = ?", (tenant,)).fetchone()
+    if not r:
+        raise HTTPException(404, "Tenant not found.")
+    return TenantNames(tenant, r["code"])
 
 
 def all_tenant_names(conn) -> List[TenantNames]:
@@ -440,9 +459,9 @@ def get_db() -> sqlite3.Connection:
     _move_tenant_settings(conn)
     if conn.execute("SELECT 1 FROM settings WHERE key = 'imported'").fetchone() is None:
         _import_existing(conn)
-    missing = conn.execute("SELECT ext FROM extensions WHERE vm_pin IS NULL").fetchall()
-    for r in missing:
-        conn.execute("UPDATE extensions SET vm_pin = ? WHERE ext = ?", (_new_pin(), r["ext"]))
+    missing = conn.execute("SELECT rowid FROM extensions WHERE vm_pin IS NULL").fetchall()
+    for r in missing:  # by row: the same number can be several tenants' extension
+        conn.execute("UPDATE extensions SET vm_pin = ? WHERE rowid = ?", (_new_pin(), r["rowid"]))
     if missing:
         conn.commit()
     return conn
@@ -568,7 +587,8 @@ def greeting_path(number: str, t: TenantNames = MAIN_NAMES) -> str:
 # call link, an IVR key, a schedule's open/closed) can be, in one place.
 # Always within one tenant: its 201 is never another tenant's 201.
 
-def destinations(conn, tenant: int = MAIN_TENANT) -> dict:
+def destinations(conn, tenant: Optional[int] = None) -> dict:
+    tenant = current_tenant() if tenant is None else tenant
     q = lambda sql: conn.execute(sql, (tenant,))
     return {"exts": {r["ext"] for r in q("SELECT ext FROM extensions WHERE tenant_id = ?")},
             "active": {r["ext"] for r in q("SELECT ext FROM extensions WHERE enabled = 1 AND tenant_id = ?")},
@@ -596,7 +616,7 @@ def target_goto(target: str, d: dict, t: TenantNames = MAIN_NAMES) -> Optional[s
 
 
 def check_target(conn, target: str, *, extras: bool = False, schedules: bool = True, itself: str = "",
-                 tenant: int = MAIN_TENANT) -> str:
+                 tenant: Optional[int] = None) -> str:
     """target, if it's somewhere a call can be sent, else a 400. extras: an
     extension's voicemail (vm:201) and hang up too. schedules=False for a
     schedule's own targets: one schedule handing to another has no hop
@@ -612,9 +632,10 @@ def check_target(conn, target: str, *, extras: bool = False, schedules: bool = T
     return target
 
 
-def needs_keypad(conn, target: str, tenant: int = MAIN_TENANT) -> bool:
+def needs_keypad(conn, target: str, tenant: Optional[int] = None) -> bool:
     """A call link reaching a menu, straight away or through business hours,
     shows a keypad."""
+    tenant = current_tenant() if tenant is None else tenant
     menus = {r["number"] for r in conn.execute("SELECT number FROM ivr_menus WHERE tenant_id = ?", (tenant,))}
     h = conn.execute("SELECT open_target, closed_target FROM business_hours WHERE number = ? AND tenant_id = ?",
                      (target, tenant)).fetchone()
@@ -1387,21 +1408,23 @@ def _valid_target(conn, target: str) -> str:
 
 
 def _used_as_target(conn, number: str) -> Optional[str]:
-    if get_settings(conn)["inbound_default"] == number:
+    """What of the current tenant's still sends calls to number, if anything."""
+    tid = current_tenant()
+    if tid == MAIN_TENANT and get_settings(conn)["inbound_default"] == number:  # unlisted numbers: the main tenant's
         return "the default destination for inbound calls"
-    r = conn.execute("SELECT did FROM inbound_routes WHERE target = ?", (number,)).fetchone()
+    r = conn.execute("SELECT did FROM inbound_routes WHERE target = ? AND tenant_id = ?", (number, tid)).fetchone()
     if r:
         return f"the destination for inbound number {r['did']}"
-    r = conn.execute("SELECT label FROM call_links WHERE target = ?", (number,)).fetchone()
+    r = conn.execute("SELECT label FROM call_links WHERE target = ? AND tenant_id = ?", (number, tid)).fetchone()
     if r:
         return f"the destination of call link \"{r['label']}\""
-    for m in conn.execute("SELECT * FROM ivr_menus ORDER BY number"):
+    for m in conn.execute("SELECT * FROM ivr_menus WHERE tenant_id = ? ORDER BY number", (tid,)):
         if m["number"] == number:
             continue  # a menu pointing at itself ("9 to hear this again") doesn't hold it
         uses = {m["fallback"], *menu_options(m).values()}
         if number in uses or f"vm:{number}" in uses:
             return f"used in IVR menu {m['number']} ({m['name']})"
-    for h in conn.execute("SELECT * FROM business_hours ORDER BY number"):
+    for h in conn.execute("SELECT * FROM business_hours WHERE tenant_id = ? ORDER BY number", (tid,)):
         if number in (h["open_target"], h["closed_target"]) or f"vm:{number}" in (h["open_target"], h["closed_target"]):
             return f"used in business hours {h['number']} ({h['name']})"
     return None
@@ -1418,27 +1441,31 @@ def api_status():
 
 @router.get("/config")
 def api_config():
+    tid = current_tenant()
     with get_db() as conn:
-        s = get_settings(conn)
+        s = get_settings(conn, tid)
+        t = tenant_names(conn, tid)
         return {
             "extensions": [{"ext": r["ext"], "name": r["name"], "enabled": bool(r["enabled"]),
                             "voicemail_email": r["vm_email"], "setup_email": r["setup_email"],
                             "outbound_cid": r["outbound_cid"], "record": bool(r["record"]),
                             "created_at": r["created_at"], "updated_at": r["updated_at"]}
-                           for r in conn.execute("SELECT * FROM extensions ORDER BY ext")],
+                           for r in conn.execute("SELECT * FROM extensions WHERE tenant_id = ? ORDER BY ext", (tid,))],
             "ring_groups": [{"number": r["number"], "name": r["name"], "strategy": r["strategy"],
                              "ring_time": r["ring_time"], "members": _members(r), "voicemail": r["voicemail"]}
-                            for r in conn.execute("SELECT * FROM ring_groups ORDER BY number")],
-            "inbound_routes": [dict(r) for r in conn.execute("SELECT * FROM inbound_routes ORDER BY did")],
+                            for r in conn.execute("SELECT * FROM ring_groups WHERE tenant_id = ? ORDER BY number", (tid,))],
+            "inbound_routes": [dict(r) for r in conn.execute("SELECT * FROM inbound_routes WHERE tenant_id = ? ORDER BY did",
+                                                             (tid,))],
             "ivr_menus": [{"number": r["number"], "name": r["name"], "options": menu_options(r),
                            "fallback": r["fallback"], "timeout": r["timeout"], "retries": r["retries"],
-                           "direct_dial": bool(r["direct_dial"]), "greeting": os.path.exists(greeting_path(r["number"]))}
-                          for r in conn.execute("SELECT * FROM ivr_menus ORDER BY number")],
+                           "direct_dial": bool(r["direct_dial"]), "greeting": os.path.exists(greeting_path(r["number"], t))}
+                          for r in conn.execute("SELECT * FROM ivr_menus WHERE tenant_id = ? ORDER BY number", (tid,))],
             "business_hours": [{"number": r["number"], "name": r["name"], "week": hours_week(r),
                                 "holidays": hours_holidays(r), "open_target": r["open_target"],
                                 "closed_target": r["closed_target"], "override": r["override"],
                                 "open_now": hours_open_now(r)}
-                               for r in conn.execute("SELECT * FROM business_hours ORDER BY number")],
+                               for r in conn.execute("SELECT * FROM business_hours WHERE tenant_id = ? ORDER BY number",
+                                                     (tid,))],
             "timezone": PBX_TIMEZONE,
             "settings": {
                 "outbound_cid": s["outbound_cid"],
@@ -1475,8 +1502,9 @@ class ExtensionUpdate(BaseModel):
 @router.post("/extensions")
 def api_create_extension(req: ExtensionCreate):
     name = _clean_name(req.name)
+    tid = current_tenant()
     with _lock, get_db() as conn:
-        taken = {r["ext"] for r in conn.execute("SELECT ext FROM extensions")}
+        taken = {r["ext"] for r in conn.execute("SELECT ext FROM extensions WHERE tenant_id = ?", (tid,))}
         if req.ext:
             ext = _in_range(req.ext, EXT_MIN, EXT_MAX, "Extension")
             if ext in taken:
@@ -1487,8 +1515,8 @@ def api_create_extension(req: ExtensionCreate):
                 raise HTTPException(409, "No free extension numbers left.")
             ext = free[0]
         now = _now()
-        conn.execute("INSERT INTO extensions (ext, name, password, vm_pin, enabled, created_at, updated_at) "
-                     "VALUES (?, ?, ?, ?, 1, ?, ?)", (ext, name, secrets.token_urlsafe(24), _new_pin(), now, now))
+        conn.execute("INSERT INTO extensions (ext, name, password, vm_pin, enabled, created_at, updated_at, tenant_id) "
+                     "VALUES (?, ?, ?, ?, 1, ?, ?, ?)", (ext, name, secrets.token_urlsafe(24), _new_pin(), now, now, tid))
         conn.commit()
         result = apply_config(conn, f"Created extension {ext} ({name})")
     return {"ext": ext, **result}
@@ -1498,8 +1526,8 @@ def api_create_extension(req: ExtensionCreate):
 def api_update_extension(ext: str, req: ExtensionUpdate):
     name = _clean_name(req.name)
     with _lock, get_db() as conn:
-        if conn.execute("UPDATE extensions SET name = ?, enabled = ?, updated_at = ? WHERE ext = ?",
-                        (name, int(req.enabled), _now(), ext)).rowcount == 0:
+        if conn.execute("UPDATE extensions SET name = ?, enabled = ?, updated_at = ? WHERE ext = ? AND tenant_id = ?",
+                        (name, int(req.enabled), _now(), ext, current_tenant())).rowcount == 0:
             raise HTTPException(404, "Extension not found.")
         if not req.enabled:
             _revoke_setup_links(conn, ext)
@@ -1510,8 +1538,8 @@ def api_update_extension(ext: str, req: ExtensionUpdate):
 @router.post("/extensions/{ext}/reset-password")
 def api_reset_password(ext: str):
     with _lock, get_db() as conn:
-        if conn.execute("UPDATE extensions SET password = ?, updated_at = ? WHERE ext = ?",
-                        (secrets.token_urlsafe(24), _now(), ext)).rowcount == 0:
+        if conn.execute("UPDATE extensions SET password = ?, updated_at = ? WHERE ext = ? AND tenant_id = ?",
+                        (secrets.token_urlsafe(24), _now(), ext, current_tenant())).rowcount == 0:
             raise HTTPException(404, "Extension not found.")
         _revoke_setup_links(conn, ext)
         conn.commit()
@@ -1529,8 +1557,8 @@ def api_voicemail_email(ext: str, req: VoicemailEmailRequest):
     if address and (not EMAIL_RE.match(address) or re.search(r"[,;|=]", address)):
         raise HTTPException(400, "That doesn't look like an email address.")
     with _lock, get_db() as conn:
-        if conn.execute("UPDATE extensions SET vm_email = ?, updated_at = ? WHERE ext = ?",
-                        (address, _now(), ext)).rowcount == 0:
+        if conn.execute("UPDATE extensions SET vm_email = ?, updated_at = ? WHERE ext = ? AND tenant_id = ?",
+                        (address, _now(), ext, current_tenant())).rowcount == 0:
             raise HTTPException(404, "Extension not found.")
         conn.commit()
         return apply_config(conn, f"Voicemail for extension {ext} emailed to {address or 'nobody'}")
@@ -1546,8 +1574,8 @@ def api_extension_outbound_cid(ext: str, req: OutboundCidRequest):
     if cid and not CID_RE.match(cid):
         raise HTTPException(400, "Caller ID must be a phone number, e.g. +35312345678.")
     with _lock, get_db() as conn:
-        if conn.execute("UPDATE extensions SET outbound_cid = ?, updated_at = ? WHERE ext = ?",
-                        (cid, _now(), ext)).rowcount == 0:
+        if conn.execute("UPDATE extensions SET outbound_cid = ?, updated_at = ? WHERE ext = ? AND tenant_id = ?",
+                        (cid, _now(), ext, current_tenant())).rowcount == 0:
             raise HTTPException(404, "Extension not found.")
         conn.commit()
         return apply_config(conn, f"Outbound caller ID for extension {ext}: {cid or 'the default'}")
@@ -1595,7 +1623,7 @@ def forward_target(conn, ext: str, value: str) -> str:
     if re.fullmatch(r"2\d\d", v):
         if v == ext:
             raise HTTPException(400, "An extension can't forward to itself.")
-        if not conn.execute("SELECT 1 FROM extensions WHERE ext = ?", (v,)).fetchone():
+        if not conn.execute("SELECT 1 FROM extensions WHERE ext = ? AND tenant_id = ?", (v, current_tenant())).fetchone():
             raise HTTPException(400, f"There's no extension {v}.")
         return v
     kind, national, _ = classify_dialled(v)
@@ -1621,7 +1649,7 @@ class ForwardingRequest(BaseModel):
 @router.put("/extensions/{ext}/forwarding")
 def api_set_forwarding(ext: str, req: ForwardingRequest):
     with get_db() as conn:
-        if not conn.execute("SELECT 1 FROM extensions WHERE ext = ?", (ext,)).fetchone():
+        if not conn.execute("SELECT 1 FROM extensions WHERE ext = ? AND tenant_id = ?", (ext, current_tenant())).fetchone():
             raise HTTPException(404, "Extension not found.")
         targets = {k: forward_target(conn, ext, getattr(req, k)) for k in FORWARD_FAMILIES}
     with _lock:
@@ -1656,7 +1684,8 @@ def click_to_call_target(conn, ext: str, number: str) -> str:
     if re.fullmatch(r"2\d\d", v):
         if v == ext:
             raise HTTPException(400, "That's the extension you're calling from.")
-        if not conn.execute("SELECT 1 FROM extensions WHERE ext = ? AND enabled = 1", (v,)).fetchone():
+        if not conn.execute("SELECT 1 FROM extensions WHERE ext = ? AND enabled = 1 AND tenant_id = ?",
+                            (v, current_tenant())).fetchone():
             raise HTTPException(400, f"There's no extension {v}.")
         return v
     kind, national, _ = classify_dialled(v)
@@ -1670,7 +1699,7 @@ def click_to_call_target(conn, ext: str, number: str) -> str:
 @router.post("/click-to-call")
 def api_click_to_call(req: ClickToCallRequest):
     with get_db() as conn:
-        e = conn.execute("SELECT * FROM extensions WHERE ext = ?", (req.ext,)).fetchone()
+        e = conn.execute("SELECT * FROM extensions WHERE ext = ? AND tenant_id = ?", (req.ext, current_tenant())).fetchone()
         if not e or not e["enabled"]:
             raise HTTPException(400, "Choose an extension that's switched on.")
         target = click_to_call_target(conn, e["ext"], req.number)
@@ -1688,8 +1717,8 @@ def api_click_to_call(req: ClickToCallRequest):
 @router.post("/extensions/{ext}/reset-voicemail-pin")
 def api_reset_voicemail_pin(ext: str):
     with _lock, get_db() as conn:
-        if conn.execute("UPDATE extensions SET vm_pin = ?, updated_at = ? WHERE ext = ?",
-                        (_new_pin(), _now(), ext)).rowcount == 0:
+        if conn.execute("UPDATE extensions SET vm_pin = ?, updated_at = ? WHERE ext = ? AND tenant_id = ?",
+                        (_new_pin(), _now(), ext, current_tenant())).rowcount == 0:
             raise HTTPException(404, "Extension not found.")
         conn.commit()
         return apply_config(conn, f"New voicemail PIN for extension {ext}")
@@ -1698,7 +1727,8 @@ def api_reset_voicemail_pin(ext: str):
 @router.get("/extensions/{ext}/credentials")
 def api_credentials(ext: str):
     with get_db() as conn:
-        r = conn.execute("SELECT ext, password, vm_pin FROM extensions WHERE ext = ?", (ext,)).fetchone()
+        r = conn.execute("SELECT ext, password, vm_pin FROM extensions WHERE ext = ? AND tenant_id = ?",
+                         (ext, current_tenant())).fetchone()
     if not r:
         raise HTTPException(404, "Extension not found.")
     changes_log.info(f"Viewed credentials for extension {ext}")
@@ -1728,7 +1758,7 @@ def _token_hash(token: str) -> str:
 
 
 def _revoke_setup_links(conn, ext: str):
-    conn.execute("DELETE FROM provision_tokens WHERE ext = ?", (ext,))
+    conn.execute("DELETE FROM provision_tokens WHERE ext = ? AND tenant_id = ?", (ext, current_tenant()))
 
 
 def _client_ip(request: Request) -> str:
@@ -1748,13 +1778,14 @@ def _make_token(ext: str, ttl: timedelta):
     """A new one-time setup token for an enabled extension: (token, row, expires)."""
     token = secrets.token_urlsafe(32)
     now = datetime.now(timezone.utc)
+    tid = current_tenant()
     with _lock, get_db() as conn:
-        e = conn.execute("SELECT * FROM extensions WHERE ext = ? AND enabled = 1", (ext,)).fetchone()
+        e = conn.execute("SELECT * FROM extensions WHERE ext = ? AND enabled = 1 AND tenant_id = ?", (ext, tid)).fetchone()
         if not e:
             raise HTTPException(404, "Extension not found, or turned off.")
         conn.execute("DELETE FROM provision_tokens WHERE expires_at < ?", (now.isoformat(),))
-        conn.execute("INSERT INTO provision_tokens (token_hash, ext, expires_at) VALUES (?, ?, ?)",
-                     (_token_hash(token), ext, (now + ttl).isoformat()))
+        conn.execute("INSERT INTO provision_tokens (token_hash, ext, expires_at, tenant_id) VALUES (?, ?, ?, ?)",
+                     (_token_hash(token), ext, (now + ttl).isoformat(), tid))
         conn.commit()
     return token, e, now + ttl
 
@@ -1854,7 +1885,9 @@ def _redeem(token: str, request: Request, app: str):
     can't be used any more."""
     with _lock, get_db() as conn:
         r = _live_token(conn, token)
-        e = r and conn.execute("SELECT * FROM extensions WHERE ext = ? AND enabled = 1", (r["ext"],)).fetchone()
+        # The token's own tenant: a phone fetching its setup has no dashboard tenant.
+        e = r and conn.execute("SELECT * FROM extensions WHERE ext = ? AND enabled = 1 AND tenant_id = ?",
+                               (r["ext"], r["tenant_id"])).fetchone()
         if not e:
             return None
         if not r["used_at"]:
@@ -1909,18 +1942,19 @@ def prov_account(token: str, request: Request):
 
 @router.delete("/extensions/{ext}")
 def api_delete_extension(ext: str):
+    tid = current_tenant()
     with _lock, get_db() as conn:
-        if not conn.execute("SELECT 1 FROM extensions WHERE ext = ?", (ext,)).fetchone():
+        if not conn.execute("SELECT 1 FROM extensions WHERE ext = ? AND tenant_id = ?", (ext, tid)).fetchone():
             raise HTTPException(404, "Extension not found.")
         used = _used_as_target(conn, ext)
         if used:
             raise HTTPException(409, f"Extension {ext} is {used}. Change that first.")
-        for g in conn.execute("SELECT * FROM ring_groups").fetchall():
+        for g in conn.execute("SELECT * FROM ring_groups WHERE tenant_id = ?", (tid,)).fetchall():
             if ext in _members(g):
-                conn.execute("UPDATE ring_groups SET members = ? WHERE number = ?",
-                             (",".join(m for m in _members(g) if m != ext), g["number"]))
-        conn.execute("DELETE FROM extensions WHERE ext = ?", (ext,))
-        conn.execute("UPDATE ring_groups SET voicemail = '' WHERE voicemail = ?", (ext,))
+                conn.execute("UPDATE ring_groups SET members = ? WHERE number = ? AND tenant_id = ?",
+                             (",".join(m for m in _members(g) if m != ext), g["number"], tid))
+        conn.execute("DELETE FROM extensions WHERE ext = ? AND tenant_id = ?", (ext, tid))
+        conn.execute("UPDATE ring_groups SET voicemail = '' WHERE voicemail = ? AND tenant_id = ?", (ext, tid))
         _revoke_setup_links(conn, ext)
         conn.commit()
         _clear_forwarding(ext)
@@ -1941,7 +1975,7 @@ def _clean_group(conn, req: RingGroupRequest) -> dict:
         raise HTTPException(400, "Strategy must be 'ringall' or 'hunt'.")
     if not 5 <= req.ring_time <= 120:
         raise HTTPException(400, "Ring time must be 5-120 seconds.")
-    exts = {r["ext"] for r in conn.execute("SELECT ext FROM extensions")}
+    exts = {r["ext"] for r in conn.execute("SELECT ext FROM extensions WHERE tenant_id = ?", (current_tenant(),))}
     members = list(dict.fromkeys(m.strip() for m in req.members if m.strip()))
     bad = [m for m in members if m not in exts]
     if bad:
@@ -1957,9 +1991,10 @@ def _clean_group(conn, req: RingGroupRequest) -> dict:
 
 @router.post("/ringgroups")
 def api_create_group(req: RingGroupRequest):
+    tid = current_tenant()
     with _lock, get_db() as conn:
         g = _clean_group(conn, req)
-        taken = {r["number"] for r in conn.execute("SELECT number FROM ring_groups")}
+        taken = {r["number"] for r in conn.execute("SELECT number FROM ring_groups WHERE tenant_id = ?", (tid,))}
         if req.number:
             number = _in_range(req.number, GROUP_MIN, GROUP_MAX, "Ring group number")
             if number in taken:
@@ -1969,9 +2004,9 @@ def api_create_group(req: RingGroupRequest):
             if not free:
                 raise HTTPException(409, "No free ring group numbers left.")
             number = free[0]
-        conn.execute("INSERT INTO ring_groups (number, name, strategy, ring_time, members, voicemail) "
-                     "VALUES (?, ?, ?, ?, ?, ?)",
-                     (number, g["name"], g["strategy"], g["ring_time"], g["members"], g["voicemail"]))
+        conn.execute("INSERT INTO ring_groups (number, name, strategy, ring_time, members, voicemail, tenant_id) "
+                     "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                     (number, g["name"], g["strategy"], g["ring_time"], g["members"], g["voicemail"], tid))
         conn.commit()
         result = apply_config(conn, f"Created ring group {number} ({g['name']}): {g['strategy']} {g['members']}, "
                                     f"voicemail={g['voicemail'] or 'none'}")
@@ -1983,8 +2018,9 @@ def api_update_group(number: str, req: RingGroupRequest):
     with _lock, get_db() as conn:
         g = _clean_group(conn, req)
         if conn.execute("UPDATE ring_groups SET name = ?, strategy = ?, ring_time = ?, members = ?, voicemail = ? "
-                        "WHERE number = ?",
-                        (g["name"], g["strategy"], g["ring_time"], g["members"], g["voicemail"], number)).rowcount == 0:
+                        "WHERE number = ? AND tenant_id = ?",
+                        (g["name"], g["strategy"], g["ring_time"], g["members"], g["voicemail"], number,
+                         current_tenant())).rowcount == 0:
             raise HTTPException(404, "Ring group not found.")
         conn.commit()
         return apply_config(conn, f"Updated ring group {number}: {g['strategy']} {g['members']}, "
@@ -1997,7 +2033,7 @@ def api_delete_group(number: str):
         used = _used_as_target(conn, number)
         if used:
             raise HTTPException(409, f"Ring group {number} is {used}. Change that first.")
-        if conn.execute("DELETE FROM ring_groups WHERE number = ?", (number,)).rowcount == 0:
+        if conn.execute("DELETE FROM ring_groups WHERE number = ? AND tenant_id = ?", (number, current_tenant())).rowcount == 0:
             raise HTTPException(404, "Ring group not found.")
         conn.commit()
         return apply_config(conn, f"Deleted ring group {number}")
@@ -2015,11 +2051,16 @@ def api_set_inbound_route(req: InboundRouteRequest):
     label = req.label.strip()
     if label:
         label = _clean_name(label)
+    tid = current_tenant()
     with _lock, get_db() as conn:
         target = _valid_target(conn, req.target)
-        conn.execute("INSERT INTO inbound_routes (did, target, label) VALUES (?, ?, ?) "
+        # A number is one tenant's: saving it never takes it from another.
+        owner = conn.execute("SELECT tenant_id FROM inbound_routes WHERE did = ?", (did,)).fetchone()
+        if owner and owner["tenant_id"] != tid:
+            raise HTTPException(409, f"{did} belongs to another tenant.")
+        conn.execute("INSERT INTO inbound_routes (did, target, label, tenant_id) VALUES (?, ?, ?, ?) "
                      "ON CONFLICT(did) DO UPDATE SET target = excluded.target, label = excluded.label",
-                     (did, target, label))
+                     (did, target, label, tid))
         conn.commit()
         return {"did": did, **apply_config(conn, f"Inbound route {did} -> {target}")}
 
@@ -2027,7 +2068,7 @@ def api_set_inbound_route(req: InboundRouteRequest):
 @router.delete("/inbound/{did}")
 def api_delete_inbound_route(did: str):
     with _lock, get_db() as conn:
-        if conn.execute("DELETE FROM inbound_routes WHERE did = ?", (did,)).rowcount == 0:
+        if conn.execute("DELETE FROM inbound_routes WHERE did = ? AND tenant_id = ?", (did, current_tenant())).rowcount == 0:
             raise HTTPException(404, "Inbound route not found.")
         conn.commit()
         return apply_config(conn, f"Deleted inbound route {did}")
@@ -2290,7 +2331,8 @@ def api_email_setup(ext: str, req: SetupEmailRequest):
             conn.commit()
         raise
     with _lock, get_db() as conn:
-        conn.execute("UPDATE extensions SET setup_email = ? WHERE ext = ?", (to, ext))  # offered next time
+        conn.execute("UPDATE extensions SET setup_email = ? WHERE ext = ? AND tenant_id = ?",
+                     (to, ext, current_tenant()))  # offered next time
         conn.commit()
     changes_log.info(f"Emailed {'+'.join(apps)} setup for extension {ext} to {to}")
     return {"ok": True, "expires_at": expires.isoformat(),

@@ -22,7 +22,7 @@ from pydantic import BaseModel
 
 from ivr import read_ulaw, write_ulaw
 from pbx import (PBX_TIMEZONE, REC_DIR, REC_NAME_RE, REC_NOTICE, _lock, _set_setting, apply_config, asterisk_cli, channel_ext,
-                 changes_log, get_db, get_settings, get_status)
+                 changes_log, current_tenant, get_db, get_settings, get_status)
 
 router = APIRouter(prefix="/api/pbx")
 
@@ -136,7 +136,8 @@ class ExtensionRecording(BaseModel):
 @router.put("/extensions/{ext}/recording")
 def api_extension_recording(ext: str, req: ExtensionRecording):
     with _lock, get_db() as conn:
-        if conn.execute("UPDATE extensions SET record = ? WHERE ext = ?", (int(req.always), ext)).rowcount == 0:
+        if conn.execute("UPDATE extensions SET record = ? WHERE ext = ? AND tenant_id = ?",
+                        (int(req.always), ext, current_tenant())).rowcount == 0:
             raise HTTPException(404, "Extension not found.")
         conn.commit()
         return apply_config(conn, f"Extension {ext}: record every call={req.always}")

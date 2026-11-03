@@ -19,7 +19,7 @@ from fastapi.responses import Response
 from pydantic import BaseModel
 
 from pbx import (MENU_KEYS, MENU_MAX, MENU_MIN, _clean_name, _in_range, _lock, _used_as_target,
-                 apply_config, check_target, get_db, greeting_path)
+                 apply_config, check_target, current_tenant, get_db, greeting_path, tenant_names)
 
 router = APIRouter(prefix="/api/pbx")
 
@@ -69,8 +69,9 @@ def _summary(m: dict) -> str:
 
 @router.post("/ivr")
 def api_create_menu(req: MenuRequest):
+    tid = current_tenant()
     with _lock, get_db() as conn:
-        taken = {r["number"] for r in conn.execute("SELECT number FROM ivr_menus")}
+        taken = {r["number"] for r in conn.execute("SELECT number FROM ivr_menus WHERE tenant_id = ?", (tid,))}
         if req.number.strip():
             number = _in_range(req.number, MENU_MIN, MENU_MAX, "Menu number")
             if number in taken:
@@ -81,10 +82,10 @@ def api_create_menu(req: MenuRequest):
                 raise HTTPException(409, "No free menu numbers left.")
             number = free[0]
         m = _clean(conn, req, number)
-        conn.execute("INSERT INTO ivr_menus (number, name, options, fallback, timeout, retries, direct_dial) "
-                     "VALUES (?, ?, ?, ?, ?, ?, ?)",
+        conn.execute("INSERT INTO ivr_menus (number, name, options, fallback, timeout, retries, direct_dial, tenant_id) "
+                     "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
                      (number, m["name"], json.dumps(m["options"]), m["fallback"], m["timeout"], m["retries"],
-                      m["direct_dial"]))
+                      m["direct_dial"], tid))
         conn.commit()
         result = apply_config(conn, f"Created IVR menu {number} ({m['name']}): {_summary(m)}")
     return {"number": number, **result}
@@ -95,9 +96,9 @@ def api_update_menu(number: str, req: MenuRequest):
     with _lock, get_db() as conn:
         m = _clean(conn, req, number)
         if conn.execute("UPDATE ivr_menus SET name = ?, options = ?, fallback = ?, timeout = ?, retries = ?, "
-                        "direct_dial = ? WHERE number = ?",
+                        "direct_dial = ? WHERE number = ? AND tenant_id = ?",
                         (m["name"], json.dumps(m["options"]), m["fallback"], m["timeout"], m["retries"],
-                         m["direct_dial"], number)).rowcount == 0:
+                         m["direct_dial"], number, current_tenant())).rowcount == 0:
             raise HTTPException(404, "Menu not found.")
         conn.commit()
         return apply_config(conn, f"Updated IVR menu {number}: {_summary(m)}")
@@ -109,19 +110,22 @@ def api_delete_menu(number: str):
         used = _used_as_target(conn, number)
         if used:
             raise HTTPException(409, f"Menu {number} is {used}. Change that first.")
-        if conn.execute("DELETE FROM ivr_menus WHERE number = ?", (number,)).rowcount == 0:
+        if conn.execute("DELETE FROM ivr_menus WHERE number = ? AND tenant_id = ?", (number, current_tenant())).rowcount == 0:
             raise HTTPException(404, "Menu not found.")
         conn.commit()
         try:
-            os.remove(greeting_path(number))
+            os.remove(greeting_path(number, tenant_names(conn, current_tenant())))
         except FileNotFoundError:
             pass
         return apply_config(conn, f"Deleted IVR menu {number}")
 
 
 def _menu_or_404(conn, number: str):
-    if not conn.execute("SELECT 1 FROM ivr_menus WHERE number = ?", (number,)).fetchone():
+    """The current tenant's names (for the greeting's folder), if it has this menu."""
+    tid = current_tenant()
+    if not conn.execute("SELECT 1 FROM ivr_menus WHERE number = ? AND tenant_id = ?", (number, tid)).fetchone():
         raise HTTPException(404, "Menu not found.")
+    return tenant_names(conn, tid)
 
 
 def write_ulaw(path: str, audio: bytes):
@@ -149,8 +153,8 @@ async def read_ulaw(request: Request) -> bytes:
 
 def _store_greeting(number: str, audio: bytes) -> dict:
     with _lock, get_db() as conn:
-        _menu_or_404(conn, number)
-        write_ulaw(greeting_path(number), audio)
+        t = _menu_or_404(conn, number)
+        write_ulaw(greeting_path(number, t), audio)
         return apply_config(conn, f"New greeting for IVR menu {number} ({len(audio) // 8000}s)")
 
 
@@ -165,9 +169,9 @@ async def api_set_greeting(number: str, request: Request):
 @router.get("/ivr/{number}/greeting")
 def api_get_greeting(number: str):
     with get_db() as conn:
-        _menu_or_404(conn, number)
+        t = _menu_or_404(conn, number)
     try:
-        with open(greeting_path(number), "rb") as f:
+        with open(greeting_path(number, t), "rb") as f:
             audio = f.read()
     except FileNotFoundError:
         raise HTTPException(404, "This menu has no greeting yet.")
@@ -177,9 +181,9 @@ def api_get_greeting(number: str):
 @router.delete("/ivr/{number}/greeting")
 def api_delete_greeting(number: str):
     with _lock, get_db() as conn:
-        _menu_or_404(conn, number)
+        t = _menu_or_404(conn, number)
         try:
-            os.remove(greeting_path(number))
+            os.remove(greeting_path(number, t))
         except FileNotFoundError:
             pass
         return apply_config(conn, f"Removed the greeting of IVR menu {number}")

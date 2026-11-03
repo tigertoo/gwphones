@@ -16,7 +16,7 @@ from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
 from pbx import (DAYS, HOURS_MAX, HOURS_MIN, PBX_TIMEZONE, _clean_name, _in_range, _lock, _used_as_target,
-                 apply_config, check_target, get_db)
+                 apply_config, check_target, current_tenant, get_db)
 
 router = APIRouter(prefix="/api/pbx")
 
@@ -82,8 +82,9 @@ def _summary(h: dict) -> str:
 
 @router.post("/hours")
 def api_create_hours(req: HoursRequest):
+    tid = current_tenant()
     with _lock, get_db() as conn:
-        taken = {r["number"] for r in conn.execute("SELECT number FROM business_hours")}
+        taken = {r["number"] for r in conn.execute("SELECT number FROM business_hours WHERE tenant_id = ?", (tid,))}
         if req.number.strip():
             number = _in_range(req.number, HOURS_MIN, HOURS_MAX, "Schedule number")
             if number in taken:
@@ -94,10 +95,10 @@ def api_create_hours(req: HoursRequest):
                 raise HTTPException(409, "No free schedule numbers left.")
             number = free[0]
         h = _clean(conn, req)
-        conn.execute("INSERT INTO business_hours (number, name, week, holidays, open_target, closed_target, override) "
-                     "VALUES (?, ?, ?, ?, ?, ?, ?)",
+        conn.execute("INSERT INTO business_hours (number, name, week, holidays, open_target, closed_target, override, "
+                     "tenant_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
                      (number, h["name"], json.dumps(h["week"]), json.dumps(h["holidays"]), h["open_target"],
-                      h["closed_target"], h["override"]))
+                      h["closed_target"], h["override"], tid))
         conn.commit()
         result = apply_config(conn, f"Created business hours {number} ({h['name']}): {_summary(h)}")
     return {"number": number, **result}
@@ -108,9 +109,9 @@ def api_update_hours(number: str, req: HoursRequest):
     with _lock, get_db() as conn:
         h = _clean(conn, req)
         if conn.execute("UPDATE business_hours SET name = ?, week = ?, holidays = ?, open_target = ?, "
-                        "closed_target = ?, override = ? WHERE number = ?",
+                        "closed_target = ?, override = ? WHERE number = ? AND tenant_id = ?",
                         (h["name"], json.dumps(h["week"]), json.dumps(h["holidays"]), h["open_target"],
-                         h["closed_target"], h["override"], number)).rowcount == 0:
+                         h["closed_target"], h["override"], number, current_tenant())).rowcount == 0:
             raise HTTPException(404, "Schedule not found.")
         conn.commit()
         return apply_config(conn, f"Updated business hours {number}: {_summary(h)}")
@@ -126,8 +127,8 @@ def api_hours_override(number: str, req: OverrideRequest):
     if req.override not in OVERRIDES:
         raise HTTPException(400, "The override is open, closed or none.")
     with _lock, get_db() as conn:
-        if conn.execute("UPDATE business_hours SET override = ? WHERE number = ?",
-                        (req.override, number)).rowcount == 0:
+        if conn.execute("UPDATE business_hours SET override = ? WHERE number = ? AND tenant_id = ?",
+                        (req.override, number, current_tenant())).rowcount == 0:
             raise HTTPException(404, "Schedule not found.")
         conn.commit()
         return apply_config(conn, f"Business hours {number}: override={req.override or 'none (by the hours)'}")
@@ -139,7 +140,8 @@ def api_delete_hours(number: str):
         used = _used_as_target(conn, number)
         if used:
             raise HTTPException(409, f"Schedule {number} is {used}. Change that first.")
-        if conn.execute("DELETE FROM business_hours WHERE number = ?", (number,)).rowcount == 0:
+        if conn.execute("DELETE FROM business_hours WHERE number = ? AND tenant_id = ?",
+                        (number, current_tenant())).rowcount == 0:
             raise HTTPException(404, "Schedule not found.")
         conn.commit()
         return apply_config(conn, f"Deleted business hours {number}")
