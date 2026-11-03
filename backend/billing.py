@@ -124,7 +124,9 @@ def get_db() -> sqlite3.Connection:
     for column in ("calls ADD COLUMN price_micro INTEGER",  # the customer's price, set when a statement locks it
                    "rate_sheets ADD COLUMN rate_unit TEXT NOT NULL DEFAULT 'units'",
                    "rate_sheets ADD COLUMN vat_pct TEXT NOT NULL DEFAULT '0'",
-                   "mappings ADD COLUMN defaults TEXT"):
+                   "mappings ADD COLUMN defaults TEXT",
+                   # Multi-tenant groundwork: everything so far is the main tenant's (pbx.MAIN_TENANT).
+                   *[f"{t} ADD COLUMN tenant_id INTEGER NOT NULL DEFAULT 1" for t in ("customers", "customer_exts", "calls")]):
         try:
             conn.execute(f"ALTER TABLE {column}")
         except sqlite3.OperationalError:

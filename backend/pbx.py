@@ -182,6 +182,13 @@ ROUTE_CHOICES = ["default", *TRUNKS, "cheapest", "off"]
 ALL_ROUTES = [("irishvoip", ""), *[("voxbeam", p) for p in VOXBEAM_ROUTES]]
 LCR_URL = "http://127.0.0.1:8010/lcr/route"
 
+# Tenants (multi-tenant groundwork, phase 1): every tenant-owned row says
+# whose it is. Everything today belongs to the main tenant (code 1001);
+# nothing reads tenant_id yet.
+MAIN_TENANT, MAIN_TENANT_CODE = 1, "1001"
+TENANT_TABLES = ("extensions", "ring_groups", "inbound_routes", "provision_tokens", "call_links", "ivr_menus",
+                 "business_hours")
+
 VIDEO_CODECS = "h264,vp8"  # both apps offer these; H.264 first: iPhones encode it in hardware
 
 DEFAULT_SETTINGS = {
@@ -338,7 +345,15 @@ def get_db() -> sqlite3.Connection:
                holidays TEXT NOT NULL DEFAULT '[]',
                open_target TEXT NOT NULL,
                closed_target TEXT NOT NULL,
-               override TEXT NOT NULL DEFAULT '');"""
+               override TEXT NOT NULL DEFAULT '');
+           CREATE TABLE IF NOT EXISTS tenants (
+               id INTEGER PRIMARY KEY,
+               code TEXT NOT NULL UNIQUE,
+               name TEXT NOT NULL,
+               status TEXT NOT NULL DEFAULT 'active',
+               sip_host TEXT NOT NULL DEFAULT '',
+               node TEXT NOT NULL DEFAULT '',
+               created_at TEXT NOT NULL);"""
     )
     if fresh:
         os.chmod(PBX_DB_PATH, 0o600)  # holds SIP passwords
@@ -347,11 +362,15 @@ def get_db() -> sqlite3.Connection:
                    "extensions ADD COLUMN setup_email TEXT NOT NULL DEFAULT ''",
                    "extensions ADD COLUMN outbound_cid TEXT NOT NULL DEFAULT ''",
                    "ring_groups ADD COLUMN voicemail TEXT NOT NULL DEFAULT ''",
-                   "extensions ADD COLUMN record INTEGER NOT NULL DEFAULT 0"):
+                   "extensions ADD COLUMN record INTEGER NOT NULL DEFAULT 0",
+                   *[f"{t} ADD COLUMN tenant_id INTEGER NOT NULL DEFAULT {MAIN_TENANT}" for t in TENANT_TABLES]):
         try:
             conn.execute(f"ALTER TABLE {column}")
         except sqlite3.OperationalError:
             pass  # already there
+    if conn.execute("INSERT OR IGNORE INTO tenants (id, code, name, created_at) VALUES (?, ?, ?, ?)",
+                    (MAIN_TENANT, MAIN_TENANT_CODE, "Main", _now())).rowcount:
+        conn.commit()
     if conn.execute("SELECT 1 FROM settings WHERE key = 'imported'").fetchone() is None:
         _import_existing(conn)
     missing = conn.execute("SELECT ext FROM extensions WHERE vm_pin IS NULL").fetchall()
