@@ -217,6 +217,13 @@ class TenantNames:
         self.ivr_dir = IVR_DIR if main else os.path.join(IVR_DIR, self.prefix)
         self.rec_dir = REC_DIR if main else os.path.join(REC_DIR, self.prefix)
         self.notice = os.path.join(self.ivr_dir, "recording-notice.ulaw")
+        # Phones log in as tenant code + extension (1002201): a login is
+        # unique on the server. The main tenant's are still the bare
+        # extension (201) until they're moved over (phase 3).
+        self.login_prefix = "" if main else code
+
+    def login(self, ext: str) -> str:
+        return f"{self.login_prefix}{ext}"
 
     def ivr(self, number: str) -> str:
         return f"{self.prefix}-ivr-{number}"
@@ -256,15 +263,35 @@ def all_tenant_names(conn) -> List[TenantNames]:
 # extension (1001201), only these change. The dialplan never works it out:
 # each endpoint carries PBX_EXT and PBX_TENANT (set_var), which Asterisk
 # sets on its channels both ways, calling and called.
-def endpoint_ext(endpoint: str) -> Optional[str]:
-    return endpoint if re.fullmatch(r"2[0-9]{2}", endpoint or "") else None
+def parse_login(login: str) -> Optional[Tuple[str, str]]:
+    """(tenant code, extension) of a phone login: 201 is the main tenant's,
+    1002201 tenant 1002's. None for anything else (a trunk, webguest)."""
+    if re.fullmatch(r"2[0-9]{2}", login or ""):
+        return MAIN_TENANT_CODE, login
+    m = re.fullmatch(r"([0-9]{4})(2[0-9]{2})", login or "")
+    return (m.group(1), m.group(2)) if m else None
 
 
-def channel_ext(channel: str) -> Optional[str]:
-    """The extension a channel (PJSIP/201-0000001a) is a call of, or None:
-    a trunk, a browser, a Local channel."""
+def endpoint_ext(endpoint: str, code: str = MAIN_TENANT_CODE) -> Optional[str]:
+    """The extension a login is, if it's one of tenant code's."""
+    p = parse_login(endpoint)
+    return p[1] if p and p[0] == code else None
+
+
+def channel_ext(channel: str, code: str = MAIN_TENANT_CODE) -> Optional[str]:
+    """The extension a channel (PJSIP/201-0000001a) is a call of, if it's
+    tenant code's, or None: another tenant's, a trunk, a browser, a Local
+    channel."""
     m = re.fullmatch(r"PJSIP/([^-/]+)-[0-9a-f]+", channel or "")
-    return endpoint_ext(m.group(1)) if m else None
+    return endpoint_ext(m.group(1), code) if m else None
+
+
+def row_login(row) -> str:
+    """The login of an extensions row."""
+    if row["tenant_id"] == MAIN_TENANT:
+        return row["ext"]
+    with get_db() as conn:
+        return tenant_names(conn, row["tenant_id"]).login(row["ext"])
 
 VIDEO_CODECS = "h264,vp8"  # both apps offer these; H.264 first: iPhones encode it in hardware
 
@@ -756,9 +783,10 @@ def build_extensions_conf(conn) -> str:
     names = {t.id: t for t in all_tenant_names(conn)}
     for r in conn.execute("SELECT * FROM extensions WHERE enabled = 1 ORDER BY ext"):
         t = names[r["tenant_id"]]
-        out += [f"[{r['ext']}](endpoint-ext)",
-                f"auth={r['ext']}",
-                f"aors={r['ext']}",
+        login = t.login(r["ext"])
+        out += [f"[{login}](endpoint-ext)",
+                f"auth={login}",
+                f"aors={login}",
                 f"callerid=\"{r['name']}\" <{r['ext']}>",
                 f"mailboxes={r['ext']}@{t.vm}",
                 f"subscribe_context={t.hints}",
@@ -773,11 +801,11 @@ def build_extensions_conf(conn) -> str:
             # back to OUTBOUND_CID without it.
             out.append(f"set_var=EXT_CID={r['outbound_cid']}")
         out += ["",
-                f"[{r['ext']}](auth-ext)",
-                f"username={r['ext']}",
+                f"[{login}](auth-ext)",
+                f"username={login}",
                 f"password={r['password']}",
                 "",
-                f"[{r['ext']}](aor-ext)",
+                f"[{login}](aor-ext)",
                 ""]
     out += _web_guest_endpoint(conn)
     return "\n".join(out)
@@ -871,30 +899,31 @@ def _call_ext_context(t: TenantNames) -> List[str]:
     all), billed to the forwarding extension (CDR userfield fwd:<ext>). No
     voicemail after that: an unanswered mobile keeps its own."""
     cf, cfb, cfu = (FORWARD_FAMILIES[k] for k in ("always", "busy", "no_answer"))
+    me = f"{t.login_prefix}${{EXTEN}}"  # this extension's login: its endpoint and its AstDB key
     return [
         "; ---- Calls for an extension: do not disturb, forwarding, voicemail ----",
         f"[{t.call_ext}]",
         "exten => _2XX,1,Set(HOPS=$[0${HOPS} + 1])",
         f" same => n,GotoIf($[${{HOPS}} > {MAX_FORWARD_HOPS}]?vm-u)  ; forwarded round in a loop",
-        f" same => n,Set(FWD=${{DB({cf}/${{EXTEN}})}})",
+        f" same => n,Set(FWD=${{DB({cf}/{me})}})",
         ' same => n,GotoIf($["${FWD}" != ""]?fwd)',
-        f' same => n,GotoIf($["${{DB({DND_FAMILY}/${{EXTEN}})}}" = "1"]?busy)',
+        f' same => n,GotoIf($["${{DB({DND_FAMILY}/{me})}}" = "1"]?busy)',
         *REC_EXT_LINES,
-        f" same => n,Dial(PJSIP/${{EXTEN}},30,{REC_DIAL})",
+        f" same => n,Dial(PJSIP/{me},30,{REC_DIAL})",
         ' same => n,GotoIf($["${DIALSTATUS}" = "ANSWER"]?done)',
         ' same => n,GotoIf($["${DIALSTATUS}" = "BUSY"]?busy)',
-        f" same => n,Set(FWD=${{DB({cfu}/${{EXTEN}})}})",
+        f" same => n,Set(FWD=${{DB({cfu}/{me})}})",
         ' same => n,GotoIf($["${FWD}" != ""]?fwd)',
         f" same => n(vm-u),VoiceMail(${{EXTEN}}@{t.vm},u)",
         " same => n,Hangup()",
-        f" same => n(busy),Set(FWD=${{DB({cfb}/${{EXTEN}})}})",
+        f" same => n(busy),Set(FWD=${{DB({cfb}/{me})}})",
         ' same => n,GotoIf($["${FWD}" != ""]?fwd)',
         f" same => n,VoiceMail(${{EXTEN}}@{t.vm},b)",
         " same => n,Hangup()",
         ' same => n(fwd),GotoIf($["${FWD}" = "${EXTEN}"]?vm-u)',
         f' same => n,GotoIf($[${{REGEX("{FORWARD_TARGET_DIALPLAN_RE}" ${{FWD}})}}]?:vm-u)  ; set by hand to somewhere not allowed',
         ' same => n,ExecIf($["${CDR(userfield)}" = ""]?Set(CDR(userfield)=fwd:${EXTEN}))',
-        " same => n,Set(EXT_CID=${EXTCID_${EXTEN}})",
+        f" same => n,Set(EXT_CID=${{EXTCID_{me}}})",
         " same => n,Goto(from-internal,${FWD},1)",
         " same => n(done),Hangup()",
     ]
@@ -949,14 +978,15 @@ def _features_context(t: TenantNames) -> List[str]:
            f"[{t.features}]",
            # Phones only: browsers and menus never reach this context.
            f"include => {t.park_context}"]
+    db_key = f"{t.login_prefix}${{ME}}"  # the dialling extension's login: its AstDB key
     me = [" same => n,Set(ME=${PBX_EXT})",
           f' same => n,GotoIf($[${{REGEX("^2[0-9][0-9]$" ${{ME}})}}]?:bad)']
     end = [" same => n,Hangup()", " same => n(bad),Playback(invalid)", " same => n,Hangup()"]
     out += ["exten => *78,1,Answer()"] + me + [
-        f" same => n,Set(DB({DND_FAMILY}/${{ME}})=1)",
+        f" same => n,Set(DB({DND_FAMILY}/{db_key})=1)",
         " same => n,Playback(do-not-disturb&activated)"] + end
     out += ["exten => *79,1,Answer()"] + me + [
-        f" same => n,NoOp(${{DB_DELETE({DND_FAMILY}/${{ME}})}})",
+        f" same => n,NoOp(${{DB_DELETE({DND_FAMILY}/{db_key})}})",
         " same => n,Playback(do-not-disturb&de-activated)"] + end
     for on, off, key, sound in (("*72", "*73", "always", "call-fwd-unconditional"),
                                 ("*90", "*91", "busy", "call-fwd-on-busy"),
@@ -966,14 +996,14 @@ def _features_context(t: TenantNames) -> List[str]:
             " same => n,Set(T=${EXTEN:3})",
             f' same => n,GotoIf($[${{REGEX("{FORWARD_TARGET_DIALPLAN_RE}" ${{T}})}}]?:bad)',
             ' same => n,GotoIf($["${T}" = "${ME}"]?bad)',
-            f" same => n,Set(DB({fam}/${{ME}})=${{T}})",
+            f" same => n,Set(DB({fam}/{db_key})=${{T}})",
             f" same => n,Playback({sound}&activated)",
             " same => n,SayDigits(${T})"] + end
         out += [f"exten => {off},1,Answer()"] + me + [
-            f" same => n,NoOp(${{DB_DELETE({fam}/${{ME}})}})",
+            f" same => n,NoOp(${{DB_DELETE({fam}/{db_key})}})",
             f" same => n,Playback({sound}&de-activated)"] + end
     out += ["exten => *8,1,Pickup()", " same => n,Hangup()",
-            "exten => _**2XX,1,PickupChan(PJSIP/${EXTEN:2}-,p)", " same => n,Hangup()"]
+            f"exten => _**2XX,1,PickupChan(PJSIP/{t.login_prefix}${{EXTEN:2}}-,p)", " same => n,Hangup()"]
     return out
 
 
@@ -1155,13 +1185,14 @@ def _ringgroups_context(conn, t: TenantNames) -> List[str]:
             out.append(" same => n,NoOp(No active members)")
         elif g["strategy"] == "hunt":
             for i, m in enumerate(members):
-                out += [f' same => n,GotoIf($["${{DB({DND_FAMILY}/{m})}}" = "1"]?skip{i})',
-                        f" same => n,Dial(PJSIP/{m},{ring},{REC_DIAL})",
+                out += [f' same => n,GotoIf($["${{DB({DND_FAMILY}/{t.login(m)})}}" = "1"]?skip{i})',
+                        f" same => n,Dial(PJSIP/{t.login(m)},{ring},{REC_DIAL})",
                         ' same => n,ExecIf($["${DIALSTATUS}" = "ANSWER"]?Hangup())',
                         f" same => n(skip{i}),NoOp()"]
         else:
             out.append(" same => n,Set(RG=)")
-            out += [f' same => n,ExecIf($["${{DB({DND_FAMILY}/{m})}}" != "1"]?Set(RG=${{RG}}&PJSIP/{m}))' for m in members]
+            out += [f' same => n,ExecIf($["${{DB({DND_FAMILY}/{t.login(m)})}}" != "1"]?Set(RG=${{RG}}&PJSIP/{t.login(m)}))'
+                    for m in members]
             out += [' same => n,GotoIf($["${RG}" = ""]?nobody)',
                     f" same => n,Dial(${{RG:1}},{ring},{REC_DIAL})",
                     ' same => n,ExecIf($["${DIALSTATUS}" = "ANSWER"]?Hangup())',
@@ -1191,17 +1222,20 @@ def build_portal_dialplan(conn) -> str:
            f"VOXBEAM_PREFIX={s['voxbeam_prefix']}",
            f"LCR_TOKEN={_lcr_token(conn)}"]
     # Each extension's own caller ID, for calls it forwards to outside numbers.
-    out += [f"EXTCID_{r['ext']}={r['outbound_cid']}"
-            for r in conn.execute("SELECT ext, outbound_cid FROM extensions WHERE enabled = 1 AND outbound_cid != '' ORDER BY ext")]
+    names = {t.id: t for t in tenants}
+    out += [f"EXTCID_{names[r['tenant_id']].login(r['ext'])}={r['outbound_cid']}"
+            for r in conn.execute("SELECT ext, outbound_cid, tenant_id FROM extensions WHERE enabled = 1 AND outbound_cid != '' "
+                                  "ORDER BY ext")]
     # Extensions whose calls are all recorded (see [portal-rec]).
-    out += [f"REC_{r['ext']}=1" for r in conn.execute("SELECT ext FROM extensions WHERE enabled = 1 AND record = 1 ORDER BY ext")]
+    out += [f"REC_{names[r['tenant_id']].login(r['ext'])}=1"
+            for r in conn.execute("SELECT ext, tenant_id FROM extensions WHERE enabled = 1 AND record = 1 ORDER BY ext")]
     # Per tenant from here on: each section once for every tenant, with its
     # own names (TenantNames), reaching only its own extensions.
     for t in tenants:
         out += ["",
                 "; ---- Busy lamps (BLF) and presence: one hint per extension ----",
                 f"[{t.hints}]"]
-        out += [f"exten => {e},hint,PJSIP/{e}" for e in sorted(destinations(conn, t.id)["active"])]
+        out += [f"exten => {e},hint,PJSIP/{t.login(e)}" for e in sorted(destinations(conn, t.id)["active"])]
         out += [f"exten => {n},hint,park:{n}@{t.park_lot}" for n in PARK_SLOTS]  # lit while a call is parked there
     for t in tenants:
         out += [""] + _call_ext_context(t)
@@ -1640,9 +1674,10 @@ def api_extension_outbound_cid(ext: str, req: OutboundCidRequest):
 _DB_LINE = re.compile(r"^/(CF|CFB|CFU|DND)/(\d+)\s*:\s*(\S*)\s*$")
 
 
-def read_forwarding() -> Optional[Dict[str, dict]]:
+def read_forwarding(t: TenantNames = MAIN_NAMES) -> Optional[Dict[str, dict]]:
     """{ext: {"dnd": bool, "always": "...", "busy": "...", "no_answer": "..."}}
-    from AstDB, or None if Asterisk can't be asked."""
+    for tenant t's extensions, from AstDB (keyed by login), or None if
+    Asterisk can't be asked."""
     out = asterisk_cli("database show")
     if out is None:
         return None
@@ -1652,7 +1687,11 @@ def read_forwarding() -> Optional[Dict[str, dict]]:
         m = _DB_LINE.match(line.strip())
         if not m:
             continue
-        family, ext, value = m.groups()
+        family, login, value = m.groups()
+        p = parse_login(login)
+        if not p or p[0] != t.code:
+            continue  # another tenant's
+        ext = p[1]
         entry = found.setdefault(ext, {"dnd": False, "always": "", "busy": "", "no_answer": ""})
         if family == DND_FAMILY:
             entry["dnd"] = value == "1"
@@ -1661,8 +1700,8 @@ def read_forwarding() -> Optional[Dict[str, dict]]:
     return found
 
 
-def _db_set(family: str, ext: str, value: str):
-    cmd = f"database put {family} {ext} {value}" if value else f"database del {family} {ext}"
+def _db_set(family: str, login: str, value: str):
+    cmd = f"database put {family} {login} {value}" if value else f"database del {family} {login}"
     out = asterisk_cli(cmd)
     if out is None:
         raise HTTPException(503, "Asterisk isn't answering, so nothing was changed. Is it running?")
@@ -1691,7 +1730,9 @@ def forward_target(conn, ext: str, value: str) -> str:
 
 @router.get("/forwarding")
 def api_forwarding():
-    data = read_forwarding()
+    with get_db() as conn:
+        t = tenant_names(conn, current_tenant())
+    data = read_forwarding(t)
     return {"available": data is not None, "extensions": data or {}}
 
 
@@ -1708,24 +1749,26 @@ def api_set_forwarding(ext: str, req: ForwardingRequest):
         if not conn.execute("SELECT 1 FROM extensions WHERE ext = ? AND tenant_id = ?", (ext, current_tenant())).fetchone():
             raise HTTPException(404, "Extension not found.")
         targets = {k: forward_target(conn, ext, getattr(req, k)) for k in FORWARD_FAMILIES}
+        login = tenant_names(conn, current_tenant()).login(ext)
     with _lock:
-        _db_set(DND_FAMILY, ext, "1" if req.dnd else "")
+        _db_set(DND_FAMILY, login, "1" if req.dnd else "")
         for key, family in FORWARD_FAMILIES.items():
-            _db_set(family, ext, targets[key])
+            _db_set(family, login, targets[key])
     summary = ", ".join([f"{k}={v}" for k, v in targets.items() if v] + (["dnd"] if req.dnd else [])) or "all off"
     changes_log.info(f"Forwarding for extension {ext}: {summary}")
     return {"ok": True, **targets, "dnd": req.dnd}
 
 
-def _clear_forwarding(ext: str):
-    """An extension's own settings, and forwards to it, when it's deleted."""
-    data = read_forwarding() or {}
+def _clear_forwarding(t: TenantNames, ext: str):
+    """An extension's own settings, and its tenant's forwards to it, when
+    it's deleted."""
+    data = read_forwarding(t) or {}
     for family in [DND_FAMILY, *FORWARD_FAMILIES.values()]:
-        asterisk_cli(f"database del {family} {ext}")
+        asterisk_cli(f"database del {family} {t.login(ext)}")
     for other, entry in data.items():
         for key, family in FORWARD_FAMILIES.items():
             if entry.get(key) == ext:
-                asterisk_cli(f"database del {family} {other}")
+                asterisk_cli(f"database del {family} {t.login(other)}")
 
 
 class ClickToCallRequest(BaseModel):
@@ -1788,7 +1831,8 @@ def api_credentials(ext: str):
     if not r:
         raise HTTPException(404, "Extension not found.")
     changes_log.info(f"Viewed credentials for extension {ext}")
-    return {"username": r["ext"], "password": r["password"], "server": PUBLIC_HOST,
+    return {"username": row_login({"ext": r["ext"], "tenant_id": current_tenant()}), "password": r["password"],
+            "server": PUBLIC_HOST,
             "port": PUBLIC_PORT, "transport": "TLS", "media_encryption": "SRTP (SDES)",
             "voicemail_number": VOICEMAIL_NUMBER, "voicemail_pin": r["vm_pin"]}
 
@@ -1982,7 +2026,7 @@ def prov_account(token: str, request: Request):
     body = f"""<?xml version="1.0" encoding="UTF-8"?>
 <account>
   <title>{x(e["name"])} ({x(e["ext"])})</title>
-  <username>{x(e["ext"])}</username>
+  <username>{x(row_login(e))}</username>
   <password>{x(e["password"])}</password>
   <userDisplayName>{x(e["name"])}</userDisplayName>
   <host>{x(PUBLIC_HOST)}:{x(PUBLIC_PORT)}</host>
@@ -2013,7 +2057,7 @@ def api_delete_extension(ext: str):
         conn.execute("UPDATE ring_groups SET voicemail = '' WHERE voicemail = ? AND tenant_id = ?", (ext, tid))
         _revoke_setup_links(conn, ext)
         conn.commit()
-        _clear_forwarding(ext)
+        _clear_forwarding(tenant_names(conn, tid), ext)
         return apply_config(conn, f"Deleted extension {ext}")
 
 
@@ -2249,14 +2293,14 @@ def prov_linphone(token: str, request: Request):
   <section name="proxy_0" overwrite="true">
     <entry name="reg_proxy" overwrite="true">{server}</entry>
     <entry name="reg_route" overwrite="true">{server}</entry>
-    <entry name="reg_identity" overwrite="true">"{name}" &lt;sip:{x(e["ext"])}@{x(PUBLIC_HOST)}&gt;</entry>
+    <entry name="reg_identity" overwrite="true">"{name}" &lt;sip:{x(row_login(e))}@{x(PUBLIC_HOST)}&gt;</entry>
     <entry name="reg_expires" overwrite="true">600</entry>
     <entry name="reg_sendregister" overwrite="true">1</entry>
     <entry name="publish" overwrite="true">0</entry>
   </section>
   <section name="auth_info_0" overwrite="true">
-    <entry name="username" overwrite="true">{x(e["ext"])}</entry>
-    <entry name="userid" overwrite="true">{x(e["ext"])}</entry>
+    <entry name="username" overwrite="true">{x(row_login(e))}</entry>
+    <entry name="userid" overwrite="true">{x(row_login(e))}</entry>
     <entry name="passwd" overwrite="true">{x(e["password"])}</entry>
     <entry name="domain" overwrite="true">{x(PUBLIC_HOST)}</entry>
   </section>
