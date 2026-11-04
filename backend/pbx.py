@@ -195,6 +195,10 @@ TENANT_TABLES = ("extensions", "ring_groups", "inbound_routes", "provision_token
 TENANT_SETTINGS = ("outbound_cid", "max_outbound", "rec_days", "cap_default", *[f"cap_{t}" for t in NUMBER_TYPES])
 
 
+C2C_RING = "portal-c2c-ring"
+C2C_DIAL = "portal-c2c-dial"
+
+
 class TenantNames:
     """Every Asterisk name (contexts, voicemail context, pickup group, park
     lot) and folder that belongs to one tenant, so tenants can't reach each
@@ -221,6 +225,14 @@ class TenantNames:
         # unique on the server. The main tenant's are still the bare
         # extension (201) until they're moved over (phase 3).
         self.login_prefix = "" if main else code
+        # Where the tenant's phones (and its forwards and click to call)
+        # dial from: its generated [<prefix>-internal]. The main tenant's
+        # phones still start in the hand-written [from-internal] until that
+        # just includes [portal-internal] (multi-tenant step 2.5).
+        self.internal = f"{self.prefix}-internal"
+        self.dial_from = "from-internal" if main else self.internal
+        self.c2c_ring = C2C_RING if main else f"{self.prefix}-c2c-ring"
+        self.c2c_dial = C2C_DIAL if main else f"{self.prefix}-c2c-dial"
 
     def login(self, ext: str) -> str:
         return f"{self.login_prefix}{ext}"
@@ -794,6 +806,8 @@ def build_extensions_conf(conn) -> str:
                 f"named_pickup_group={t.pickup}",
                 f"set_var=PBX_EXT={r['ext']}",
                 f"set_var=PBX_TENANT={t.code}"]
+        if t.id != MAIN_TENANT:
+            out.append(f"context={t.internal}")  # the main tenant's come from the endpoint-ext template
         if video:
             out.append(f"allow={VIDEO_CODECS}")  # added to the template's audio codecs
         if r["outbound_cid"]:
@@ -924,7 +938,7 @@ def _call_ext_context(t: TenantNames) -> List[str]:
         f' same => n,GotoIf($[${{REGEX("{FORWARD_TARGET_DIALPLAN_RE}" ${{FWD}})}}]?:vm-u)  ; set by hand to somewhere not allowed',
         ' same => n,ExecIf($["${CDR(userfield)}" = ""]?Set(CDR(userfield)=fwd:${EXTEN}))',
         f" same => n,Set(EXT_CID=${{EXTCID_{me}}})",
-        " same => n,Goto(from-internal,${FWD},1)",
+        f" same => n,Goto({t.dial_from},${{FWD}},1)",
         " same => n(done),Hangup()",
     ]
 
@@ -1142,11 +1156,7 @@ def _hours_contexts(conn, t: TenantNames) -> List[str]:
     return out
 
 
-C2C_RING = "portal-c2c-ring"
-C2C_DIAL = "portal-c2c-dial"
-
-
-def _click_to_call_contexts() -> List[str]:
+def _click_to_call_contexts(t: TenantNames) -> List[str]:
     """Click to call: the dashboard originates Local/<ext><number>@ring,
     which rings the extension showing the number; once it answers, the
     other half dials the number from dial as that extension (its caller ID,
@@ -1154,18 +1164,80 @@ def _click_to_call_contexts() -> List[str]:
     route check, price cap and call limit apply as for a dialled call.
     Extensions are always 3 digits. Not included anywhere a phone can
     reach, so a phone can't use these to pass as another extension. The
-    ring leg skips do not disturb and forwarding: the user asked for it."""
+    ring leg skips do not disturb and forwarding: the user asked for it.
+    One pair per tenant, ringing its own logins and dialling out from its
+    own internal context."""
+    pre = t.login_prefix
     return ["; ---- Click to call: only started by the dashboard, never dialled ----",
-            f"[{C2C_RING}]",
+            f"[{t.c2c_ring}]",
             "exten => _2XXX.,1,Set(CALLERID(name)=Calling ${EXTEN:3})",
             " same => n,Set(CALLERID(num)=${EXTEN:3})",
-            " same => n,Dial(PJSIP/${EXTEN:0:3},30)",
+            f" same => n,Dial(PJSIP/{pre}${{EXTEN:0:3}},30)",
             " same => n,Hangup()",
-            f"[{C2C_DIAL}]",
+            f"[{t.c2c_dial}]",
             "exten => _2XXX.,1,Set(C2C=${EXTEN:0:3})",
             " same => n,Set(CDR(userfield)=c2c:${C2C})",
-            " same => n,Set(EXT_CID=${EXTCID_${C2C}})",
-            " same => n,Goto(from-internal,${EXTEN:3},1)"]
+            f" same => n,Set(EXT_CID=${{EXTCID_{pre}${{C2C}}}})",
+            f" same => n,Goto({t.dial_from},${{EXTEN:3}},1)"]
+
+
+# What a phone can dial out to, shared by every tenant: numbers sorted by
+# kind, then [sub-outbound] (trunks, price cap, call limit). Moved here from
+# the hand-written [from-internal], unchanged. Anything not matched (premium
+# 15xx, short codes) is refused.
+OUTBOUND_PATTERNS = [
+    "; ---- Outside numbers, by kind (included into every tenant's internal context) ----",
+    "; ARG1 = national format, ARG2 = international without 00.",
+    "[portal-outbound]",
+    "; Irish mobiles: 083, 085, 086, 087, 089 + 7 digits",
+    "exten => _08[35679]XXXXXXX,1,Gosub(sub-outbound,mobile,1(${EXTEN},353${EXTEN:1}))",
+    "; Other Irish numbers: 0 + 8 or 9 digits (01 234 5678, 021 123 4567, 0818...)",
+    "exten => _0[1-9]XXXXXXX,1,Gosub(sub-outbound,landline,1(${EXTEN},353${EXTEN:1}))",
+    "exten => _0[1-9]XXXXXXXX,1,Gosub(sub-outbound,landline,1(${EXTEN},353${EXTEN:1}))",
+    "; Irish freephone 1800",
+    "exten => _1800XXXXXX,1,Gosub(sub-outbound,freephone,1(${EXTEN},353${EXTEN}))",
+    "; Irish numbers dialled in international form go the same way as above",
+    "exten => _00353X.,1,Goto(0${EXTEN:5},1)",
+    "exten => _+353X.,1,Goto(0${EXTEN:4},1)",
+    "exten => _003531800XXXXXX,1,Goto(1800${EXTEN:9},1)",
+    "exten => _+3531800XXXXXX,1,Goto(1800${EXTEN:8},1)",
+    "; +353 (0)87... as phones often store it: drop the extra 0",
+    "exten => _003530X.,1,Goto(0${EXTEN:6},1)",
+    "exten => _+3530X.,1,Goto(0${EXTEN:5},1)",
+    "; International (outside Ireland): 00 or + then at least 7 digits",
+    "exten => _00[1-9]XXXXXX.,1,Gosub(sub-outbound,international,1(${EXTEN},${EXTEN:2}))",
+    "exten => _+[1-9]XXXXXX.,1,Gosub(sub-outbound,international,1(00${EXTEN:1},${EXTEN:1}))",
+]
+
+
+def _internal_context(t: TenantNames, outbound_cid: str) -> List[str]:
+    """Everything a tenant's phone can dial: its own extensions, groups,
+    menus, schedules and feature codes, voicemail, 112/999 and outside
+    numbers. Other tenants' phones start here (endpoint context); the main
+    tenant's from [from-internal], which includes this from step 2.5.
+    Emergency calls go straight out via Irish VoIP, never subject to the
+    call limit, showing the extension's own caller ID, else the tenant's,
+    else the server's."""
+    fallback = outbound_cid or "${OUTBOUND_CID}"
+    if t.id == MAIN_TENANT:
+        fallback = "${OUTBOUND_CID}"  # the main tenant's is the server's
+    out = [f"; ---- Calls placed by tenant {t.code}'s phones ----",
+           f"[{t.internal}]",
+           f"include => {t.ringgroups}",
+           f"include => {t.features}",
+           "include => portal-outbound",
+           f"exten => _2XX,1,Goto({t.call_ext},${{EXTEN}},1)",
+           # Its own mailbox by the endpoint, not the caller ID a phone sends.
+           f"exten => *97,1,VoiceMailMain(${{PBX_EXT}}@{t.vm})",
+           " same => n,Hangup()",
+           f"exten => *98,1,VoiceMailMain(@{t.vm})",
+           " same => n,Hangup()"]
+    for n in ("112", "999"):
+        out += [f'exten => {n},1,Set(OUT_CID=${{IF($["${{EXT_CID}}" != ""]?${{EXT_CID}}:{fallback})}})',
+                ' same => n,ExecIf($["${OUT_CID}" != ""]?Set(CALLERID(num)=${OUT_CID}))',
+                f" same => n,Dial(PJSIP/{n}@irishvoip,120)",
+                " same => n,Hangup()"]
+    return out
 
 
 def _ringgroups_context(conn, t: TenantNames) -> List[str]:
@@ -1241,7 +1313,8 @@ def build_portal_dialplan(conn) -> str:
         out += [""] + _call_ext_context(t)
     for t in tenants:
         out += [""] + _features_context(t)
-    out += [""] + _click_to_call_contexts()
+    for t in tenants:
+        out += [""] + _click_to_call_contexts(t)
     # The recording notice: played while any of the tenant's extensions records everything.
     notices = {t.id: os.path.exists(t.notice) and bool(conn.execute(
         "SELECT 1 FROM extensions WHERE enabled = 1 AND record = 1 AND tenant_id = ?", (t.id,)).fetchone())
@@ -1250,8 +1323,11 @@ def build_portal_dialplan(conn) -> str:
     out += [""] + _rec_context(notices[MAIN_TENANT])
     for t in tenants:
         out += _ringgroups_context(conn, t) + _ivr_contexts(conn, t) + _hours_contexts(conn, t)
+    for t in tenants:
+        out += [""] + _internal_context(t, get_settings(conn, t.id)["outbound_cid"])
+    out += [""] + OUTBOUND_PATTERNS
 
-    enabled =[t for t in s["trunk_order"].split(",") if t in TRUNKS and s.get(f"trunk_{t}_enabled") == "1"]
+    enabled = [t for t in s["trunk_order"].split(",") if t in TRUNKS and s.get(f"trunk_{t}_enabled") == "1"]
     out += ["", "; ---- Outbound: one extension per kind of number ----",
             "; ARG1 = national number, ARG2 = international (353..., 44...)",
             "; s = the trunk order (kept for dialplans that don't say the kind)",
@@ -1802,9 +1878,10 @@ def api_click_to_call(req: ClickToCallRequest):
         if not e or not e["enabled"]:
             raise HTTPException(400, "Choose an extension that's switched on.")
         target = click_to_call_target(conn, e["ext"], req.number)
+        t = tenant_names(conn, current_tenant())
     # Only digits reach the command line (checked above).
     leg = f"{e['ext']}{target}"
-    out = asterisk_cli(f"channel originate Local/{leg}@{C2C_RING}/n extension {leg}@{C2C_DIAL}")
+    out = asterisk_cli(f"channel originate Local/{leg}@{t.c2c_ring}/n extension {leg}@{t.c2c_dial}")
     changes_log.info(f"Click to call: extension {e['ext']} to {target}")
     if out is None:
         raise HTTPException(502, "Asterisk didn't answer, so the call may not have started. Check your phone.")
