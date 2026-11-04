@@ -852,7 +852,6 @@ def _outbound_block(s: Dict[str, str], exten: str, trunks: List[str], refused: b
     out = [f"exten => {exten},1,Set(GROUP(outbound)=calls)",
            " same => n,GotoIf($[${GROUP_COUNT(calls@outbound)} > ${MAX_OUTBOUND}]?busy)",
            *REC_EXT_LINES,
-           ' same => n,ExecIf($["${RECEXT}" = "" & "${C2C}" != ""]?Set(__RECEXT=${C2C}))',
            " same => n,Set(__RECTO=${ARG1})"]
     out += [' same => n,Set(OUT_CID=${IF($["${EXT_CID}" != ""]?${EXT_CID}:${OUTBOUND_CID})})',
             ' same => n,ExecIf($["${OUT_CID}" != ""]?Set(CALLERID(num)=${OUT_CID}))']
@@ -943,40 +942,49 @@ def _call_ext_context(t: TenantNames) -> List[str]:
     ]
 
 
-# Who's calling, for recordings: the extension that started the call, kept
-# on every channel the call creates (__ = inherited). Click to call sets it
-# from C2C (its dialling leg isn't an extension's channel).
-REC_EXT_LINES = [' same => n,ExecIf($["${RECEXT}" = "" & "${PBX_EXT}" != ""]?Set(__RECEXT=${PBX_EXT}))']
+# Who's calling, for recordings: the extension that started the call and
+# its tenant, kept on every channel the call creates (__ = inherited);
+# wherever RECEXT is set, RECTENANT is too. Click to call sets both in its
+# tenant's c2c context (its dialling leg isn't an extension's channel).
+REC_EXT_LINES = [' same => n,ExecIf($["${RECEXT}" = "" & "${PBX_EXT}" != ""]?Set(__RECEXT=${PBX_EXT}))',
+                 ' same => n,ExecIf($["${RECTENANT}" = "" & "${PBX_TENANT}" != ""]?Set(__RECTENANT=${PBX_TENANT}))']
 REC_DIAL = "U(portal-rec)"  # Dial option: runs [portal-rec] on the answering channel
 
 
-def _rec_context(notice: bool) -> List[str]:
+def _rec_context() -> List[str]:
     """Run by Dial (option U) on the channel that answers, before the two
     are connected. An extension answering: recorded if it, or the
     extension calling it, records everything. An outside number answering
     (a call out): recorded if the calling extension records, and then that
-    person hears the notice first. MixMonitor's b: only while connected."""
+    person hears the notice first. MixMonitor's b: only while connected.
+    Shared by every tenant: the call's tenant (the answering extension's,
+    else the caller's) picks the REC_ flags (by login: LOGINPRE_), the
+    folder (RECDIR_) and the notice (RECNOTICE_) from [globals]. A call
+    whose tenant can't be told isn't recorded, never filed as another's."""
     tz = PBX_TIMEZONE
     return ["; ---- Call recording: which answered calls are recorded ----",
             "[portal-rec]",
             "exten => s,1,Set(CALLEE=${PBX_EXT})  ; empty unless an extension answered",
+            ' same => n,Set(RT=${IF($["${CALLEE}" != ""]?${PBX_TENANT}:${RECTENANT})})  ; the call\'s tenant',
+            ' same => n,GotoIf($["${RT}" = ""]?done)',
+            " same => n,Set(RPRE=${LOGINPRE_${RT}})",
             ' same => n,GotoIf($["${CALLEE}" != ""]?toext)',
-            ' same => n,GotoIf($["${RECEXT}" = "" | "${REC_${RECEXT}}" = ""]?done)',
+            ' same => n,GotoIf($["${RECEXT}" = "" | "${REC_${RPRE}${RECEXT}}" = ""]?done)',
             " same => n,Set(RX=${RECEXT})",
             " same => n,Set(RO=${RECTO})",
             " same => n,Set(RD=out)",
-            *([f" same => n,Playback({REC_NOTICE[:-len('.ulaw')]})  ; told before they're connected"] if notice else []),
+            ' same => n,ExecIf($["${RECNOTICE_${RT}}" != ""]?Playback(${RECNOTICE_${RT}}))  ; told before they\'re connected',
             " same => n,Goto(rec)",
-            ' same => n(toext),GotoIf($["${REC_${CALLEE}}${REC_${RECEXT}}" = ""]?done)',
+            ' same => n(toext),GotoIf($["${REC_${RPRE}${CALLEE}}${REC_${RPRE}${RECEXT}}" = ""]?done)',
             " same => n,Set(RX=${CALLEE})",
             " same => n,Set(RO=${CALLERID(num)})",
             # Recorded for the extension calling, not this one: file it under that one.
-            ' same => n,ExecIf($["${REC_${CALLEE}}" = ""]?Set(RX=${RECEXT}))',
-            ' same => n,ExecIf($["${REC_${CALLEE}}" = ""]?Set(RO=${CALLEE}))',
+            ' same => n,ExecIf($["${REC_${RPRE}${CALLEE}}" = ""]?Set(RX=${RECEXT}))',
+            ' same => n,ExecIf($["${REC_${RPRE}${CALLEE}}" = ""]?Set(RO=${CALLEE}))',
             ' same => n,Set(RD=${IF($["${RECEXT}" = ""]?in:int)})',
             " same => n(rec),Set(RO=${FILTER(0-9,${RO})})",
             ' same => n,ExecIf($["${RO}" = ""]?Set(RO=unknown))',
-            f" same => n,MixMonitor({REC_DIR}/${{STRFTIME(${{EPOCH}},{tz},%Y%m%d-%H%M%S)}}_${{RX}}_${{RO:0:20}}_${{RD}}_${{UNIQUEID}}.ulaw,b)",
+            f" same => n,MixMonitor(${{RECDIR_${{RT}}}}/${{STRFTIME(${{EPOCH}},{tz},%Y%m%d-%H%M%S)}}_${{RX}}_${{RO:0:20}}_${{RD}}_${{UNIQUEID}}.ulaw,b)",
             " same => n(done),Return()"]
 
 
@@ -1177,6 +1185,8 @@ def _click_to_call_contexts(t: TenantNames) -> List[str]:
             f"[{t.c2c_dial}]",
             "exten => _2XXX.,1,Set(C2C=${EXTEN:0:3})",
             " same => n,Set(CDR(userfield)=c2c:${C2C})",
+            " same => n,Set(__RECEXT=${C2C})",
+            f" same => n,Set(__RECTENANT={t.code})",
             f" same => n,Set(EXT_CID=${{EXTCID_{pre}${{C2C}}}})",
             f" same => n,Goto({t.dial_from},${{EXTEN:3}},1)"]
 
@@ -1301,6 +1311,17 @@ def build_portal_dialplan(conn) -> str:
     # Extensions whose calls are all recorded (see [portal-rec]).
     out += [f"REC_{names[r['tenant_id']].login(r['ext'])}=1"
             for r in conn.execute("SELECT ext, tenant_id FROM extensions WHERE enabled = 1 AND record = 1 ORDER BY ext")]
+    # Each tenant's, for [portal-rec] (shared): how its logins start (none
+    # for the main tenant's, still the bare extension), where its
+    # recordings go, and its notice, while any of its extensions records
+    # everything.
+    notices = {t.id: os.path.exists(t.notice) and bool(conn.execute(
+        "SELECT 1 FROM extensions WHERE enabled = 1 AND record = 1 AND tenant_id = ?", (t.id,)).fetchone())
+        for t in tenants}
+    for t in tenants:
+        out += [f"LOGINPRE_{t.code}={t.login_prefix}"] if t.login_prefix else []
+        out += [f"RECDIR_{t.code}={t.rec_dir}"]
+        out += [f"RECNOTICE_{t.code}={t.notice[:-len('.ulaw')]}"] if notices[t.id] else []
     # Per tenant from here on: each section once for every tenant, with its
     # own names (TenantNames), reaching only its own extensions.
     for t in tenants:
@@ -1315,12 +1336,8 @@ def build_portal_dialplan(conn) -> str:
         out += [""] + _features_context(t)
     for t in tenants:
         out += [""] + _click_to_call_contexts(t)
-    # The recording notice: played while any of the tenant's extensions records everything.
-    notices = {t.id: os.path.exists(t.notice) and bool(conn.execute(
-        "SELECT 1 FROM extensions WHERE enabled = 1 AND record = 1 AND tenant_id = ?", (t.id,)).fetchone())
-        for t in tenants}
     out += [""] + _weblinks_context(conn, notices)
-    out += [""] + _rec_context(notices[MAIN_TENANT])
+    out += [""] + _rec_context()
     for t in tenants:
         out += _ringgroups_context(conn, t) + _ivr_contexts(conn, t) + _hours_contexts(conn, t)
     for t in tenants:
@@ -1440,8 +1457,28 @@ def apply_to_node(node: str, files: Dict[str, str]) -> Tuple[bool, List[str]]:
     return deliver(files)
 
 
+def _tenant_folders(conn):
+    """Other tenants' recording folders, made by the dashboard (not by
+    Asterisk on the first call) so both can use them: the asterisk group,
+    setgid, as the README sets up the main one. The main tenant's is made
+    by hand (README, "Call recording")."""
+    for t in all_tenant_names(conn):
+        if t.id == MAIN_TENANT or os.path.isdir(t.rec_dir):
+            continue
+        try:
+            os.makedirs(t.rec_dir, exist_ok=True)
+            os.chmod(t.rec_dir, 0o2770)
+            try:
+                os.chown(t.rec_dir, -1, grp.getgrnam("asterisk").gr_gid)
+            except (KeyError, PermissionError):
+                pass  # local dev: no asterisk group; the folder's setgid parent sets it on the VPS
+        except OSError as e:
+            changes_log.info(f"Couldn't make the recordings folder for tenant {t.code}: {e}")
+
+
 def apply_config(conn, reason: str) -> dict:
     """Regenerate the config and apply it to this server's Asterisk."""
+    _tenant_folders(conn)
     ok, messages = apply_to_node("", generate_config(conn))
     _last_apply.update({"at": _now(), "ok": ok, "messages": messages})
     changes_log.info(f"{reason} -> {'applied' if ok else 'NOT applied: ' + '; '.join(messages)}")
@@ -1496,28 +1533,32 @@ def parse_channels(output: str) -> List[dict]:
     return channels
 
 
-def recording_ids() -> set:
+def recording_ids(folder: str = REC_DIR) -> set:
     """Uniqueids with a recording file: a call being recorded has one."""
     try:
-        return {m.group(5) for m in map(REC_NAME_RE.fullmatch, os.listdir(REC_DIR)) if m}
+        return {m.group(5) for m in map(REC_NAME_RE.fullmatch, os.listdir(folder)) if m}
     except OSError:
         return set()
 
 
-def _mark_recording(channels: List[dict]) -> List[dict]:
-    """recording: this channel is being recorded. recordable: an
-    extension's channel in a call, which the Record button can record."""
-    ids = recording_ids() if channels else set()
+def _mark_recording(channels: List[dict], t: TenantNames = MAIN_NAMES) -> List[dict]:
+    """recording: this channel is being recorded (in tenant t's folder).
+    recordable: one of t's extensions in a call, which the Record button
+    can record."""
+    ids = recording_ids(t.rec_dir) if channels else set()
     # A recording is made on one of the call's channels (the one that
     # answered, or the extension's for the button): mark the whole call.
     bridges = {c["bridge"] for c in channels if c["bridge"] and c["uniqueid"] in ids}
     for c in channels:
         c["recording"] = bool(c["uniqueid"]) and (c["uniqueid"] in ids or c["bridge"] in bridges)
-        c["recordable"] = channel_ext(c["channel"]) is not None and c["state"] == "Up"
+        c["recordable"] = channel_ext(c["channel"], t.code) is not None and c["state"] == "Up"
     return channels
 
 
-def get_status() -> dict:
+def get_status(t: TenantNames = MAIN_NAMES) -> dict:
+    """Asterisk's state, with tenant t's phones and t's calls marked as
+    recording or recordable. (Every tenant's calls are listed: phase 2,
+    step 2.10.)"""
     version = asterisk_cli("core show version", timeout=4)
     if version is None:
         return {"asterisk_running": False, "checked_at": _now(), "extensions": {}, "trunks": {},
@@ -1527,9 +1568,9 @@ def get_status() -> dict:
         "asterisk_running": True,
         "version": version.strip().splitlines()[0] if version.strip() else "",
         "checked_at": _now(),
-        "extensions": {endpoint_ext(k): v for k, v in contacts.items() if endpoint_ext(k)},
+        "extensions": {endpoint_ext(k, t.code): v for k, v in contacts.items() if endpoint_ext(k, t.code)},
         "trunks": {k: contacts.get(k, {"status": "Unknown", "rtt_ms": None, "address": None}) for k in TRUNKS},
-        "channels": _mark_recording(parse_channels(asterisk_cli("core show channels concise") or "")),
+        "channels": _mark_recording(parse_channels(asterisk_cli("core show channels concise") or ""), t),
         "last_apply": _last_apply,
     }
 
@@ -1602,7 +1643,9 @@ def _used_as_target(conn, number: str) -> Optional[str]:
 
 @router.get("/status")
 def api_status():
-    return get_status()
+    with get_db() as conn:
+        t = tenant_names(conn, current_tenant())
+    return get_status(t)
 
 
 @router.get("/config")

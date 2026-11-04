@@ -21,8 +21,8 @@ from fastapi.responses import Response
 from pydantic import BaseModel
 
 from ivr import read_ulaw, write_ulaw
-from pbx import (PBX_TIMEZONE, REC_DIR, REC_NAME_RE, REC_NOTICE, _lock, _set_setting, apply_config, asterisk_cli, channel_ext,
-                 changes_log, current_tenant, get_db, get_settings, get_status)
+from pbx import (PBX_TIMEZONE, REC_NAME_RE, TenantNames, _lock, _set_setting, all_tenant_names, apply_config,
+                 asterisk_cli, channel_ext, changes_log, current_tenant, get_db, get_settings, get_status, tenant_names)
 
 router = APIRouter(prefix="/api/pbx")
 
@@ -55,16 +55,23 @@ def _wav(ulaw: bytes) -> bytes:
     return bytes(out)
 
 
-def _ready() -> bool:
-    return os.path.isdir(REC_DIR) and os.access(REC_DIR, os.W_OK | os.X_OK)
+def _ready(folder: str) -> bool:
+    return os.path.isdir(folder) and os.access(folder, os.W_OK | os.X_OK)
+
+
+def _tenant() -> TenantNames:
+    """The current tenant's names: its recordings folder and notice."""
+    with get_db() as conn:
+        return tenant_names(conn, current_tenant())
 
 
 @router.get("/recordings")
 def api_recordings(ext: str = "", q: str = ""):
     q = re.sub(r"\D", "", q)
+    t = _tenant()
     found = []
     try:
-        names = os.listdir(REC_DIR)
+        names = os.listdir(t.rec_dir)
     except OSError:
         names = []
     for name in names:
@@ -72,22 +79,24 @@ def api_recordings(ext: str = "", q: str = ""):
         if not m or (ext and m.group(2) != ext) or (q and q not in m.group(3)):
             continue
         try:
-            size = os.path.getsize(os.path.join(REC_DIR, name))
+            size = os.path.getsize(os.path.join(t.rec_dir, name))
         except OSError:
             continue
         found.append({"name": name, "started": m.group(1), "ext": m.group(2), "other": m.group(3),
                       "direction": m.group(4), "seconds": size // 8000})
     found.sort(key=lambda r: r["started"], reverse=True)
     with get_db() as conn:
-        days = int(get_settings(conn)["rec_days"])
-    return {"recordings": found[:MAX_LISTED], "total": len(found), "ready": _ready(), "dir": REC_DIR,
-            "days": days, "notice": os.path.exists(REC_NOTICE), "timezone": PBX_TIMEZONE}
+        days = int(get_settings(conn, t.id)["rec_days"])
+    return {"recordings": found[:MAX_LISTED], "total": len(found), "ready": _ready(t.rec_dir), "dir": t.rec_dir,
+            "days": days, "notice": os.path.exists(t.notice), "timezone": PBX_TIMEZONE}
 
 
 def _path(name: str) -> str:
+    """A recording of the current tenant's, by name (only ever a file in its
+    own folder: the name can't hold a /)."""
     if not REC_NAME_RE.fullmatch(name):
         raise HTTPException(404, "Recording not found.")
-    return os.path.join(REC_DIR, name)
+    return os.path.join(_tenant().rec_dir, name)
 
 
 @router.get("/recordings/file/{name}")
@@ -122,7 +131,7 @@ def api_recording_settings(req: RecordingSettings):
     if not 1 <= req.days <= 3650:
         raise HTTPException(400, "Keep recordings for 1-3650 days.")
     with _lock, get_db() as conn:
-        _set_setting(conn, "rec_days", str(req.days))
+        _set_setting(conn, "rec_days", str(req.days), tenant=current_tenant())
         conn.commit()
     changes_log.info(f"Recordings are kept for {req.days} days")
     expire_recordings()
@@ -147,7 +156,7 @@ def api_extension_recording(ext: str, req: ExtensionRecording):
 
 def _store_notice(audio: bytes) -> dict:
     with _lock, get_db() as conn:
-        write_ulaw(REC_NOTICE, audio)
+        write_ulaw(tenant_names(conn, current_tenant()).notice, audio)
         return apply_config(conn, f"New recording notice ({len(audio) // 8000}s)")
 
 
@@ -160,7 +169,7 @@ async def api_set_notice(request: Request):
 @router.get("/recordings/notice")
 def api_get_notice():
     try:
-        with open(REC_NOTICE, "rb") as f:
+        with open(_tenant().notice, "rb") as f:
             return Response(f.read(), media_type="application/octet-stream", headers={"Cache-Control": "no-store"})
     except FileNotFoundError:
         raise HTTPException(404, "There's no notice yet.")
@@ -170,7 +179,7 @@ def api_get_notice():
 def api_delete_notice():
     with _lock, get_db() as conn:
         try:
-            os.remove(REC_NOTICE)
+            os.remove(tenant_names(conn, current_tenant()).notice)
         except FileNotFoundError:
             pass
         return apply_config(conn, "Removed the recording notice")
@@ -191,10 +200,11 @@ def _channel_field(info: str, label: str) -> str:
 def api_start_recording(req: StartRecording):
     """Only an extension's channel in a call that's up, as listed right now
     (so the name passed to the CLI is one Asterisk gave us)."""
-    ext = channel_ext(req.channel)
+    t = _tenant()
+    ext = channel_ext(req.channel, t.code)
     if not ext or not re.fullmatch(r"PJSIP/[0-9]{3,7}-[0-9a-f]{8}", req.channel):
         raise HTTPException(400, "Only an extension's call can be recorded.")
-    status = get_status()
+    status = get_status(t)
     chan = next((c for c in status["channels"] if c["channel"] == req.channel), None)
     if not chan or not chan["recordable"]:
         raise HTTPException(409, "That call has ended or isn't connected yet.")
@@ -207,7 +217,7 @@ def api_start_recording(req: StartRecording):
         raise HTTPException(409, "Couldn't read that call from Asterisk. Has it just ended?")
     started = datetime.now(timezone.utc).astimezone(ZoneInfo(PBX_TIMEZONE)).strftime("%Y%m%d-%H%M%S")
     name = f"{started}_{ext}_{other}_req_{uniqueid}.ulaw"
-    out = asterisk_cli(f"mixmonitor start {req.channel} {os.path.join(REC_DIR, name)},b")
+    out = asterisk_cli(f"mixmonitor start {req.channel} {os.path.join(t.rec_dir, name)},b")
     if out is None or "No such" in out or "rror" in out:
         raise HTTPException(500, f"Asterisk didn't start recording: {(out or 'not reachable').strip()[:200]}")
     changes_log.info(f"Started recording {req.channel} on request: {name}")
@@ -217,27 +227,32 @@ def api_start_recording(req: StartRecording):
 # ---- Keeping only what the settings say
 
 def expire_recordings(now: Optional[float] = None) -> int:
+    """Every tenant's folder, by that tenant's own retention. Only files
+    directly in each folder (the main tenant's holds the others' folders)."""
     with get_db() as conn:
-        days = int(get_settings(conn)["rec_days"])
-    cutoff = (now or time.time()) - days * 86400
-    removed = 0  # a call still being recorded was written to just now, so it's never old enough
-    try:
-        names = os.listdir(REC_DIR)
-    except OSError:
-        return 0
-    for name in names:
-        if not REC_NAME_RE.fullmatch(name):
-            continue
-        path = os.path.join(REC_DIR, name)
+        tenants = [(t, int(get_settings(conn, t.id)["rec_days"])) for t in all_tenant_names(conn)]
+    total = 0
+    for t, days in tenants:
+        cutoff = (now or time.time()) - days * 86400
+        removed = 0  # a call still being recorded was written to just now, so it's never old enough
         try:
-            if os.path.getmtime(path) < cutoff:
-                os.remove(path)
-                removed += 1
+            names = os.listdir(t.rec_dir)
         except OSError:
-            pass
-    if removed:
-        changes_log.info(f"Deleted {removed} recording(s) older than {days} days")
-    return removed
+            continue
+        for name in names:
+            if not REC_NAME_RE.fullmatch(name):
+                continue
+            path = os.path.join(t.rec_dir, name)
+            try:
+                if os.path.getmtime(path) < cutoff:
+                    os.remove(path)
+                    removed += 1
+            except OSError:
+                pass
+        if removed:
+            changes_log.info(f"Deleted {removed} recording(s) of tenant {t.code} older than {days} days")
+        total += removed
+    return total
 
 
 async def recordings_expiry_loop():
