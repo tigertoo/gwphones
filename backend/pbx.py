@@ -849,7 +849,7 @@ def _route_check(kind: str) -> List[str]:
     out = [" same => n,Set(CURLOPT(conntimeout)=1)",
            " same => n,Set(CURLOPT(httptimeout)=2)",
            " same => n,Set(CURLOPT(httpheader)=X-LCR-Token: ${LCR_TOKEN})",
-           f" same => n,Set(LCR=${{CURL({LCR_URL}?kind={kind}&num=${{ARG2}})}})",
+           f" same => n,Set(LCR=${{CURL({LCR_URL}?kind={kind}&num=${{ARG2}}&tenant=${{OT}})}})",
            ' same => n,GotoIf($["${LCR:0:7}" = "REFUSE:"]?refused)',
            ' same => n,GotoIf($["${LCR:0:3}" != "OK:"]?nocheck)',
            " same => n,Set(ROUTES=${LCR:3})"]
@@ -1374,7 +1374,10 @@ def build_portal_dialplan(conn) -> str:
     for t in tenants:
         if t.id != MAIN_TENANT:
             ts = get_settings(conn, t.id)
-            out += [f"MAXCALLS_{t.code}={ts['max_outbound']}"]  # calls in and out together
+            # Calls in and out together; a suspended tenant's 0: none out, every
+            # call in to its main mailbox (112/999 don't pass the limit).
+            suspended = conn.execute("SELECT status FROM tenants WHERE id = ?", (t.id,)).fetchone()["status"] != "active"
+            out += [f"MAXCALLS_{t.code}={0 if suspended else ts['max_outbound']}"]
             out += [f"OUTBOUND_CID_{t.code}={ts['outbound_cid']}"] if ts["outbound_cid"] else []
         out += [f"LOGINPRE_{t.code}={t.login_prefix}"] if t.login_prefix else []
         out += [f"RECDIR_{t.code}={t.rec_dir}"]
@@ -1744,6 +1747,94 @@ def api_status():
     return get_status(t)
 
 
+# ---------------------------------------------------------------------------
+# Tenants (multi-tenant phase 2). Created and run from this dashboard; the
+# switcher's cookie picks which one every Phone System page works on
+# (main.py, _as_tenant).
+# ---------------------------------------------------------------------------
+
+TENANT_CODE_FIRST = 1002  # 1001 is the main tenant
+HOST_RE = re.compile(r"^(?=.{1,253}$)([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$")
+
+
+def _tenant_json(r) -> dict:
+    return {"id": r["id"], "code": r["code"], "name": r["name"], "status": r["status"], "sip_host": r["sip_host"],
+            "main": r["id"] == MAIN_TENANT}
+
+
+class TenantCreate(BaseModel):
+    name: str
+    outbound_cid: str  # required: what its calls show (and 112/999 without an extension's own)
+    max_calls: int = 4  # calls in and out together
+    sip_host: str = ""
+
+
+class TenantUpdate(BaseModel):
+    name: str
+    status: str = "active"  # or suspended
+    sip_host: str = ""
+
+
+def _clean_host(value: str) -> str:
+    host = (value or "").strip().lower()
+    if host and not HOST_RE.match(host):
+        raise HTTPException(400, "The SIP hostname must look like acme.sip.example.ie.")
+    return host
+
+
+@router.get("/tenants")
+def api_tenants():
+    with get_db() as conn:
+        counts = {r["tenant_id"]: r["n"] for r in conn.execute(
+            "SELECT tenant_id, COUNT(*) AS n FROM extensions GROUP BY tenant_id")}
+        return {"tenants": [{**_tenant_json(r), "extensions": counts.get(r["id"], 0),
+                             "settings": {k: get_settings(conn, r["id"])[k] for k in ("outbound_cid", "max_outbound")}}
+                            for r in conn.execute("SELECT * FROM tenants ORDER BY id")]}
+
+
+@router.post("/tenants")
+def api_create_tenant(req: TenantCreate):
+    """A new tenant: the next code (never one used before, even by a tenant
+    since removed: its AstDB keys, recordings and call records carry it),
+    with its caller ID and call limit."""
+    name = _clean_name(req.name)
+    cid = req.outbound_cid.strip().replace(" ", "")
+    if not CID_RE.match(cid):
+        raise HTTPException(400, "Give the tenant's caller ID, e.g. +35312345678: its calls show it.")
+    if not 1 <= req.max_calls <= 30:
+        raise HTTPException(400, "Calls at once (in and out) must be 1-30.")
+    host = _clean_host(req.sip_host)
+    with _lock, get_db() as conn:
+        used = max([int(r["code"]) for r in conn.execute("SELECT code FROM tenants")] + [TENANT_CODE_FIRST - 1])
+        code = max(int(get_settings(conn).get("tenant_code_next") or TENANT_CODE_FIRST), used + 1)
+        if code > 9999:
+            raise HTTPException(409, "No tenant codes left.")
+        tid = conn.execute("INSERT INTO tenants (code, name, sip_host, created_at) VALUES (?, ?, ?, ?)",
+                           (str(code), name, host, _now())).lastrowid
+        _set_setting(conn, "tenant_code_next", str(code + 1))
+        _set_setting(conn, "outbound_cid", cid, tenant=tid)
+        _set_setting(conn, "max_outbound", str(req.max_calls), tenant=tid)
+        conn.commit()
+        result = apply_config(conn, f"Created tenant {code} ({name}): caller ID {cid}, {req.max_calls} calls at once")
+    return {"id": tid, "code": str(code), **result}
+
+
+@router.put("/tenants/{tenant_id}")
+def api_update_tenant(tenant_id: int, req: TenantUpdate):
+    name = _clean_name(req.name)
+    if req.status not in ("active", "suspended"):
+        raise HTTPException(400, "A tenant is active or suspended.")
+    if tenant_id == MAIN_TENANT and req.status != "active":
+        raise HTTPException(400, "The main tenant can't be suspended.")
+    host = _clean_host(req.sip_host)
+    with _lock, get_db() as conn:
+        if conn.execute("UPDATE tenants SET name = ?, status = ?, sip_host = ? WHERE id = ?",
+                        (name, req.status, host, tenant_id)).rowcount == 0:
+            raise HTTPException(404, "Tenant not found.")
+        conn.commit()
+        return apply_config(conn, f"Tenant {tenant_id}: {name}, {req.status}, host {host or 'none'}")
+
+
 @router.get("/config")
 def api_config():
     tid = current_tenant()
@@ -1771,10 +1862,13 @@ def api_config():
                                 "open_now": hours_open_now(r)}
                                for r in conn.execute("SELECT * FROM business_hours WHERE tenant_id = ? ORDER BY number",
                                                      (tid,))],
+            "tenant": _tenant_json(conn.execute("SELECT * FROM tenants WHERE id = ?", (tid,)).fetchone()),
+            "tenants": [_tenant_json(r) for r in conn.execute("SELECT * FROM tenants ORDER BY id")],
             "timezone": PBX_TIMEZONE,
             "settings": {
                 "outbound_cid": s["outbound_cid"],
                 "max_outbound": int(s["max_outbound"]),
+                "main_mailbox": s["main_mailbox"],
                 "voxbeam_prefix": s["voxbeam_prefix"],
                 "trunk_order": [t for t in s["trunk_order"].split(",") if t in TRUNKS],
                 "trunks_enabled": {t: s.get(f"trunk_{t}_enabled") == "1" for t in TRUNKS},

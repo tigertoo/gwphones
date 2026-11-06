@@ -1,6 +1,7 @@
 import React, { useCallback, useEffect, useRef, useState } from "react";
 import { CustomersAndNumbers, MonthlySummary, Statements } from "./BillingCustomers";
 import SaveToast, { busyText } from "./SaveToast";
+import { tenantHeaders } from "./pbxTenant";
 
 const BUSY_LABELS = [
   [/^\/statements$/, "Issuing statements…"],
@@ -37,6 +38,7 @@ function sendFile(url, file, onProgress) {
     const xhr = new XMLHttpRequest();
     xhr.open("POST", url);
     xhr.setRequestHeader("Content-Type", "application/octet-stream");
+    Object.entries(tenantHeaders()).forEach(([k, v]) => xhr.setRequestHeader(k, v));
     xhr.upload.onprogress = (e) => { if (e.lengthComputable) onProgress(Math.round((e.loaded / e.total) * 100)); };
     xhr.upload.onload = () => onProgress(null);
     xhr.onload = () => {
@@ -80,7 +82,7 @@ export default function BillingPanel({ apiBase }) {
   const api = useCallback(async (method, path, body) => {
     const res = await fetch(`${apiBase}/api/billing${path}`, {
       method,
-      headers: body ? { "Content-Type": "application/json" } : undefined,
+      headers: { ...(body ? { "Content-Type": "application/json" } : {}), ...tenantHeaders() },
       body: body ? JSON.stringify(body) : undefined,
     });
     const data = await res.json().catch(() => ({}));

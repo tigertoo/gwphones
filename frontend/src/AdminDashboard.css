@@ -854,6 +854,15 @@
   background: rgba(79, 209, 165, 0.08);
 }
 
+.pbx-tenant-bar { margin-bottom: 10px; }
+/* Working on a tenant other than the main one, and a suspended tenant: notices, not "off". */
+.pbx-tenant-flag {
+  font-size: 12px;
+  padding: 2px 10px;
+  border-radius: 999px;
+  border: 1px solid var(--warn);
+  color: var(--warn);
+}
 .pbx-chip-off {
   background: none;
   color: var(--muted);
