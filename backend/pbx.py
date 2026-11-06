@@ -195,7 +195,8 @@ TENANT_TABLES = ("extensions", "ring_groups", "inbound_routes", "provision_token
 
 # Settings each tenant has its own of (tenant_settings); everything else in
 # settings (trunks, routes, video, the default inbound route) is the server's.
-TENANT_SETTINGS = ("outbound_cid", "max_outbound", "rec_days", "cap_default", *[f"cap_{t}" for t in NUMBER_TYPES])
+TENANT_SETTINGS = ("outbound_cid", "max_outbound", "rec_days", "cap_default", *[f"cap_{t}" for t in NUMBER_TYPES],
+                   "main_mailbox")
 
 
 C2C_RING = "portal-c2c-ring"
@@ -324,6 +325,9 @@ DEFAULT_SETTINGS = {
     "trunk_irishvoip_enabled": "1",
     "trunk_voxbeam_enabled": "1",
     "inbound_default": "201",
+    # Takes incoming calls over a tenant's limit (not the main tenant's: its
+    # limit counts outbound calls only). Empty = its lowest extension.
+    "main_mailbox": "",
     "rec_days": "90",  # recordings older than this are deleted
     "route_mobile": "irishvoip",
     "route_landline": "default",
@@ -529,8 +533,11 @@ def get_settings(conn, tenant: int = MAIN_TENANT) -> Dict[str, str]:
     return s
 
 
-def _set_setting(conn, key: str, value: str, tenant: int = MAIN_TENANT):
+def _set_setting(conn, key: str, value: str, tenant: Optional[int] = None):
+    """A tenant's own setting (TENANT_SETTINGS) is the current tenant's
+    unless tenant says whose; anything else is the server's."""
     if key in TENANT_SETTINGS:
+        tenant = current_tenant() if tenant is None else tenant
         conn.execute("INSERT INTO tenant_settings (tenant_id, key, value) VALUES (?, ?, ?) "
                      "ON CONFLICT(tenant_id, key) DO UPDATE SET value = excluded.value", (tenant, key, str(value)))
     else:
@@ -859,11 +866,22 @@ def _route_check(kind: str) -> List[str]:
 
 
 def _outbound_block(s: Dict[str, str], exten: str, trunks: List[str], refused: bool = False) -> List[str]:
-    out = [f"exten => {exten},1,Set(GROUP(outbound)=calls)",
+    # The caller's tenant is its account code (as billing reads it): none
+    # for the main tenant, whose limit counts its calls out only, as it
+    # always has; any other tenant's calls in and out count together.
+    # An account code that's no tenant's has no MAXCALLS_: its limit reads
+    # as 0, so the call is refused, never let through uncounted.
+    out = [f"exten => {exten},1,Set(OT=${{CHANNEL(accountcode)}})  ; the caller's tenant: empty for the main tenant",
+           ' same => n,GotoIf($["${OT}" != ""]?tenant)',
+           " same => n,Set(GROUP(outbound)=calls)",
            " same => n,GotoIf($[${GROUP_COUNT(calls@outbound)} > ${MAX_OUTBOUND}]?busy)",
+           " same => n,Goto(counted)",
+           " same => n(tenant),Set(GROUP(tenantcalls)=${OT})",
+           " same => n,GotoIf($[${GROUP_COUNT(${OT}@tenantcalls)} > 0${MAXCALLS_${OT}}]?busy)",
+           " same => n(counted),NoOp()",
            *REC_EXT_LINES,
            " same => n,Set(__RECTO=${ARG1})"]
-    out += [' same => n,Set(OUT_CID=${IF($["${EXT_CID}" != ""]?${EXT_CID}:${OUTBOUND_CID})})',
+    out += [' same => n,Set(OUT_CID=${IF($["${EXT_CID}" != ""]?${EXT_CID}:${IF($["${OT}" = ""]?${OUTBOUND_CID}:${OUTBOUND_CID_${OT}})})})',
             ' same => n,ExecIf($["${OUT_CID}" != ""]?Set(CALLERID(num)=${OUT_CID}))']
     if exten in NUMBER_TYPES and not refused:
         out += _route_check(exten)
@@ -1262,6 +1280,29 @@ def _internal_context(t: TenantNames, outbound_cid: str) -> List[str]:
     return out
 
 
+def _count_inbound(t: TenantNames) -> List[str]:
+    """An incoming call counts towards the tenant's limit (calls in and out
+    together); one over it goes to the tenant's main mailbox. Not for the
+    main tenant, whose limit counts its calls out only."""
+    if t.id == MAIN_TENANT:
+        return []
+    return [f" same => n,Set(GROUP(tenantcalls)={t.code})",
+            f" same => n,ExecIf($[${{GROUP_COUNT({t.code}@tenantcalls)}} > ${{MAXCALLS_{t.code}}}]?Goto({t.prefix}-full,s,1))"]
+
+
+def _full_context(conn, t: TenantNames) -> List[str]:
+    """Where an incoming call over the tenant's limit goes: its main mailbox
+    (the setting, else its lowest switched-on extension), else busy."""
+    active = destinations(conn, t.id)["active"]
+    box = get_settings(conn, t.id)["main_mailbox"]
+    box = box if box in active else (min(active) if active else "")
+    return [f"; ---- Tenant {t.code}: incoming calls over its limit ----",
+            f"[{t.prefix}-full]",
+            "exten => s,1,Answer()",
+            (f" same => n,VoiceMail({box}@{t.vm},u)" if box else " same => n,Busy(5)"),
+            " same => n,Hangup()"]
+
+
 def _ringgroups_context(conn, t: TenantNames) -> List[str]:
     """The tenant's ring groups, and its IVR menus and schedules by number
     (so phones and inbound routes dial them like a group)."""
@@ -1331,6 +1372,10 @@ def build_portal_dialplan(conn) -> str:
         "SELECT 1 FROM extensions WHERE enabled = 1 AND record = 1 AND tenant_id = ?", (t.id,)).fetchone())
         for t in tenants}
     for t in tenants:
+        if t.id != MAIN_TENANT:
+            ts = get_settings(conn, t.id)
+            out += [f"MAXCALLS_{t.code}={ts['max_outbound']}"]  # calls in and out together
+            out += [f"OUTBOUND_CID_{t.code}={ts['outbound_cid']}"] if ts["outbound_cid"] else []
         out += [f"LOGINPRE_{t.code}={t.login_prefix}"] if t.login_prefix else []
         out += [f"RECDIR_{t.code}={t.rec_dir}"]
         out += [f"RECNOTICE_{t.code}={t.notice[:-len('.ulaw')]}"] if notices[t.id] else []
@@ -1354,6 +1399,8 @@ def build_portal_dialplan(conn) -> str:
         out += _ringgroups_context(conn, t) + _ivr_contexts(conn, t) + _hours_contexts(conn, t)
     for t in tenants:
         out += [""] + _internal_context(t, get_settings(conn, t.id)["outbound_cid"])
+        if t.id != MAIN_TENANT:
+            out += [""] + _full_context(conn, t)
     out += [""] + OUTBOUND_PATTERNS
 
     enabled = [t for t in s["trunk_order"].split(",") if t in TRUNKS and s.get(f"trunk_{t}_enabled") == "1"]
@@ -1379,8 +1426,8 @@ def build_portal_dialplan(conn) -> str:
         tid = r["tenant_id"]
         goto = (f"Goto(from-internal,{r['target']},1)" if tid == MAIN_TENANT
                 else target_goto(r["target"], destinations(conn, tid), names[tid]) or "Hangup()")
-        out += [f"exten => {r['did']},1,NoOp(Inbound {r['did']})", *names[tid].accountcode(), *told[tid],
-                f" same => n,{goto}"]
+        out += [f"exten => {r['did']},1,NoOp(Inbound {r['did']})", *names[tid].accountcode(),
+                *_count_inbound(names[tid]), *told[tid], f" same => n,{goto}"]
     default = s["inbound_default"]  # numbers not listed are the main tenant's
     for x in ("_X.", "s"):
         out += [f"exten => {x},1,NoOp(Inbound)", *told[MAIN_TENANT], f" same => n,Goto(from-internal,{default},1)"]
@@ -2354,6 +2401,7 @@ class SettingsRequest(BaseModel):
     caps: Optional[Dict[str, str]] = None  # "default" or a number type -> € per minute ("" = the default)
     lcr_allow: Optional[Dict[str, bool]] = None  # route key (irishvoip, voxbeam0011103...) -> usable for cheapest
     video: Optional[bool] = None  # None = unchanged
+    main_mailbox: Optional[str] = None  # None = unchanged; "" = the lowest extension
 
 
 def _cap(value: str, what: str) -> str:
@@ -2395,7 +2443,13 @@ def api_update_settings(req: SettingsRequest):
     if set(allow) - known:
         raise HTTPException(400, "Unknown route.")
     with _lock, get_db() as conn:
-        default = _valid_target(conn, req.inbound_default)
+        # Numbers not listed anywhere are the main tenant's, whoever saves.
+        default = check_target(conn, req.inbound_default, tenant=MAIN_TENANT)
+        if req.main_mailbox is not None:
+            box = req.main_mailbox.strip()
+            if box and box not in destinations(conn)["exts"]:
+                raise HTTPException(400, f"There's no extension {box} for the main mailbox.")
+            _set_setting(conn, "main_mailbox", box)
         _set_setting(conn, "outbound_cid", cid)
         _set_setting(conn, "max_outbound", req.max_outbound)
         _set_setting(conn, "voxbeam_prefix", req.voxbeam_prefix)
