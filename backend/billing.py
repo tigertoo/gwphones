@@ -47,7 +47,8 @@ from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import Response
 from pydantic import BaseModel
 
-from pbx import EMAIL_RE, TRUNKS, VOXBEAM_ROUTES, changes_log, channel_ext, normalize_did
+from pbx import (EMAIL_RE, MAIN_TENANT, MAIN_TENANT_CODE, TRUNKS, VOXBEAM_ROUTES, changes_log, channel_ext,
+                 current_tenant, normalize_did)
 from pbx import get_db as get_pbx_db
 
 BILLING_DB = os.environ.get("PBX_BILLING_DB", "/var/lib/admin-dashboard/billing.db")
@@ -131,6 +132,7 @@ def get_db() -> sqlite3.Connection:
             conn.execute(f"ALTER TABLE {column}")
         except sqlite3.OperationalError:
             pass  # already there
+    _key_customer_exts(conn)
     if fresh:
         os.chmod(BILLING_DB, 0o600)
     if not _state(conn, "failed_status"):
@@ -142,6 +144,37 @@ def get_db() -> sqlite3.Connection:
         _set_state(conn, "failed_status", "1")
         conn.commit()
     return conn
+
+
+CUSTOMER_EXTS = """(ext TEXT NOT NULL, customer_id INTEGER NOT NULL, tenant_id INTEGER NOT NULL DEFAULT 1,
+    PRIMARY KEY (tenant_id, ext))"""
+
+
+def _key_customer_exts(conn):
+    """One-off (multi-tenant phase 2): an extension's customer is keyed by
+    tenant + extension, so two tenants' 201s can belong to different
+    customers. One transaction; a plain read decides first (no lock after)."""
+    def keyed():
+        pk = sorted((r["pk"], r["name"]) for r in conn.execute("PRAGMA table_info(customer_exts)") if r["pk"])
+        return [n for _, n in pk] == ["tenant_id", "ext"]
+    if keyed():
+        return
+    conn.execute("BEGIN IMMEDIATE")
+    try:
+        if not keyed():
+            names = ", ".join(r["name"] for r in conn.execute("PRAGMA table_info(customer_exts)"))
+            before = conn.execute("SELECT COUNT(*) FROM customer_exts").fetchone()[0]
+            conn.execute(f"CREATE TABLE customer_exts_by_tenant {CUSTOMER_EXTS}")
+            conn.execute(f"INSERT INTO customer_exts_by_tenant ({names}) SELECT {names} FROM customer_exts")
+            if conn.execute("SELECT COUNT(*) FROM customer_exts_by_tenant").fetchone()[0] != before:
+                raise RuntimeError("customer_exts: rows went missing while re-keying")
+            conn.execute("DROP TABLE customer_exts")
+            conn.execute("ALTER TABLE customer_exts_by_tenant RENAME TO customer_exts")
+            changes_log.info(f"Billing: customer extensions keyed by tenant ({before})")
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
 
 
 def _state(conn, key, default=""):
@@ -218,9 +251,22 @@ def normalise_number(trunk: str, sent: str):
     return digits or None, route, None
 
 
-def classify(row: dict) -> dict:
-    """The call as billing sees it, from one CDR row."""
+def tenant_ids() -> Dict[str, int]:
+    """Tenant code -> id, from pbx.db."""
+    with get_pbx_db() as pconn:
+        return {r["code"]: r["id"] for r in pconn.execute("SELECT id, code FROM tenants")}
+
+
+UNKNOWN_TENANT = 0  # an account code that's no tenant's: its calls belong to no customer
+
+
+def classify(row: dict, tenants: Optional[Dict[str, int]] = None) -> dict:
+    """The call as billing sees it, from one CDR row. Its tenant is the
+    CDR's account code (set for every tenant but the main one, whose calls
+    have always had none)."""
     channel, dstchannel = row["channel"], row["dstchannel"]
+    code = (row.get("accountcode") or "").strip() or MAIN_TENANT_CODE
+    tenant = (tenants or {MAIN_TENANT_CODE: MAIN_TENANT}).get(code, UNKNOWN_TENANT)
     trunk_out = TRUNK_CHANNEL.match(dstchannel or "")
     trunk_in = TRUNK_CHANNEL.match(channel or "")
     call = {
@@ -229,7 +275,7 @@ def classify(row: dict) -> dict:
         "duration": int(row["duration"] or 0), "billsec": int(row["billsec"] or 0),
         "disposition": row["disposition"], "dialled": row["dst"], "caller": row["clid"] or row["src"],
         "channel": channel, "lastdata": row["lastdata"],
-        "ext": channel_ext(channel), "trunk": None, "route": "", "number": None,
+        "ext": channel_ext(channel, code), "trunk": None, "route": "", "number": None, "tenant_id": tenant,
     }
     if trunk_out:
         call["direction"] = "out"
@@ -251,7 +297,7 @@ def classify(row: dict) -> dict:
     elif trunk_in:
         call["direction"], call["trunk"] = "in", trunk_in.group(1)
         call["number"] = (row["dst"] or "").lstrip("+")
-        call["ext"] = channel_ext(dstchannel)
+        call["ext"] = channel_ext(dstchannel, code)
     else:
         call["direction"] = "internal"
     if call.get("status") != "free":
@@ -291,10 +337,11 @@ def import_cdr() -> int:
             f.seek(offset)
             data = f.read()
         complete = data[:data.rfind(b"\n") + 1]  # a half-written last line waits for next time
+        tenants = tenant_ids()
         for row in csv.reader(io.StringIO(complete.decode("utf-8", "replace"))):
             if len(row) < len(CDR_FIELDS):
                 continue
-            call = classify(dict(zip(CDR_FIELDS, row)))
+            call = classify(dict(zip(CDR_FIELDS, row)), tenants)
             if not call["start_utc"]:
                 continue
             cols = list(call)
@@ -996,13 +1043,25 @@ def _clean_customer(conn, req: CustomerRequest, customer_id: Optional[int] = Non
     if email and not EMAIL_RE.match(email):
         raise HTTPException(400, "That doesn't look like an email address.")
     exts = sorted(set(e.strip() for e in req.exts if e.strip()))
+    tenant = _customer_tenant(conn, customer_id)
     for e in exts:
         taken = conn.execute("SELECT c.name FROM customer_exts x JOIN customers c ON c.id = x.customer_id "
-                             "WHERE x.ext = ? AND x.customer_id != ?", (e, customer_id or 0)).fetchone()
+                             "WHERE x.ext = ? AND x.tenant_id = ? AND x.customer_id != ?",
+                             (e, tenant, customer_id or 0)).fetchone()
         if taken:
             raise HTTPException(409, f"Extension {e} already belongs to {taken['name']}.")
     return {"name": name, "email": email, "markup_pct": _pct(req.markup_pct, "Markup"),
-            "notes": req.notes.strip()[:500], "exts": exts}
+            "notes": req.notes.strip()[:500], "exts": exts, "tenant_id": tenant}
+
+
+def _customer_tenant(conn, customer_id: Optional[int]) -> int:
+    """A customer's tenant: an existing one keeps its own, a new one is the
+    current tenant's (one bill per tenant)."""
+    if customer_id:
+        r = conn.execute("SELECT tenant_id FROM customers WHERE id = ?", (customer_id,)).fetchone()
+        if r:
+            return r["tenant_id"]
+    return current_tenant()
 
 
 @router.get("/customers")
@@ -1020,9 +1079,12 @@ def api_customers():
                      "monthly_price": from_micro(d["monthly_price_micro"], 2)}
                     for d in conn.execute("SELECT * FROM ddis ORDER BY did")]
         markup = str(default_markup(conn))
+    tid = current_tenant()
     with get_pbx_db() as pconn:
-        extensions = [{"ext": r["ext"], "name": r["name"]} for r in pconn.execute("SELECT ext, name FROM extensions ORDER BY ext")]
-        inbound = [{"did": r["did"], "label": r["label"]} for r in pconn.execute("SELECT did, label FROM inbound_routes ORDER BY did")]
+        extensions = [{"ext": r["ext"], "name": r["name"]} for r in pconn.execute(
+            "SELECT ext, name FROM extensions WHERE tenant_id = ? ORDER BY ext", (tid,))]
+        inbound = [{"did": r["did"], "label": r["label"]} for r in pconn.execute(
+            "SELECT did, label FROM inbound_routes WHERE tenant_id = ? ORDER BY did", (tid,))]
     return {"customers": customers, "ddis": ddi_rows, "default_markup_pct": markup,
             "extensions": extensions, "inbound_numbers": inbound}
 
@@ -1031,10 +1093,11 @@ def api_customers():
 def api_create_customer(req: CustomerRequest):
     with _lock, get_db() as conn:
         c = _clean_customer(conn, req)
-        cur = conn.execute("INSERT INTO customers (name, email, markup_pct, notes, created_at) VALUES (?, ?, ?, ?, ?)",
-                           (c["name"], c["email"], c["markup_pct"], c["notes"], _now()))
-        conn.executemany("INSERT INTO customer_exts (ext, customer_id) VALUES (?, ?)",
-                         [(e, cur.lastrowid) for e in c["exts"]])
+        cur = conn.execute("INSERT INTO customers (name, email, markup_pct, notes, created_at, tenant_id) "
+                           "VALUES (?, ?, ?, ?, ?, ?)",
+                           (c["name"], c["email"], c["markup_pct"], c["notes"], _now(), c["tenant_id"]))
+        conn.executemany("INSERT INTO customer_exts (ext, customer_id, tenant_id) VALUES (?, ?, ?)",
+                         [(e, cur.lastrowid, c["tenant_id"]) for e in c["exts"]])
         conn.commit()
     changes_log.info(f"Billing: added customer {c['name']} with extensions {c['exts']}, markup {c['markup_pct'] or 'default'}")
     return {"ok": True, "id": cur.lastrowid, "messages": [f"{c['name']} added."]}
@@ -1049,8 +1112,8 @@ def api_update_customer(customer_id: int, req: CustomerRequest):
         conn.execute("UPDATE customers SET name = ?, email = ?, markup_pct = ?, notes = ? WHERE id = ?",
                      (c["name"], c["email"], c["markup_pct"], c["notes"], customer_id))
         conn.execute("DELETE FROM customer_exts WHERE customer_id = ?", (customer_id,))
-        conn.executemany("INSERT INTO customer_exts (ext, customer_id) VALUES (?, ?)",
-                         [(e, customer_id) for e in c["exts"]])
+        conn.executemany("INSERT INTO customer_exts (ext, customer_id, tenant_id) VALUES (?, ?, ?)",
+                         [(e, customer_id, c["tenant_id"]) for e in c["exts"]])
         conn.commit()
     changes_log.info(f"Billing: updated customer {customer_id} ({c['name']}): extensions {c['exts']}, "
                      f"markup {c['markup_pct'] or 'default'}")
@@ -1146,7 +1209,7 @@ def month_statement(conn, month: str, customer_id: Optional[int] = None, only: b
     start, end = _month_range(month)
     markup0 = default_markup(conn)
     customers = {c["id"]: dict(c) for c in conn.execute("SELECT * FROM customers")}
-    owner = {r["ext"]: r["customer_id"] for r in conn.execute("SELECT * FROM customer_exts")}
+    owner = {(r["tenant_id"], r["ext"]): r["customer_id"] for r in conn.execute("SELECT * FROM customer_exts")}
     out = {}
 
     def entry(cid):
@@ -1160,7 +1223,7 @@ def month_statement(conn, month: str, customer_id: Optional[int] = None, only: b
 
     for c in conn.execute("SELECT * FROM calls WHERE direction = 'out' AND start_utc >= ? AND start_utc < ? "
                           "AND status NOT IN ('free', 'failed') ORDER BY start_utc", (start, end)):
-        e = entry(owner.get(c["ext"]))
+        e = entry(owner.get((c["tenant_id"], c["ext"])))
         e["counts"][c["status"]] += 1
         line = _call_json(c)
         if c["statement_id"] is not None and c["price_micro"] is not None:

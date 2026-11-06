@@ -240,6 +240,12 @@ class TenantNames:
     def login(self, ext: str) -> str:
         return f"{self.login_prefix}{ext}"
 
+    def accountcode(self) -> List[str]:
+        """Dialplan lines marking a call as this tenant's for billing (CDR
+        accountcode). None for the main tenant: its calls have always had
+        an empty account code, which billing reads as the main tenant's."""
+        return [] if self.id == MAIN_TENANT else [f" same => n,Set(CHANNEL(accountcode)={self.code})"]
+
     def ivr(self, number: str) -> str:
         return f"{self.prefix}-ivr-{number}"
 
@@ -811,6 +817,7 @@ def build_extensions_conf(conn) -> str:
                 f"set_var=PBX_TENANT={t.code}"]
         if t.id != MAIN_TENANT:
             out.append(f"context={t.internal}")  # the main tenant's come from the endpoint-ext template
+            out.append(f"accountcode={t.code}")  # its calls' CDRs, for billing (the main tenant's: empty)
         if video:
             out.append(f"allow={VIDEO_CODECS}")  # added to the template's audio codecs
         if r["outbound_cid"]:
@@ -1054,6 +1061,7 @@ def _weblinks_context(conn, notices: Dict[int, bool]) -> List[str]:
                 " same => n,Set(WNAME=${FILTER(A-Za-z0-9 ._,${CALLERID(name)})})",
                 f" same => n,Set(CALLERID(name)=Web ${{WNAME:0:24}} ({label}))",
                 " same => n,Set(CALLERID(num)=web)",
+                *t.accountcode(),
                 *([f" same => n,Playback({t.notice[:-len('.ulaw')]})  ; calls may be recorded"] if notices[t.id] else []),
                 f" same => n,{target}",
                 " same => n(busy),Congestion(5)",
@@ -1188,6 +1196,7 @@ def _click_to_call_contexts(t: TenantNames) -> List[str]:
             f"[{t.c2c_dial}]",
             "exten => _2XXX.,1,Set(C2C=${EXTEN:0:3})",
             " same => n,Set(CDR(userfield)=c2c:${C2C})",
+            *t.accountcode(),
             " same => n,Set(__RECEXT=${C2C})",
             f" same => n,Set(__RECTENANT={t.code})",
             f" same => n,Set(EXT_CID=${{EXTCID_{pre}${{C2C}}}})",
@@ -1370,7 +1379,8 @@ def build_portal_dialplan(conn) -> str:
         tid = r["tenant_id"]
         goto = (f"Goto(from-internal,{r['target']},1)" if tid == MAIN_TENANT
                 else target_goto(r["target"], destinations(conn, tid), names[tid]) or "Hangup()")
-        out += [f"exten => {r['did']},1,NoOp(Inbound {r['did']})", *told[tid], f" same => n,{goto}"]
+        out += [f"exten => {r['did']},1,NoOp(Inbound {r['did']})", *names[tid].accountcode(), *told[tid],
+                f" same => n,{goto}"]
     default = s["inbound_default"]  # numbers not listed are the main tenant's
     for x in ("_X.", "s"):
         out += [f"exten => {x},1,NoOp(Inbound)", *told[MAIN_TENANT], f" same => n,Goto(from-internal,{default},1)"]
