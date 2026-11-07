@@ -1558,21 +1558,26 @@ def apply_to_node(node: str, files: Dict[str, str]) -> Tuple[bool, List[str]]:
 
 def _tenant_folders(conn):
     """Other tenants' recording folders, made by the dashboard (not by
-    Asterisk on the first call) so both can use them: the asterisk group,
-    setgid, as the README sets up the main one. The main tenant's is made
-    by hand (README, "Call recording")."""
+    Asterisk on the first call) so both can use them: 2770, group
+    asterisk, as the README sets up the main one. The main tenant's is
+    made by hand (README, "Call recording")."""
     for t in all_tenant_names(conn):
         if t.id == MAIN_TENANT or os.path.isdir(t.rec_dir):
             continue
+        # Made as 770, not chmod-ed to it afterwards: the service runs with
+        # RestrictSUIDSGID, which refuses any chmod carrying the setgid bit.
+        # The main folder's setgid passes it (and the asterisk group) on.
+        old_mask = os.umask(0o007)
         try:
-            os.makedirs(t.rec_dir, exist_ok=True)
-            os.chmod(t.rec_dir, 0o2770)
+            os.makedirs(t.rec_dir, mode=0o770, exist_ok=True)
             try:
                 os.chown(t.rec_dir, -1, grp.getgrnam("asterisk").gr_gid)
             except (KeyError, PermissionError):
-                pass  # local dev: no asterisk group; the folder's setgid parent sets it on the VPS
+                pass  # local dev: no asterisk group; the setgid parent sets it on the VPS
         except OSError as e:
             changes_log.info(f"Couldn't make the recordings folder for tenant {t.code}: {e}")
+        finally:
+            os.umask(old_mask)
 
 
 def apply_config(conn, reason: str) -> dict:
