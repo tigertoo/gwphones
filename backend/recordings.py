@@ -22,7 +22,8 @@ from pydantic import BaseModel
 
 from ivr import read_ulaw, write_ulaw
 from pbx import (PBX_TIMEZONE, REC_NAME_RE, TenantNames, _lock, _set_setting, all_tenant_names, apply_config,
-                 asterisk_cli, channel_ext, changes_log, current_tenant, get_db, get_settings, get_status, tenant_names)
+                 asterisk_cli, channel_ext, changes_log, current_tenant, get_db, get_settings, get_status,
+                 move_main_recordings, tenant_names)
 
 router = APIRouter(prefix="/api/pbx")
 
@@ -228,7 +229,8 @@ def api_start_recording(req: StartRecording):
 
 def expire_recordings(now: Optional[float] = None) -> int:
     """Every tenant's folder, by that tenant's own retention. Only files
-    directly in each folder (the main tenant's holds the others' folders)."""
+    directly in each folder."""
+    move_main_recordings()  # any left behind in the top folder (phase 3)
     with get_db() as conn:
         tenants = [(t, int(get_settings(conn, t.id)["rec_days"])) for t in all_tenant_names(conn)]
     total = 0

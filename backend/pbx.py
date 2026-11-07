@@ -39,6 +39,7 @@ import time
 import pwd
 import grp
 import secrets
+import shutil
 import sqlite3
 import logging
 import logging.handlers
@@ -222,8 +223,11 @@ class TenantNames:
         self.ringgroups = f"{self.prefix}-ringgroups"
         self.park_lot = PARK_LOT if main else f"{self.prefix}-park"
         self.park_context = PARK_CONTEXT if main else f"{self.prefix}-parkedcalls"
-        self.ivr_dir = IVR_DIR if main else os.path.join(IVR_DIR, self.prefix)
-        self.rec_dir = REC_DIR if main else os.path.join(REC_DIR, self.prefix)
+        # Every tenant's greetings and recordings in a folder of its own,
+        # t<code>, the main tenant's too (since phase 3; they were in the
+        # top folders, see _tenant_folders).
+        self.ivr_dir = os.path.join(IVR_DIR, f"t{code}")
+        self.rec_dir = os.path.join(REC_DIR, f"t{code}")
         self.notice = os.path.join(self.ivr_dir, "recording-notice.ulaw")
         # Phones log in as tenant code + extension (1002201): a login is
         # unique on the server. The main tenant's are still the bare
@@ -1556,13 +1560,56 @@ def apply_to_node(node: str, files: Dict[str, str]) -> Tuple[bool, List[str]]:
     return deliver(files)
 
 
-def _tenant_folders(conn):
-    """Other tenants' recording folders, made by the dashboard (not by
+GREETING_FILE_RE = re.compile(r"(ivr-[0-9]{3}|recording-notice)\.ulaw")
+
+
+def move_main_recordings() -> int:
+    """The main tenant's recordings from before it had a folder of its own
+    (phase 3), and any started in the moment before the reload, into it.
+    A rename on the same disk: one still being written carries on."""
+    target, moved = MAIN_NAMES.rec_dir, 0
+    if not os.path.isdir(target):
+        return 0
+    try:
+        names = os.listdir(REC_DIR)
+    except OSError:
+        return 0
+    for name in names:
+        if REC_NAME_RE.fullmatch(name) and os.path.isfile(os.path.join(REC_DIR, name)):
+            try:
+                os.replace(os.path.join(REC_DIR, name), os.path.join(target, name))
+                moved += 1
+            except OSError as e:
+                changes_log.info(f"Couldn't move recording {name} into {target}: {e}")
+    if moved:
+        changes_log.info(f"Moved {moved} recording(s) of the main tenant into {target}")
+    return moved
+
+
+def _tenant_folders(conn) -> List[str]:
+    """Every tenant's recording folder, made by the dashboard (not by
     Asterisk on the first call) so both can use them: 2770, group
-    asterisk, as the README sets up the main one. The main tenant's is
-    made by hand (README, "Call recording")."""
+    asterisk, inside the folder the README sets up; and its greetings
+    folder. The main tenant's greetings and notice from before it had a
+    folder are copied into it; the old files are returned, to remove once
+    Asterisk has the new paths."""
+    old = []
     for t in all_tenant_names(conn):
-        if t.id == MAIN_TENANT or os.path.isdir(t.rec_dir):
+        try:
+            os.makedirs(t.ivr_dir, exist_ok=True)
+        except OSError as e:
+            changes_log.info(f"Couldn't make the greetings folder for tenant {t.code}: {e}")
+        if t.id == MAIN_TENANT:
+            for name in (os.listdir(IVR_DIR) if os.path.isdir(IVR_DIR) else []):
+                src, dst = os.path.join(IVR_DIR, name), os.path.join(t.ivr_dir, name)
+                if GREETING_FILE_RE.fullmatch(name) and os.path.isfile(src):
+                    try:
+                        if not os.path.exists(dst):
+                            shutil.copy2(src, dst)
+                        old.append(src)
+                    except OSError as e:
+                        changes_log.info(f"Couldn't copy {src} into {t.ivr_dir}: {e}")
+        if os.path.isdir(t.rec_dir):
             continue
         # Made as 770, not chmod-ed to it afterwards: the service runs with
         # RestrictSUIDSGID, which refuses any chmod carrying the setgid bit.
@@ -1578,12 +1625,20 @@ def _tenant_folders(conn):
             changes_log.info(f"Couldn't make the recordings folder for tenant {t.code}: {e}")
         finally:
             os.umask(old_mask)
+    move_main_recordings()
+    return old
 
 
 def apply_config(conn, reason: str) -> dict:
     """Regenerate the config and apply it to this server's Asterisk."""
-    _tenant_folders(conn)
+    old_greetings = _tenant_folders(conn)
     ok, messages = apply_to_node("", generate_config(conn))
+    if ok:
+        for path in old_greetings:  # Asterisk plays the copies in t<code> now
+            try:
+                os.remove(path)
+            except OSError:
+                pass
     _last_apply.update({"at": _now(), "ok": ok, "messages": messages})
     changes_log.info(f"{reason} -> {'applied' if ok else 'NOT applied: ' + '; '.join(messages)}")
     return {"ok": ok, "messages": messages}
