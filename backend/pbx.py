@@ -67,6 +67,11 @@ CHANGES_LOG_PATH = os.environ.get("PBX_CHANGES_LOG", "/var/log/admin-dashboard/p
 # Shown on the "set up a phone" card. Must match transport-tls in pjsip.conf.
 PUBLIC_HOST = os.environ.get("PBX_PUBLIC_HOST", "")
 PUBLIC_PORT = os.environ.get("PBX_PUBLIC_PORT", "15061")
+# Tenants' own SIP hostnames: when set, each must be one name under this
+# (".sip.example.ie" -> acme.sip.example.ie), which is what a wildcard
+# certificate for *.sip.example.ie covers. The main tenant's phones use
+# PBX_PUBLIC_HOST unless it's given one too.
+TENANT_HOST_SUFFIX = os.environ.get("PBX_TENANT_HOST_SUFFIX", "").strip().lower()
 # Public address of the QR-code setup links (see "Phone setup by QR code"
 # in the README), e.g. https://amapforyourmoney.com. Empty turns them off.
 PROVISION_BASE_URL = os.environ.get("PBX_PROVISION_BASE_URL", "").rstrip("/")
@@ -310,6 +315,15 @@ def channel_ext(channel: str, code: str = MAIN_TENANT_CODE) -> Optional[str]:
     channel."""
     m = re.fullmatch(r"PJSIP/([^-/]+)-[0-9a-f]+", channel or "")
     return endpoint_ext(m.group(1), code) if m else None
+
+
+def sip_host_for(tenant: int) -> str:
+    """Where a tenant's phones register: its own hostname (so it can be
+    moved to another server by DNS), else the server's. Phones already set
+    up keep what they were given until they're set up again."""
+    with get_db() as conn:
+        r = conn.execute("SELECT sip_host FROM tenants WHERE id = ?", (tenant,)).fetchone()
+    return (r and r["sip_host"]) or PUBLIC_HOST
 
 
 def row_login(row) -> str:
@@ -1835,10 +1849,19 @@ class TenantUpdate(BaseModel):
     sip_host: str = ""
 
 
+def _host_free(conn, host: str, tenant_id: int = 0):
+    """A hostname is one tenant's: moving a tenant by DNS mustn't move another."""
+    if host and conn.execute("SELECT 1 FROM tenants WHERE sip_host = ? AND id != ?", (host, tenant_id)).fetchone():
+        raise HTTPException(409, f"{host} is already another tenant's.")
+
+
 def _clean_host(value: str) -> str:
     host = (value or "").strip().lower()
     if host and not HOST_RE.match(host):
         raise HTTPException(400, "The SIP hostname must look like acme.sip.example.ie.")
+    if host and TENANT_HOST_SUFFIX and not re.fullmatch(r"[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?" + re.escape(TENANT_HOST_SUFFIX), host):
+        raise HTTPException(400, f"The SIP hostname must be one name ending {TENANT_HOST_SUFFIX}, "
+                                 f"e.g. acme{TENANT_HOST_SUFFIX}: that's what the certificate covers.")
     return host
 
 
@@ -1847,7 +1870,7 @@ def api_tenants():
     with get_db() as conn:
         counts = {r["tenant_id"]: r["n"] for r in conn.execute(
             "SELECT tenant_id, COUNT(*) AS n FROM extensions GROUP BY tenant_id")}
-        return {"tenants": [{**_tenant_json(r), "extensions": counts.get(r["id"], 0),
+        return {"host_suffix": TENANT_HOST_SUFFIX, "tenants": [{**_tenant_json(r), "extensions": counts.get(r["id"], 0),
                              "settings": {k: get_settings(conn, r["id"])[k] for k in ("outbound_cid", "max_outbound")}}
                             for r in conn.execute("SELECT * FROM tenants ORDER BY id")]}
 
@@ -1865,6 +1888,7 @@ def api_create_tenant(req: TenantCreate):
         raise HTTPException(400, "Calls at once (in and out) must be 1-30.")
     host = _clean_host(req.sip_host)
     with _lock, get_db() as conn:
+        _host_free(conn, host)
         used = max([int(r["code"]) for r in conn.execute("SELECT code FROM tenants")] + [TENANT_CODE_FIRST - 1])
         code = max(int(get_settings(conn).get("tenant_code_next") or TENANT_CODE_FIRST), used + 1)
         if code > 9999:
@@ -1888,6 +1912,7 @@ def api_update_tenant(tenant_id: int, req: TenantUpdate):
         raise HTTPException(400, "The main tenant can't be suspended.")
     host = _clean_host(req.sip_host)
     with _lock, get_db() as conn:
+        _host_free(conn, host, tenant_id)
         if conn.execute("UPDATE tenants SET name = ?, status = ?, sip_host = ? WHERE id = ?",
                         (name, req.status, host, tenant_id)).rowcount == 0:
             raise HTTPException(404, "Tenant not found.")
@@ -2202,7 +2227,7 @@ def api_credentials(ext: str):
         raise HTTPException(404, "Extension not found.")
     changes_log.info(f"Viewed credentials for extension {ext}")
     return {"username": row_login({"ext": r["ext"], "tenant_id": current_tenant()}), "password": r["password"],
-            "server": PUBLIC_HOST,
+            "server": sip_host_for(current_tenant()),
             "port": PUBLIC_PORT, "transport": "TLS", "media_encryption": "SRTP (SDES)",
             "voicemail_number": VOICEMAIL_NUMBER, "voicemail_pin": r["vm_pin"]}
 
@@ -2399,7 +2424,7 @@ def prov_account(token: str, request: Request):
   <username>{x(row_login(e))}</username>
   <password>{x(e["password"])}</password>
   <userDisplayName>{x(e["name"])}</userDisplayName>
-  <host>{x(PUBLIC_HOST)}:{x(PUBLIC_PORT)}</host>
+  <host>{x(sip_host_for(e["tenant_id"]))}:{x(PUBLIC_PORT)}</host>
   <transport>tls</transport>
   <sdesIncoming>required</sdesIncoming>
   <sdesOutgoing>required</sdesOutgoing>
@@ -2655,7 +2680,8 @@ def prov_linphone(token: str, request: Request):
     e = _redeem(token, request, "Linphone")
     if not e:
         return _gone()
-    server = f"&lt;sip:{x(PUBLIC_HOST)}:{x(PUBLIC_PORT)};transport=tls&gt;"
+    host = sip_host_for(e["tenant_id"])
+    server = f"&lt;sip:{x(host)}:{x(PUBLIC_PORT)};transport=tls&gt;"
     name = x(e["name"]).replace('"', "")
     body = f"""<?xml version="1.0" encoding="UTF-8"?>
 <config xmlns="http://www.linphone.org/xsds/lpconfig.xsd" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:schemaLocation="http://www.linphone.org/xsds/lpconfig.xsd lpconfig.xsd">
@@ -2670,7 +2696,7 @@ def prov_linphone(token: str, request: Request):
   <section name="proxy_0" overwrite="true">
     <entry name="reg_proxy" overwrite="true">{server}</entry>
     <entry name="reg_route" overwrite="true">{server}</entry>
-    <entry name="reg_identity" overwrite="true">"{name}" &lt;sip:{x(row_login(e))}@{x(PUBLIC_HOST)}&gt;</entry>
+    <entry name="reg_identity" overwrite="true">"{name}" &lt;sip:{x(row_login(e))}@{x(host)}&gt;</entry>
     <entry name="reg_expires" overwrite="true">600</entry>
     <entry name="reg_sendregister" overwrite="true">1</entry>
     <entry name="publish" overwrite="true">0</entry>
@@ -2679,7 +2705,7 @@ def prov_linphone(token: str, request: Request):
     <entry name="username" overwrite="true">{x(row_login(e))}</entry>
     <entry name="userid" overwrite="true">{x(row_login(e))}</entry>
     <entry name="passwd" overwrite="true">{x(e["password"])}</entry>
-    <entry name="domain" overwrite="true">{x(PUBLIC_HOST)}</entry>
+    <entry name="domain" overwrite="true">{x(host)}</entry>
   </section>
 </config>
 """

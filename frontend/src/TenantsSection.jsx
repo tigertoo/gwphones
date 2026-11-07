@@ -8,16 +8,22 @@ const EMPTY = { name: "", outbound_cid: "", max_calls: 4, sip_host: "" };
 
 export default function TenantsSection({ config, send, busy, apiBase, switchTo }) {
   const [tenants, setTenants] = useState(null);
+  const [suffix, setSuffix] = useState(""); // PBX_TENANT_HOST_SUFFIX, e.g. .sip.example.ie
   const [form, setForm] = useState(null); // a new tenant
   const [edit, setEdit] = useState(null); // { id, name, sip_host, status }
 
   const load = useCallback(async () => {
     const res = await fetch(`${apiBase}/api/pbx/tenants`);
-    if (res.ok) setTenants((await res.json()).tenants);
+    if (res.ok) {
+      const data = await res.json();
+      setTenants(data.tenants);
+      setSuffix(data.host_suffix || "");
+    }
   }, [apiBase]);
   useEffect(() => { load(); }, [load, config]);
 
   if (!tenants) return <section className="panel"><p className="panel-empty">Loading…</p></section>;
+  const hostExample = suffix ? `acme${suffix}` : "acme.sip.example.ie";
 
   const create = async () => {
     const data = await send("POST", "/tenants", { ...form, max_calls: Number(form.max_calls) },
@@ -49,7 +55,7 @@ export default function TenantsSection({ config, send, busy, apiBase, switchTo }
                 onChange={(e) => setEdit({ ...edit, name: e.target.value })} /></td>
               <td>{t.extensions}</td>
               <td colSpan={2} className="pbx-hint">Set under Trunks &amp; Outbound while working on it</td>
-              <td><input className="idea-input" placeholder="acme.sip.example.ie" value={edit.sip_host}
+              <td><input className="idea-input" placeholder={hostExample} value={edit.sip_host}
                 onChange={(e) => setEdit({ ...edit, sip_host: e.target.value })} /></td>
               <td>{t.status}</td>
               <td className="pbx-actions">
@@ -99,13 +105,14 @@ export default function TenantsSection({ config, send, busy, apiBase, switchTo }
               <input className="idea-input pbx-num-input" type="number" min={1} max={30} value={form.max_calls}
                 onChange={(e) => setForm({ ...form, max_calls: e.target.value })} />
             </label>
-            <input className="idea-input" placeholder="SIP hostname (optional)" value={form.sip_host}
+            <input className="idea-input" placeholder={`SIP hostname, e.g. ${hostExample}`} value={form.sip_host}
               onChange={(e) => setForm({ ...form, sip_host: e.target.value })} />
           </div>
           <p className="pbx-hint">
             The caller ID is what its calls show, and its emergency calls when an extension has none of its own: an Irish
             number of the tenant&rsquo;s. Calls at once counts calls in and out together. It gets the next tenant code;
-            add its extensions, numbers and menus by choosing it at the top.
+            add its extensions, numbers and menus by choosing it at the top. With a SIP hostname, its phones are set
+            up to register to it (so it can move to another server by DNS); without one, to this server&rsquo;s.
           </p>
           <div className="ticket-action-buttons">
             <button className="ticket-action-btn" onClick={() => setForm(null)}>Cancel</button>
