@@ -342,6 +342,10 @@ DEFAULT_SETTINGS = {
     "trunk_order": "irishvoip,voxbeam",
     "trunk_irishvoip_enabled": "1",
     "trunk_voxbeam_enabled": "1",
+    # Most calls at once each carrier allows (its channels, in and out
+    # together); empty = no ceiling here. See _trunk_ceilings.
+    "trunk_max_irishvoip": "",
+    "trunk_max_voxbeam": "",
     "inbound_default": "201",
     # Takes incoming calls over a tenant's limit (not the main tenant's: its
     # limit counts outbound calls only). Empty = its lowest extension.
@@ -860,10 +864,63 @@ def build_extensions_conf(conn) -> str:
     return "\n".join(out)
 
 
-def _route_check(kind: str) -> List[str]:
+# Carrier ceilings: the most calls at once each carrier allows (set to
+# match its portal: its channels). A call out skips a carrier that's
+# full as if it couldn't take the call, so it fails over to the next;
+# when every carrier is full or down, the caller hears the engaged tone.
+# A carrier's calls are counted on the carrier's own channel (Dial's
+# pre-dial handler, [portal-trunkcount]), so a transferred call still
+# counts while its carrier leg is up; incoming calls are counted from the
+# trunk they arrive on ([portal-inbound]). 112/999 are counted, never
+# refused. Nothing is generated for a carrier without a ceiling, so with
+# none set the config is as it was.
+TRUNK_MAX_LIMIT = 200
+
+
+def _trunk_ceilings(s: Dict[str, str]) -> Dict[str, int]:
+    return {t: int(s[f"trunk_max_{t}"]) for t in TRUNKS if (s.get(f"trunk_max_{t}") or "").isdigit()}
+
+
+def _trunk_dial_opts(s: Dict[str, str], trunk: str) -> str:
+    return f"b(portal-trunkcount^s^1({trunk}))" if trunk in _trunk_ceilings(s) else ""
+
+
+def _trunk_guard(s: Dict[str, str], trunk: str, skip_to: str) -> List[str]:
+    """Lines before a Dial on trunk: if it's full, skip to skip_to (the
+    failover check) as if it couldn't take the call."""
+    if trunk not in _trunk_ceilings(s):
+        return []
+    n = _trunk_ceilings(s)[trunk]
+    return [f" same => n,Set(FULL=${{IF($[${{GROUP_COUNT({trunk}@trunkout)}} + ${{GROUP_COUNT({trunk}@trunkin)}} >= {n}]?1:0)}})",
+            f' same => n,ExecIf($["${{FULL}}" = "1"]?NoOp({TRUNKS[trunk]["label"]} full at {n} calls at once))',
+            ' same => n,ExecIf($["${FULL}" = "1"]?Set(DIALSTATUS=CHANUNAVAIL))',
+            f' same => n,GotoIf($["${{FULL}}" = "1"]?{skip_to})']
+
+
+def _trunkcount_context(s: Dict[str, str]) -> List[str]:
+    if not _trunk_ceilings(s):
+        return []
+    return ["", "; ---- Carrier ceilings: counts each call on the carrier's own channel ----",
+            "[portal-trunkcount]",
+            "exten => s,1,Set(GROUP(trunkout)=${ARG1})",
+            " same => n,Return()"]
+
+
+def _all_tried(s: Dict[str, str]) -> List[str]:
+    """With ceilings, every carrier full (or down) is a normal case: the
+    engaged tone rather than just hanging up."""
+    if not _trunk_ceilings(s):
+        return []
+    return [' same => n,GotoIf($["${DIALSTATUS}" = "CHANUNAVAIL" | "${DIALSTATUS}" = "CONGESTION"]?busy)']
+
+
+def _route_check(kind: str, s: Optional[Dict[str, str]] = None) -> List[str]:
     """Asks lcr.py which routes to try (checked against the price cap,
     cheapest first where set), then tries them in order. Falls through to
     the lines after it (labelled nocheck) only if there's no answer."""
+    s = s or {}
+    vb_opts, iv_opts = _trunk_dial_opts(s, "voxbeam"), _trunk_dial_opts(s, "irishvoip")
+    tried = "tried" if _trunk_ceilings(s) else "done"
     out = [" same => n,Set(CURLOPT(conntimeout)=1)",
            " same => n,Set(CURLOPT(httptimeout)=2)",
            " same => n,Set(CURLOPT(httpheader)=X-LCR-Token: ${LCR_TOKEN})",
@@ -875,11 +932,17 @@ def _route_check(kind: str) -> List[str]:
         out += [f" same => n,Set(R=${{CUT(ROUTES,/,{i})}})",
                 f' same => n,GotoIf($["${{R}}" = "irishvoip"]?iv{i})']
         out += [f' same => n,GotoIf($["${{R}}" = "{p}"]?vb{i})' for p in VOXBEAM_ROUTES]
-        out += [" same => n,Goto(done)",  # empty (no more routes) or not a route we know
-                f" same => n(vb{i}),Dial(PJSIP/${{R}}${{ARG2}}@voxbeam,60,{REC_DIAL})",
+        out += [f" same => n,Goto({tried})",  # empty (no more routes) or not a route we know
+                f" same => n(vb{i}),NoOp()" if vb_opts else None,
+                *_trunk_guard(s, "voxbeam", f"next{i}"),
+                f" same => n{'' if vb_opts else f'(vb{i})'},Dial(PJSIP/${{R}}${{ARG2}}@voxbeam,60,{REC_DIAL}{vb_opts})",
                 f" same => n,Goto(next{i})",
-                f" same => n(iv{i}),Dial(PJSIP/${{ARG1}}@irishvoip,60,{REC_DIAL})",
+                f" same => n(iv{i}),NoOp()" if iv_opts else None,
+                *_trunk_guard(s, "irishvoip", f"next{i}"),
+                f" same => n{'' if iv_opts else f'(iv{i})'},Dial(PJSIP/${{ARG1}}@irishvoip,60,{REC_DIAL}{iv_opts})",
                 f' same => n(next{i}),GotoIf($["${{DIALSTATUS}}" != "CHANUNAVAIL" & "${{DIALSTATUS}}" != "CONGESTION"]?done)']
+        out = [line for line in out if line is not None]
+    out += [f" same => n({tried}),NoOp()", *_all_tried(s)] if tried == "tried" else []
     return out + [" same => n,Goto(done)", " same => n(nocheck),NoOp(Route check didn't answer: ${LCR})"]
 
 
@@ -902,7 +965,7 @@ def _outbound_block(s: Dict[str, str], exten: str, trunks: List[str], refused: b
     out += [' same => n,Set(OUT_CID=${IF($["${EXT_CID}" != ""]?${EXT_CID}:${IF($["${OT}" = ""]?${OUTBOUND_CID}:${OUTBOUND_CID_${OT}})})})',
             ' same => n,ExecIf($["${OUT_CID}" != ""]?Set(CALLERID(num)=${OUT_CID}))']
     if exten in NUMBER_TYPES and not refused:
-        out += _route_check(exten)
+        out += _route_check(exten, s)
         if exten == "international":
             # No answer means the cap can't be checked: refuse (2026-10-26).
             out += [" same => n,Goto(refused)"]
@@ -912,12 +975,18 @@ def _outbound_block(s: Dict[str, str], exten: str, trunks: List[str], refused: b
     elif not trunks and exten != "international":
         out += [" same => n,NoOp(No enabled trunk for these numbers)", " same => n,Goto(busy)"]
     for i, t in enumerate(trunks):
-        out.append(f" same => n,Dial(PJSIP/{TRUNKS[t]['dial']}@{t},60,{REC_DIAL})")
+        out += _trunk_guard(s, t, f"tr{i}")
+        out.append(f" same => n,Dial(PJSIP/{TRUNKS[t]['dial']}@{t},60,{REC_DIAL}{_trunk_dial_opts(s, t)})")
+        label = f"(tr{i})" if t in _trunk_ceilings(s) else ""
         if i < len(trunks) - 1:
             # Only fall through to the next trunk if this one couldn't take
-            # the call at all (down, refused, congested), never after a
-            # normal answer/busy/no-answer.
-            out.append(' same => n,GotoIf($["${DIALSTATUS}" != "CHANUNAVAIL" & "${DIALSTATUS}" != "CONGESTION"]?done)')
+            # the call at all (down, refused, congested, or full here),
+            # never after a normal answer/busy/no-answer.
+            out.append(f' same => n{label},GotoIf($["${{DIALSTATUS}}" != "CHANUNAVAIL" & "${{DIALSTATUS}}" != "CONGESTION"]?done)')
+        elif label:
+            out.append(f" same => n{label},NoOp()")
+    if trunks:
+        out += _all_tried(s)
     return out + [" same => n(done),Hangup()",
                   " same => n(refused),NoOp(Refused: ${LCR})",
                   " same => n(busy),Congestion(5)",
@@ -1268,7 +1337,7 @@ OUTBOUND_PATTERNS = [
 ]
 
 
-def _internal_context(t: TenantNames, outbound_cid: str) -> List[str]:
+def _internal_context(t: TenantNames, outbound_cid: str, emergency_opts: str = "") -> List[str]:
     """Everything a tenant's phone can dial: its own extensions, groups,
     menus, schedules and feature codes, voicemail, 112/999 and outside
     numbers. Other tenants' phones start here (endpoint context); the main
@@ -1293,7 +1362,7 @@ def _internal_context(t: TenantNames, outbound_cid: str) -> List[str]:
     for n in ("112", "999"):
         out += [f'exten => {n},1,Set(OUT_CID=${{IF($["${{EXT_CID}}" != ""]?${{EXT_CID}}:{fallback})}})',
                 ' same => n,ExecIf($["${OUT_CID}" != ""]?Set(CALLERID(num)=${OUT_CID}))',
-                f" same => n,Dial(PJSIP/{n}@irishvoip,120)",
+                f" same => n,Dial(PJSIP/{n}@irishvoip,120{',' + emergency_opts if emergency_opts else ''})",  # counted, never refused
                 " same => n,Hangup()"]
     return out
 
@@ -1419,10 +1488,11 @@ def build_portal_dialplan(conn) -> str:
     for t in tenants:
         out += _ringgroups_context(conn, t) + _ivr_contexts(conn, t) + _hours_contexts(conn, t)
     for t in tenants:
-        out += [""] + _internal_context(t, get_settings(conn, t.id)["outbound_cid"])
+        out += [""] + _internal_context(t, get_settings(conn, t.id)["outbound_cid"], _trunk_dial_opts(s, "irishvoip"))
         if t.id != MAIN_TENANT:
             out += [""] + _full_context(conn, t)
     out += [""] + OUTBOUND_PATTERNS
+    out += _trunkcount_context(s)
 
     enabled = [t for t in s["trunk_order"].split(",") if t in TRUNKS and s.get(f"trunk_{t}_enabled") == "1"]
     out += ["", "; ---- Outbound: one extension per kind of number ----",
@@ -1442,16 +1512,19 @@ def build_portal_dialplan(conn) -> str:
     # numbers go through from-internal as before; any other tenant's
     # straight to its own target (from-internal is the main tenant's).
     told = {t.id: [f" same => n,Playback({t.notice[:-len('.ulaw')]})"] if notices[t.id] else [] for t in tenants}
+    # With carrier ceilings, an incoming call counts against the trunk it
+    # came in on (the channel is the carrier's).
+    trunkin = [" same => n,Set(GROUP(trunkin)=${CHANNEL(endpoint)})"] if _trunk_ceilings(s) else []
     names = {t.id: t for t in tenants}
     for r in conn.execute("SELECT * FROM inbound_routes ORDER BY did"):
         tid = r["tenant_id"]
         goto = (f"Goto(from-internal,{r['target']},1)" if tid == MAIN_TENANT
                 else target_goto(r["target"], destinations(conn, tid), names[tid]) or "Hangup()")
-        out += [f"exten => {r['did']},1,NoOp(Inbound {r['did']})", *names[tid].accountcode(),
+        out += [f"exten => {r['did']},1,NoOp(Inbound {r['did']})", *trunkin, *names[tid].accountcode(),
                 *_count_inbound(names[tid]), *told[tid], f" same => n,{goto}"]
     default = s["inbound_default"]  # numbers not listed are the main tenant's
     for x in ("_X.", "s"):
-        out += [f"exten => {x},1,NoOp(Inbound)", *told[MAIN_TENANT], f" same => n,Goto(from-internal,{default},1)"]
+        out += [f"exten => {x},1,NoOp(Inbound)", *trunkin, *told[MAIN_TENANT], f" same => n,Goto(from-internal,{default},1)"]
     out.append("")
     return "\n".join(out)
 
@@ -1962,6 +2035,7 @@ def api_config():
                 "caps": {"default": s.get("cap_default", ""), **{k: s.get(f"cap_{k}", "") for k in NUMBER_TYPES}},
                 "lcr_allow": {f"{t}{r}": s.get(f"lcr_allow_{t}{r}", "1") == "1" for t, r in ALL_ROUTES},
                 "video": s["video"] == "1",
+                "trunk_max": {t: s.get(f"trunk_max_{t}", "") for t in TRUNKS},
             },
             "all_routes": [{"key": f"{t}{r}", "label": TRUNKS[t]["label"] + (f" {VOXBEAM_ROUTES[r]}" if r else "")}
                            for t, r in ALL_ROUTES],
@@ -2581,6 +2655,7 @@ class SettingsRequest(BaseModel):
     lcr_allow: Optional[Dict[str, bool]] = None  # route key (irishvoip, voxbeam0011103...) -> usable for cheapest
     video: Optional[bool] = None  # None = unchanged
     main_mailbox: Optional[str] = None  # None = unchanged; "" = the lowest extension
+    trunk_max: Optional[Dict[str, str]] = None  # trunk -> most calls at once ("" = no ceiling); None = unchanged
 
 
 def _cap(value: str, what: str) -> str:
@@ -2621,6 +2696,15 @@ def api_update_settings(req: SettingsRequest):
     known = {f"{t}{r}" for t, r in ALL_ROUTES}
     if set(allow) - known:
         raise HTTPException(400, "Unknown route.")
+    ceilings = {}
+    for t, v in (req.trunk_max or {}).items():
+        if t not in TRUNKS:
+            raise HTTPException(400, "Unknown trunk for a ceiling.")
+        v = str(v).strip()
+        if v and not (v.isdigit() and 1 <= int(v) <= TRUNK_MAX_LIMIT):
+            raise HTTPException(400, f"{TRUNKS[t]['label']}'s most calls at once must be 1-{TRUNK_MAX_LIMIT}, "
+                                     "or empty for no ceiling.")
+        ceilings[t] = str(int(v)) if v else ""
     with _lock, get_db() as conn:
         # Numbers not listed anywhere are the main tenant's, whoever saves.
         default = check_target(conn, req.inbound_default, tenant=MAIN_TENANT)
@@ -2644,13 +2728,16 @@ def api_update_settings(req: SettingsRequest):
             _set_setting(conn, f"lcr_allow_{k}", "1" if v else "0")
         if req.video is not None:
             _set_setting(conn, "video", "1" if req.video else "0")
+        for t, v in ceilings.items():
+            _set_setting(conn, f"trunk_max_{t}", v)
         conn.commit()
         enabled = [t for t in req.trunk_order if req.trunks_enabled.get(t)]
         return apply_config(conn, f"Settings: cid={cid}, max={req.max_outbound}, voxbeam={req.voxbeam_prefix}, "
                                   f"outbound order={enabled or 'NONE'}, inbound default={default}, "
                                   f"routes={routes or 'unchanged'}, caps={caps or 'unchanged'}, "
                                   f"cheapest-route use={allow or 'unchanged'}, "
-                                  f"video={'unchanged' if req.video is None else req.video}")
+                                  f"video={'unchanged' if req.video is None else req.video}, "
+                                  f"carrier ceilings={ceilings or 'unchanged'}")
 
 
 @router.post("/apply")

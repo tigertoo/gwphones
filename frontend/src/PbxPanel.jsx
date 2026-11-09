@@ -259,6 +259,10 @@ function StatusSection({ config, status, send, busy }) {
                 {trunks[key].host}
                 {s.rtt_ms != null && ` · ${s.rtt_ms} ms`}
               </div>
+              <div className="vital-detail">
+                Calls now: {status.channels.filter((c) => c.channel.startsWith(`PJSIP/${key}-`)).length}
+                {settings.trunk_max?.[key] ? ` of ${settings.trunk_max[key]}` : ""}
+              </div>
               {!settings.trunks_enabled[key] ? (
                 <div className="vital-detail">Outbound: off</div>
               ) : !first.length && !fallback.length ? (
@@ -1064,8 +1068,10 @@ function TrunksSection({ config, status, send, busy, apiBase }) {
       <h2>Outbound trunks</h2>
       <p className="pbx-hint pbx-intro">
         Calls go out through the first enabled trunk, unless the table below sends that kind of number elsewhere.
-        The next one is only tried if that trunk can't take the call (down, refused or congested). 112/999 always
-        go via Irish VoIP, whatever is set here.
+        The next one is only tried if that trunk can't take the call (down, refused or congested), or it&rsquo;s at
+        its most calls at once: set that to match what the carrier allows, counting calls in and out. When every
+        trunk is full or down the caller hears the engaged tone. 112/999 always go via Irish VoIP, whatever is set
+        here, and are never refused for being over the most calls.
       </p>
       <ol className="pbx-trunk-order">
         {form.trunk_order.map((key, i) => {
@@ -1083,6 +1089,18 @@ function TrunksSection({ config, status, send, busy, apiBase }) {
                   onChange={(e) => setForm({ ...form, trunks_enabled: { ...form.trunks_enabled, [key]: e.target.checked } })}
                 />
                 Use for outbound
+              </label>
+              <label className="idea-field" title="The most calls at once this carrier allows (its channels, in and out together), as set with the carrier. Empty: no ceiling here.">
+                Most calls
+                <input
+                  className="idea-input pbx-num-input"
+                  type="number"
+                  min={1}
+                  max={200}
+                  placeholder="—"
+                  value={form.trunk_max?.[key] ?? ""}
+                  onChange={(e) => setForm({ ...form, trunk_max: { ...form.trunk_max, [key]: e.target.value } })}
+                />
               </label>
               <button type="button" className="ticket-action-btn" disabled={i === 0} onClick={() => move(i, -1)} aria-label="Move up">↑</button>
               <button type="button" className="ticket-action-btn" disabled={i === form.trunk_order.length - 1} onClick={() => move(i, 1)} aria-label="Move down">↓</button>
