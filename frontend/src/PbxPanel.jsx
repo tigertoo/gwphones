@@ -810,7 +810,7 @@ function DeskPhonesSection({ config, send, busy, apiBase }) {
     const res = await fetch(`${apiBase}/api/pbx/desk-phones`);
     if (res.ok) setData(await res.json());
   }, [apiBase]);
-  useEffect(() => { load(); }, [load]);
+  useEffect(() => { load(); }, [load, config]); // config reloads when the tenant changes
 
   const act = async (method, path, body, text) => {
     const result = await send(method, path, body, text);
