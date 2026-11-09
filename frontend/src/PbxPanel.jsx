@@ -1097,7 +1097,7 @@ function TrunksSection({ config, status, send, busy, apiBase }) {
                   type="number"
                   min={1}
                   max={200}
-                  placeholder="—"
+                  placeholder="No limit"
                   value={form.trunk_max?.[key] ?? ""}
                   onChange={(e) => setForm({ ...form, trunk_max: { ...form.trunk_max, [key]: e.target.value } })}
                 />
