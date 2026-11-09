@@ -79,8 +79,8 @@ PROVISION_TTL = timedelta(minutes=15)
 # Emailed links last longer: people don't read email within 15 minutes.
 EMAIL_LINK_TTL = timedelta(hours=int(os.environ.get("PBX_EMAIL_LINK_HOURS", "72")))
 
-# Setup emails go out through Microsoft Graph, with the same settings as
-# Money Mapper (an app registration allowed to send as EMAIL_FROM_ADDRESS).
+# Setup emails go out through Microsoft Graph (an app registration allowed
+# to send as EMAIL_FROM_ADDRESS).
 MS_GRAPH_TENANT_ID = os.environ.get("MS_GRAPH_TENANT_ID", "")
 MS_GRAPH_CLIENT_ID = os.environ.get("MS_GRAPH_CLIENT_ID", "")
 MS_GRAPH_CLIENT_SECRET = os.environ.get("MS_GRAPH_CLIENT_SECRET", "")

@@ -1,0 +1,37 @@
+{
+ "lcr_caps": {
+  "freephone": "0.06",
+  "international": "0.06",
+  "landline": "0.06",
+  "mobile": "0.08"
+ },
+ "settings": {
+  "cap_default": "0.06",
+  "cap_mobile": "0.08",
+  "imported": "1",
+  "inbound_default": "600",
+  "lcr_allow_irishvoip": "1",
+  "lcr_allow_voxbeam0011101": "1",
+  "lcr_allow_voxbeam0011102": "1",
+  "lcr_allow_voxbeam0011103": "1",
+  "lcr_allow_voxbeam0011104": "1",
+  "lcr_token": "lcr-test-token",
+  "main_mailbox": "",
+  "max_outbound": "6",
+  "outbound_cid": "015550000",
+  "rec_days": "90",
+  "route_freephone": "irishvoip",
+  "route_international": "off",
+  "route_landline": "cheapest",
+  "route_mobile": "irishvoip",
+  "tenant_code_next": "1003",
+  "trunk_irishvoip_enabled": "1",
+  "trunk_max_irishvoip": "",
+  "trunk_max_voxbeam": "",
+  "trunk_order": "irishvoip,voxbeam",
+  "trunk_voxbeam_enabled": "1",
+  "video": "1",
+  "voxbeam_prefix": "0011101",
+  "webguest_password": "webguest-test-password"
+ }
+}

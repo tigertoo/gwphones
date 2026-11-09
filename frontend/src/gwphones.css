@@ -239,7 +239,7 @@
 .alert-critical { border-left-color: var(--critical); }
 .alert-resolved { border-left-color: var(--border); color: var(--muted); }
 
-/* Money Mapper users panel — full-width, sits below the vitals/alerts row */
+/* (From the admin dashboard: users panel, unused here) */
 .mm-users-panel {
   margin-top: 14px;
 }
@@ -262,7 +262,7 @@
   color: var(--ok);
 }
 
-/* Money Mapper tallies panel */
+/* (From the admin dashboard: tallies panel, unused here) */
 .mm-tallies-panel {
   margin-top: 14px;
 }
@@ -313,7 +313,7 @@
   font-variant-numeric: tabular-nums;
 }
 
-/* Money Mapper tickets panel */
+/* (From the admin dashboard: tickets panel, unused here) */
 .mm-tickets-panel {
   margin-top: 14px;
 }
