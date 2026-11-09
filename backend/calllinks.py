@@ -28,7 +28,8 @@ from fastapi.responses import FileResponse, HTMLResponse
 from pydantic import BaseModel
 
 from pbx import (NAME_RE, PROVISION_BASE_URL, PUBLIC_HOST, WEB_GUEST, _client_ip, _lock, _now,
-                 apply_config, changes_log, check_target, get_db, get_settings, live_call_links, needs_keypad,
+                 apply_config, changes_log, check_target, current_tenant, get_db, get_settings, live_call_links,
+                 needs_keypad,
                  web_guest_password)
 
 router = APIRouter(prefix="/api/pbx")
@@ -92,7 +93,8 @@ def _row(conn, r, live_ids) -> dict:
 def api_call_links():
     with get_db() as conn:
         live_ids = {r["id"] for r in live_call_links(conn)}
-        links = [_row(conn, r, live_ids) for r in conn.execute("SELECT * FROM call_links ORDER BY id")]
+        links = [_row(conn, r, live_ids) for r in conn.execute("SELECT * FROM call_links WHERE tenant_id = ? ORDER BY id",
+                                                                (current_tenant(),))]
         video_on = get_settings(conn)["video"] == "1"
     return {"links": links, "ready": bool(PROVISION_BASE_URL and PUBLIC_HOST and WS_URL), "ws_url": WS_URL,
             "video_on": video_on, "max_minutes": MAX_MINUTES}
@@ -102,9 +104,10 @@ def api_call_links():
 def api_add_call_link(req: CallLinkRequest):
     with _lock, get_db() as conn:
         label, target = _clean(conn, req)
-        conn.execute("INSERT INTO call_links (token, label, target, video, max_minutes, enabled, created_at) "
-                     "VALUES (?, ?, ?, ?, ?, ?, ?)",
-                     (secrets.token_urlsafe(16), label, target, int(req.video), req.max_minutes, int(req.enabled), _now()))
+        conn.execute("INSERT INTO call_links (token, label, target, video, max_minutes, enabled, created_at, tenant_id) "
+                     "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                     (secrets.token_urlsafe(16), label, target, int(req.video), req.max_minutes, int(req.enabled), _now(),
+                      current_tenant()))
         conn.commit()
         return apply_config(conn, f"Added call link {label} to {target}")
 
@@ -113,8 +116,10 @@ def api_add_call_link(req: CallLinkRequest):
 def api_update_call_link(link_id: int, req: CallLinkRequest):
     with _lock, get_db() as conn:
         label, target = _clean(conn, req)
-        if conn.execute("UPDATE call_links SET label = ?, target = ?, video = ?, max_minutes = ?, enabled = ? WHERE id = ?",
-                        (label, target, int(req.video), req.max_minutes, int(req.enabled), link_id)).rowcount == 0:
+        if conn.execute("UPDATE call_links SET label = ?, target = ?, video = ?, max_minutes = ?, enabled = ? "
+                        "WHERE id = ? AND tenant_id = ?",
+                        (label, target, int(req.video), req.max_minutes, int(req.enabled), link_id,
+                         current_tenant())).rowcount == 0:
             raise HTTPException(404, "Call link not found.")
         conn.commit()
         return apply_config(conn, f"Call link {link_id}: {label} to {target}, video={req.video}, "
@@ -124,8 +129,8 @@ def api_update_call_link(link_id: int, req: CallLinkRequest):
 @router.post("/call-links/{link_id}/new-url")
 def api_call_link_new_url(link_id: int):
     with _lock, get_db() as conn:
-        if conn.execute("UPDATE call_links SET token = ? WHERE id = ?",
-                        (secrets.token_urlsafe(16), link_id)).rowcount == 0:
+        if conn.execute("UPDATE call_links SET token = ? WHERE id = ? AND tenant_id = ?",
+                        (secrets.token_urlsafe(16), link_id, current_tenant())).rowcount == 0:
             raise HTTPException(404, "Call link not found.")
         conn.commit()
         return apply_config(conn, f"New URL for call link {link_id}: the old one stops working")
@@ -134,7 +139,7 @@ def api_call_link_new_url(link_id: int):
 @router.delete("/call-links/{link_id}")
 def api_delete_call_link(link_id: int):
     with _lock, get_db() as conn:
-        if conn.execute("DELETE FROM call_links WHERE id = ?", (link_id,)).rowcount == 0:
+        if conn.execute("DELETE FROM call_links WHERE id = ? AND tenant_id = ?", (link_id, current_tenant())).rowcount == 0:
             raise HTTPException(404, "Call link not found.")
         conn.commit()
         return apply_config(conn, f"Deleted call link {link_id}")
@@ -187,7 +192,7 @@ def call_page(token: str, request: Request):
         conn.execute("UPDATE call_links SET last_opened_at = ? WHERE id = ?", (_now(), link["id"]))
         conn.commit()
         password = web_guest_password(conn)
-        keypad = needs_keypad(conn, link["target"])  # a menu: the visitor presses keys
+        keypad = needs_keypad(conn, link["target"], link["tenant_id"])  # a menu: the visitor presses keys
     config = {"ws": WS_URL, "domain": PUBLIC_HOST, "user": WEB_GUEST, "password": password,
               "target": f"wl-{token}", "label": link["label"], "video": bool(link["video"]),
               "maxMinutes": link["max_minutes"]}

@@ -1,6 +1,7 @@
-import React, { useCallback, useEffect, useState } from "react";
+import React, { useCallback, useEffect, useRef, useState } from "react";
 import { CustomersAndNumbers, MonthlySummary, Statements } from "./BillingCustomers";
 import SaveToast, { busyText } from "./SaveToast";
+import { tenantHeaders } from "./pbxTenant";
 
 const BUSY_LABELS = [
   [/^\/statements$/, "Issuing statements…"],
@@ -37,6 +38,7 @@ function sendFile(url, file, onProgress) {
     const xhr = new XMLHttpRequest();
     xhr.open("POST", url);
     xhr.setRequestHeader("Content-Type", "application/octet-stream");
+    Object.entries(tenantHeaders()).forEach(([k, v]) => xhr.setRequestHeader(k, v));
     xhr.upload.onprogress = (e) => { if (e.lengthComputable) onProgress(Math.round((e.loaded / e.total) * 100)); };
     xhr.upload.onload = () => onProgress(null);
     xhr.onload = () => {
@@ -80,7 +82,7 @@ export default function BillingPanel({ apiBase }) {
   const api = useCallback(async (method, path, body) => {
     const res = await fetch(`${apiBase}/api/billing${path}`, {
       method,
-      headers: body ? { "Content-Type": "application/json" } : undefined,
+      headers: { ...(body ? { "Content-Type": "application/json" } : {}), ...tenantHeaders() },
       body: body ? JSON.stringify(body) : undefined,
     });
     const data = await res.json().catch(() => ({}));
@@ -256,6 +258,20 @@ function PricingTrace({ call: c, sheet }) {
 function RateSheets({ apiBase, overview, run, api, busy, setResult }) {
   const [upload, setUpload] = useState(null); // { trunk, route, file, preview, mapping, defaults, uploadSeconds }
   const [progress, setProgress] = useState(null); // { label, pct } while uploading or importing
+  const panelRef = useRef(null);
+  const uploadId = upload?.preview?.upload_id;
+
+  // Nothing is saved until Import: bring the preview into view, and warn
+  // before leaving the page with one still waiting.
+  useEffect(() => {
+    if (uploadId) panelRef.current?.scrollIntoView({ behavior: "smooth", block: "start" });
+  }, [uploadId]);
+  useEffect(() => {
+    if (!uploadId) return undefined;
+    const warn = (e) => { e.preventDefault(); e.returnValue = ""; };
+    window.addEventListener("beforeunload", warn);
+    return () => window.removeEventListener("beforeunload", warn);
+  }, [uploadId]);
 
   const choose = async (routeKey, file) => {
     if (!file) return;
@@ -322,6 +338,9 @@ function RateSheets({ apiBase, overview, run, api, busy, setResult }) {
                 <td>
                   <input type="file" accept=".csv,.tsv,.txt,.xlsx,.zip,.gz" disabled={busy || !!progress}
                     onChange={(e) => { choose(`${r.trunk}|${r.route}`, e.target.files[0]); e.target.value = ""; }} />
+                  {upload && upload.trunk === r.trunk && upload.route === r.route && (
+                    <span className="pbx-bill-status pbx-bill-provisional"> not imported yet ↓</span>
+                  )}
                   {s && (
                     <button className="ticket-action-btn idea-delete-btn" disabled={busy}
                       onClick={() => window.confirm(`Delete ${s.filename}? Calls priced from it will be re-priced from the previous sheet, or show as not priced.`)
@@ -337,7 +356,14 @@ function RateSheets({ apiBase, overview, run, api, busy, setResult }) {
       <Progress progress={progress} />
 
       {upload && (
-        <div className="ticket-action-panel pbx-gap">
+        <div className="ticket-action-panel pbx-gap" ref={panelRef}>
+          <div className="pbx-warning idea-form-row">
+            <span>Not saved yet: check the columns and counts below, then import.</span>
+            <button className="ticket-action-btn ticket-action-btn-primary"
+              disabled={busy || upload.preview.stats.problem || !upload.preview.stats.imported} onClick={doImport}>
+              Import {upload.preview.stats.imported ? upload.preview.stats.imported.toLocaleString() : ""} rates
+            </button>
+          </div>
           <div className="ticket-action-label">
             {upload.file.name} for {label(upload.trunk, upload.route)}: check which column is which
           </div>

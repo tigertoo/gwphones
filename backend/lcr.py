@@ -45,7 +45,7 @@ from fastapi.responses import PlainTextResponse
 
 import billing
 from billing import bill_seconds, from_micro, latest_fx, rate_for, route_label, to_micro
-from pbx import NUMBER_TYPES, PBX_DB_PATH, TRUNKS, VOXBEAM_ROUTES, classify_dialled, lcr_routes
+from pbx import NUMBER_TYPES, PBX_DB_PATH, TRUNKS, VOXBEAM_ROUTES, classify_dialled, current_tenant, lcr_routes
 
 TYPICAL_SECONDS = 120  # "cheapest" compares the cost of a call this long
 public_router = APIRouter(prefix="/lcr")
@@ -62,16 +62,37 @@ def _read(path: str) -> sqlite3.Connection:
     return conn
 
 
-def _pbx_settings() -> dict:
+def _pbx_settings(tenant: Optional[int] = None) -> dict:
+    """As pbx.get_settings: the server's settings, then the tenant's own
+    (price caps among them) on top; the main tenant's by default."""
+    from pbx import MAIN_TENANT
     with _read(PBX_DB_PATH) as conn:
-        return {r["key"]: r["value"] for r in conn.execute("SELECT key, value FROM settings")}
+        s = {r["key"]: r["value"] for r in conn.execute("SELECT key, value FROM settings")}
+        try:
+            s.update({r["key"]: r["value"] for r in conn.execute(
+                "SELECT key, value FROM tenant_settings WHERE tenant_id = ?", (MAIN_TENANT if tenant is None else tenant,))})
+        except sqlite3.OperationalError:
+            pass  # not migrated yet: still all in settings
+        return s
 
 
-def decide(kind: str, number: str) -> dict:
+def _tenant_by_code(code: str) -> Optional[int]:
+    """A call's tenant from its account code: none is the main tenant's,
+    a code that's no tenant's is None."""
+    from pbx import MAIN_TENANT
+    if not code:
+        return MAIN_TENANT
+    with _read(PBX_DB_PATH) as conn:
+        r = conn.execute("SELECT id FROM tenants WHERE code = ?", (code,)).fetchone()
+    return r["id"] if r else None
+
+
+def decide(kind: str, number: str, tenant: Optional[int] = None) -> dict:
     """The routes to try for `number` (international, no 00) of type `kind`,
-    with each candidate's price and why any were dropped."""
+    with each candidate's price (against the tenant's caps) and why any
+    were dropped."""
     from pbx import DEFAULT_SETTINGS
-    s = {**DEFAULT_SETTINGS, **_pbx_settings()}
+    s = {**DEFAULT_SETTINGS, **_pbx_settings(tenant)}
     mode = s.get(f"route_{kind}", "default")
     cap_text = s.get(f"cap_{kind}") or s.get("cap_default") or ""
     cap = to_micro(Decimal(cap_text)) if cap_text else None
@@ -123,7 +144,7 @@ def _token(r: dict) -> str:
 
 
 @public_router.get("/route", response_class=PlainTextResponse)
-def lcr_route(request: Request, kind: str, num: str):
+def lcr_route(request: Request, kind: str, num: str, tenant: str = ""):
     """Asked by Asterisk itself only: from this machine, not through nginx,
     with the token from the generated dialplan."""
     host = request.client.host if request.client else ""
@@ -133,10 +154,13 @@ def lcr_route(request: Request, kind: str, num: str):
         r = conn.execute("SELECT value FROM settings WHERE key = 'lcr_token'").fetchone()
     if not r or not hmac.compare_digest(request.headers.get("x-lcr-token", ""), r["value"]):
         raise HTTPException(403)
-    if kind not in NUMBER_TYPES or not re.fullmatch(r"\d{3,20}", num):
+    if kind not in NUMBER_TYPES or not re.fullmatch(r"\d{3,20}", num) or not re.fullmatch(r"\d{0,4}", tenant):
         return PlainTextResponse("REFUSE:bad request")
+    tid = _tenant_by_code(tenant)  # the caller's account code: empty for the main tenant
+    if tid is None:
+        return PlainTextResponse("REFUSE:unknown tenant")
     started = time.time()
-    d = decide(kind, num)
+    d = decide(kind, num, tid)
     reply = f"REFUSE:{d['refuse']}" if d.get("refuse") else "OK:" + "/".join(_token(r) for r in d["routes"])
     _last_check["at"] = datetime.now(timezone.utc).isoformat(timespec="seconds")
     _recent.appendleft({"at": _last_check["at"], "kind": kind, "number": num, "reply": reply,
@@ -153,7 +177,7 @@ def api_route_test(number: str):
     if kind == "emergency":
         result = {"kind": kind, "note": "Emergency calls always go straight out via Irish VoIP."}
     elif kind:
-        result = decide(kind, intl)
+        result = decide(kind, intl, current_tenant())
         result["national"] = national
     return {"result": result, "recognised": bool(kind), "recent": list(_recent),
             "last_check": _last_check["at"], "started_at": STARTED_AT,
@@ -225,9 +249,9 @@ def _route_rows(conn, trunk: str, route: str, at: str) -> dict:
     return out
 
 
-def coverage(kind: str) -> dict:
+def coverage(kind: str, tenant: Optional[int] = None) -> dict:
     from pbx import DEFAULT_SETTINGS
-    s = {**DEFAULT_SETTINGS, **_pbx_settings()}
+    s = {**DEFAULT_SETTINGS, **_pbx_settings(tenant)}
     mode = s.get(f"route_{kind}", "default")
     cap_text = s.get(f"cap_{kind}") or s.get("cap_default") or ""
     cap = to_micro(Decimal(cap_text)) if cap_text else None
@@ -306,7 +330,7 @@ def coverage(kind: str) -> dict:
 def api_coverage(kind: str = "international"):
     if kind not in NUMBER_TYPES:
         raise HTTPException(400, "Unknown number type.")
-    result = coverage(kind)
+    result = coverage(kind, current_tenant())
     # Every prefix goes along for the prefix filter: about 0.5 MB for 54,000.
     return {**result, "rows": [{**{k: v for k, v in r.items() if not k.startswith("_")},
                                 "all_prefixes": [x[0] for x in r["_prefixes"]] + r["_blocked"]}
@@ -320,7 +344,7 @@ def api_coverage_csv(kind: str = "international"):
     from fastapi.responses import Response
     if kind not in NUMBER_TYPES:
         raise HTTPException(400, "Unknown number type.")
-    result = coverage(kind)
+    result = coverage(kind, current_tenant())
     buf = io.StringIO()
     w = csv.writer(buf)
     w.writerow(["destination", "prefix", "callable", "route", "eur_per_min", "reason"])

@@ -1,5 +1,7 @@
 import React, { useEffect, useState, useCallback } from "react";
 import BillingPanel from "./BillingPanel";
+import TenantsSection from "./TenantsSection";
+import { chooseTenant, forgetTenant, setShownTenant, tenantHeaders } from "./pbxTenant";
 import IvrSection from "./IvrSection";
 import HoursSection from "./HoursSection";
 import RecordingsSection from "./RecordingsSection";
@@ -21,6 +23,7 @@ const SECTIONS = [
   { key: "hours", label: "Business Hours" },
   { key: "recordings", label: "Recordings" },
   { key: "billing", label: "Billing" },
+  { key: "tenants", label: "Tenants" },
 ];
 const STATUS_POLL_MS = 5000;
 
@@ -61,9 +64,16 @@ export default function PbxPanel({ apiBase, callNumber }) {
 
   const loadConfig = useCallback(async () => {
     try {
-      const res = await fetch(`${apiBase}/api/pbx/config`);
+      let res = await fetch(`${apiBase}/api/pbx/config`);
+      if (res.status === 400) {
+        // The tenant chosen is gone: back to the main tenant.
+        forgetTenant();
+        res = await fetch(`${apiBase}/api/pbx/config`);
+      }
       if (!res.ok) throw new Error();
-      setConfig(await res.json());
+      const data = await res.json();
+      setShownTenant(data.tenant.id); // what every save from here says it's for
+      setConfig(data);
       setLoadError(null);
     } catch {
       setLoadError("Couldn't load the phone system settings. Check the dashboard service is running.");
@@ -108,7 +118,7 @@ export default function PbxPanel({ apiBase, callNumber }) {
       const raw = body instanceof Uint8Array;
       const res = await fetch(`${apiBase}/api/pbx${path}`, {
         method,
-        headers: { "Content-Type": raw ? "application/octet-stream" : "application/json" },
+        headers: { "Content-Type": raw ? "application/octet-stream" : "application/json", ...tenantHeaders() },
         body: raw ? body : body ? JSON.stringify(body) : undefined,
       });
       const data = await res.json().catch(() => ({}));
@@ -138,9 +148,33 @@ export default function PbxPanel({ apiBase, callNumber }) {
   if (!config) return <section className="panel"><p className="panel-empty">Loading…</p></section>;
 
   const props = { config, status, send, busy, apiBase, reload: loadConfig };
+  const switchTo = (id) => {
+    chooseTenant(id);
+    setResult(null);
+    setConfig(null);
+    setStatus(null);
+    loadConfig();
+    loadStatus();
+  };
 
   return (
     <div className="pbx">
+      <div className="idea-form-row pbx-tenant-bar">
+        <label className="idea-field">
+          Tenant
+          <select className="idea-select" value={config.tenant.id} disabled={busy}
+            onChange={(e) => switchTo(e.target.value)}>
+            {config.tenants.map((t) => (
+              <option key={t.id} value={t.id}>{t.code} · {t.name}{t.status === "active" ? "" : " (suspended)"}</option>
+            ))}
+          </select>
+        </label>
+        {!config.tenant.main && (
+          <span className="pbx-tenant-flag">
+            Working on {config.tenant.name} ({config.tenant.code}): every page here is theirs
+          </span>
+        )}
+      </div>
       <div className="ticket-tabs pbx-sections">
         {SECTIONS.map((s) => (
           <button
@@ -167,6 +201,7 @@ export default function PbxPanel({ apiBase, callNumber }) {
       {section === "hours" && <HoursSection {...props} />}
       {section === "recordings" && <RecordingsSection {...props} />}
       {section === "billing" && <BillingPanel apiBase={apiBase} />}
+      {section === "tenants" && <TenantsSection {...props} switchTo={switchTo} />}
     </div>
   );
 }
@@ -308,6 +343,18 @@ function StatusSection({ config, status, send, busy }) {
           </tbody>
         </table>
       </section>
+
+      <section className="panel pbx-gap">
+        <div className="idea-form-row">
+          <button className="ticket-action-btn" disabled={busy}
+            onClick={() => send("POST", "/apply", null, "Rewritten from the dashboard's settings and reloaded.")}>
+            Re-apply to Asterisk</button>
+          <span className="pbx-hint">
+            Rewrites Asterisk's config from the dashboard and reloads it, changing nothing: for example after editing
+            pjsip.conf by hand.{status.last_apply?.at ? ` Last applied ${new Date(status.last_apply.at).toLocaleString()}.` : ""}
+          </span>
+        </div>
+      </section>
     </>
   );
 }
@@ -360,7 +407,7 @@ function SetupQr({ ext, savedEmail, apiBase, reload }) {
     setMailResult(null);
     const res = await fetch(`${apiBase}/api/pbx/extensions/${ext}/email-setup`, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: { "Content-Type": "application/json", ...tenantHeaders() },
       body: JSON.stringify(mail),
     });
     const data = await res.json().catch(() => ({}));
@@ -373,7 +420,7 @@ function SetupQr({ ext, savedEmail, apiBase, reload }) {
     setError("");
     const res = await fetch(`${apiBase}/api/pbx/extensions/${ext}/setup-link`, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: { "Content-Type": "application/json", ...tenantHeaders() },
       body: JSON.stringify({ app }),
     });
     const data = await res.json().catch(() => ({}));
@@ -1291,9 +1338,30 @@ function TrunksSection({ config, status, send, busy, apiBase }) {
             value={form.max_outbound}
             onChange={(e) => setForm({ ...form, max_outbound: Number(e.target.value) })}
           />
-          <small className="pbx-hint">A brake on toll fraud: extra calls get a busy tone.</small>
+          <small className="pbx-hint">
+            {config.tenant.main ? "A brake on toll fraud: extra calls get a busy tone."
+              : "Calls in and out together. Extra calls out get a busy tone; extra calls in go to the main mailbox."}
+          </small>
         </label>
+        {!config.tenant.main && (
+          <label className="pbx-field">
+            <span>Main mailbox</span>
+            <select className="idea-select pbx-select" value={form.main_mailbox}
+              onChange={(e) => setForm({ ...form, main_mailbox: e.target.value })}>
+              <option value="">The lowest extension</option>
+              {config.extensions.map((e) => <option key={e.ext} value={e.ext}>{e.ext} · {e.name}</option>)}
+            </select>
+            <small className="pbx-hint">Takes incoming calls over the limit.</small>
+          </label>
+        )}
       </div>
+      {!config.tenant.main && (
+        <p className="pbx-hint">
+          Caller ID, calls at once, the main mailbox and price caps are {config.tenant.name}&rsquo;s own. Trunks, their
+          order and the routes for each kind of number are the server&rsquo;s: changing them here changes them for every
+          tenant.
+        </p>
+      )}
 
       <div className="ticket-action-buttons">
         <button className="ticket-action-btn" disabled={!dirty || busy} onClick={() => setForm(config.settings)}>Undo changes</button>
