@@ -190,7 +190,8 @@ NUMBER_TYPES = {
 ROUTE_CHOICES = ["default", *TRUNKS, "cheapest", "off"]
 # Every route a call can take: Irish VoIP, and each Voxbeam route.
 ALL_ROUTES = [("irishvoip", ""), *[("voxbeam", p) for p in VOXBEAM_ROUTES]]
-LCR_URL = "http://127.0.0.1:8010/lcr/route"
+# Where Asterisk asks for the routes (lcr.py), i.e. this service's own address.
+LCR_URL = os.environ.get("PBX_LCR_URL", "http://127.0.0.1:8010/lcr/route")
 
 # Tenants (multi-tenant groundwork, phase 1): every tenant-owned row says
 # whose it is. Everything today belongs to the main tenant (code 1001);
@@ -440,9 +441,21 @@ def _now() -> str:
 # Storage
 # ---------------------------------------------------------------------------
 
+class MissingDatabase(RuntimeError):
+    pass
+
+
 def get_db() -> sqlite3.Connection:
     os.makedirs(os.path.dirname(PBX_DB_PATH) or ".", exist_ok=True)
     fresh = not os.path.exists(PBX_DB_PATH)
+    # A new, empty database where a config was already generated means
+    # PBX_DB points at the wrong place (a typo, a move to another service or
+    # server): applying from it would rewrite the live config with no
+    # extensions. Refuse, unless told on purpose (PBX_ALLOW_NEW_DB=1).
+    if fresh and os.path.exists(EXT_CONF) and os.environ.get("PBX_ALLOW_NEW_DB") != "1":
+        raise MissingDatabase(f"The phone system's database isn't at {PBX_DB_PATH}, but {GENERATED_DIR} already has a "
+                              "generated config: refusing to start from an empty one, which would remove every "
+                              "extension. Check PBX_DB (or set PBX_ALLOW_NEW_DB=1 if a new database is really meant).")
     conn = sqlite3.connect(PBX_DB_PATH)
     conn.row_factory = sqlite3.Row
     conn.executescript(
