@@ -14,7 +14,13 @@ PW = "correct horse battery"
 import time as _time
 # Recording names end with Asterisk's uniqueid: the call's time (UTC epoch).
 REC = "20261101-100000_{ext}_0871111111_in_{epoch}.{n}.ulaw"
-NOW = int(_time.time()) + 60  # after the test's extensions were created
+
+
+def now_epoch():
+    """A call time just after the test's extensions were made: taken when
+    the test runs (not when this file loads, which on a slow machine can be
+    a minute or more earlier)."""
+    return int(_time.time()) + 5
 
 
 @pytest.fixture
@@ -134,7 +140,8 @@ def test_recordings(world):
     pbx, acme = world["pbx"], world["acme"]["id"]
     folder = pbx.tenant_names(pbx.get_db(), acme).rec_dir
     os.makedirs(folder, exist_ok=True)
-    mine, bobs = REC.format(ext="201", n=1, epoch=NOW), REC.format(ext="202", n=2, epoch=NOW)
+    now = now_epoch()
+    mine, bobs = REC.format(ext="201", n=1, epoch=now), REC.format(ext="202", n=2, epoch=now)
     for name in (mine, bobs):
         open(os.path.join(folder, name), "wb").write(b"\xff" * 800)
     ann, admin = world["client"]("ann"), world["client"]("admin")
@@ -308,7 +315,8 @@ def test_earlier_holders_recordings_stay_hidden(world):
     pbx, acme = world["pbx"], world["acme"]["id"]
     folder = pbx.tenant_names(pbx.get_db(), acme).rec_dir
     os.makedirs(folder, exist_ok=True)
-    old, new = REC.format(ext="201", n=7, epoch=NOW - 86400 * 30), REC.format(ext="201", n=8, epoch=NOW)
+    now = now_epoch()
+    old, new = REC.format(ext="201", n=7, epoch=now - 86400 * 30), REC.format(ext="201", n=8, epoch=now)
     for name in (old, new):
         open(os.path.join(folder, name), "wb").write(b"\xff" * 800)
     ann, admin = world["client"]("ann"), world["client"]("admin")
