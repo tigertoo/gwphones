@@ -1,0 +1,70 @@
+# The tenant portal's public site: /etc/nginx/sites-available/portal.amapforyourmoney.com
+# (symlinked into sites-enabled). Change the name in all four places for
+# another domain. It's included inside nginx's http block, so the
+# limit_req_zone below sits at the right level.
+
+# Signing in, codes, resets and invitations: 10 a minute per address
+# (bursts of 5), on top of the portal's own lockouts.
+limit_req_zone $binary_remote_addr zone=gwportal_signin:10m rate=10r/m;
+
+server {
+    listen 80;
+    listen [::]:80;
+    server_name portal.amapforyourmoney.com;
+    return 301 https://portal.amapforyourmoney.com$request_uri;
+}
+
+server {
+    # (nginx 1.25.1 and later prefer "http2 on;", but this form works on
+    # Ubuntu 24.04's 1.24 as well.)
+    listen 443 ssl http2;
+    listen [::]:443 ssl http2;
+    server_name portal.amapforyourmoney.com;
+
+    ssl_certificate     /etc/letsencrypt/live/portal.amapforyourmoney.com/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/portal.amapforyourmoney.com/privkey.pem;
+
+    # Headers for every answer (no add_header in the locations below, or
+    # nginx would drop these there).
+    add_header Strict-Transport-Security "max-age=31536000" always;
+    add_header Content-Security-Policy "default-src 'self'; img-src 'self' data:; media-src 'self'; style-src 'self'; script-src 'self'; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'" always;
+    add_header X-Content-Type-Options "nosniff" always;
+    add_header X-Frame-Options "DENY" always;
+    add_header Referrer-Policy "no-referrer" always;
+
+    client_max_body_size 64k;
+
+    # The portal's API. X-Real-IP is overwritten with the real address,
+    # never passed on from the client: the portal's lockouts and audit
+    # log trust it.
+    location ~ ^/api/(login|login/code|password/forgot|password/reset|invite/check|invite/accept)$ {
+        limit_req zone=gwportal_signin burst=5 nodelay;
+        limit_req_status 429;
+        proxy_pass http://127.0.0.1:8020;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_hide_header X-Frame-Options;
+        proxy_hide_header X-Content-Type-Options;
+        proxy_hide_header Referrer-Policy;
+    }
+    location /api/ {
+        proxy_pass http://127.0.0.1:8020;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        # set by nginx above already
+        proxy_hide_header X-Frame-Options;
+        proxy_hide_header X-Content-Type-Options;
+        proxy_hide_header Referrer-Policy;
+    }
+
+    # The pages: built files, cached for good (their names change with
+    # every build), and index.html never cached.
+    root /opt/gwphones/portal/frontend/dist;
+    location /assets/ {
+        expires 1y;
+    }
+    location / {
+        expires -1;
+        try_files $uri /index.html;
+    }
+}
