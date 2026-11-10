@@ -53,3 +53,10 @@ def test_call_link_page_assets(env, tmp_path, monkeypatch):
     for name, kind in (("call.js", "javascript"), ("call.css", "css"), ("jssip-3.13.8.min.js", "javascript")):
         r = c.get(f"/call/static/{name}")
         assert r.status_code == 200 and kind in r.headers["content-type"] and len(r.content) > 100, name
+
+
+def test_no_api_description(env):
+    import main
+    c = TestClient(main.app)
+    for path in ("/openapi.json", "/docs", "/redoc"):
+        assert c.get(path).status_code == 404, path

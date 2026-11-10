@@ -270,6 +270,9 @@ MAIN_NAMES = TenantNames(MAIN_TENANT, MAIN_TENANT_CODE)
 # until the tenant switcher (phase 2) sets it. Every save and lookup in the
 # dashboard goes through it; the config generators take tenants explicitly.
 _current_tenant = contextvars.ContextVar("pbx_tenant", default=MAIN_TENANT)
+# Who made a change through the tenant portal (main.py, X-Portal-User):
+# only ever written into the change log, never trusted for anything.
+_acting_user = contextvars.ContextVar("pbx_acting_user", default="")
 
 
 def current_tenant() -> int:
@@ -415,10 +418,22 @@ router = APIRouter(prefix="/api/pbx")
 public_router = APIRouter(prefix="/prov")
 
 
+class _ActingUser(logging.Filter):
+    """Changes made through the tenant portal say who, for the change log."""
+    def filter(self, record):
+        who = _acting_user.get()
+        if who:
+            record.msg = f"{record.getMessage()} [portal: {who}]"
+            record.args = None
+        return True
+
+
 def _changes_logger() -> logging.Logger:
     logger = logging.getLogger("pbx_changes")
     logger.setLevel(logging.INFO)
     logger.propagate = False
+    if not any(isinstance(f, _ActingUser) for f in logger.filters):
+        logger.addFilter(_ActingUser())
     if not logger.handlers:
         try:
             os.makedirs(os.path.dirname(CHANGES_LOG_PATH), exist_ok=True)
@@ -2207,6 +2222,33 @@ def forward_target(conn, ext: str, value: str) -> str:
         raise HTTPException(400, f"{value.strip()} can't be used: forward only to an extension or an Irish landline "
                                  "or mobile (not abroad, 1800 or premium numbers).")
     return national
+
+
+@router.get("/extensions")
+def api_list_extensions():
+    """The tenant's extensions, without passwords or PINs: for the tenant
+    portal, which gets nothing else of /config. created_at tells one
+    extension from a later one with the same number."""
+    with get_db() as conn:
+        rows = conn.execute("SELECT ext, name, enabled, created_at, vm_email, record FROM extensions "
+                            "WHERE tenant_id = ? ORDER BY ext", (current_tenant(),)).fetchall()
+    return {"extensions": [{"ext": r["ext"], "name": r["name"], "enabled": bool(r["enabled"]),
+                            "created_at": r["created_at"], "vm_email": r["vm_email"], "record": bool(r["record"])}
+                           for r in rows]}
+
+
+@router.get("/status/tenant")
+def api_tenant_status():
+    """The tenant's own phones and their calls only (the full Status lists
+    every tenant's calls and the trunks): for the tenant portal."""
+    with get_db() as conn:
+        t = tenant_names(conn, current_tenant())
+    s = get_status(t)
+    calls = [{"ext": channel_ext(c["channel"], t.code), "state": c["state"], "caller_id": c["caller_id"],
+              "duration_seconds": c["duration_seconds"], "recording": c.get("recording", False)}
+             for c in s["channels"] if channel_ext(c["channel"], t.code)]
+    return {"asterisk_running": s["asterisk_running"], "checked_at": s["checked_at"],
+            "phones": {ext: {"status": v.get("status")} for ext, v in s["extensions"].items()}, "calls": calls}
 
 
 @router.get("/forwarding")

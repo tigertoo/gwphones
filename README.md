@@ -40,7 +40,16 @@ Locally, point every `PBX_*` path at scratch folders and keep
 GWPHONES_PROXY_SECRET=...   # nginx adds it as X-Proxy-Secret after its login
 GWPHONES_TOKEN=...          # optional: a Bearer token, for scripts
 GWPHONES_CORS_ORIGINS=      # normally empty: the console is served from the same site
+GWPHONES_PORTAL_SECRET=...  # the tenant portal's own credential (X-Portal-Secret); empty: no portal
 ```
+
+The tenant portal is a separate, much narrower caller: with
+`X-Portal-Secret` it may only use the routes in `PORTAL_ROUTES`
+(`main.py`), matched after routing; its tenant comes only from
+`X-PBX-Tenant` (a suspended tenant is read-only), and `X-Portal-User`
+names who's acting in `pbx-changes.log`. A request with both the
+portal's and the operator's credential is refused. There are no
+`/openapi.json` or `/docs` pages.
 
 With neither secret set everything is refused, unless
 `GWPHONES_ALLOW_NO_AUTH=1` (local development only). Changes (anything

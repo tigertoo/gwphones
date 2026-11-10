@@ -15,11 +15,13 @@ See ../README.md for settings, nginx and deploying.
 """
 
 import asyncio
+import contextvars
 import hmac
 import os
+import re
 from urllib.parse import urlsplit
 
-from fastapi import FastAPI, Request
+from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
@@ -36,8 +38,55 @@ PROXY_SECRET = os.environ.get("GWPHONES_PROXY_SECRET", "")
 # unless this is "1".
 ALLOW_NO_AUTH = os.environ.get("GWPHONES_ALLOW_NO_AUTH", "") == "1"
 CORS_ORIGINS = [o for o in os.environ.get("GWPHONES_CORS_ORIGINS", "").split(",") if o]
+# The tenant portal's own credential (X-Portal-Secret): a separate, much
+# narrower caller than the operator, see "The tenant portal" below.
+PORTAL_SECRET = os.environ.get("GWPHONES_PORTAL_SECRET", "")
 
-app = FastAPI(title="gwphones API")
+
+# ---------------------------------------------------------------------------
+# The tenant portal (portal/) calls this API for a tenant's staff, as a
+# caller of its own. It may only use the routes below, matched by method
+# and route template after routing (never the raw path, so .., // or
+# encoded slashes can't get round it); anything else is refused. Its tenant
+# comes only from X-PBX-Tenant, never the switcher cookie; an unknown tenant
+# is refused and a suspended one is read-only (it keeps its right to
+# download recordings). It never gets tenants, settings, trunks, routes,
+# apply, billing or raw passwords. X-Portal-User (who's acting) only goes
+# into the change log.
+# ---------------------------------------------------------------------------
+
+PORTAL_ROUTES = {
+    ("GET", "/api/pbx/extensions"),
+    ("POST", "/api/pbx/extensions"),
+    ("PUT", "/api/pbx/extensions/{ext}"),
+    ("POST", "/api/pbx/extensions/{ext}/reset-password"),
+    ("POST", "/api/pbx/extensions/{ext}/reset-voicemail-pin"),
+    ("POST", "/api/pbx/extensions/{ext}/setup-link"),
+    ("POST", "/api/pbx/extensions/{ext}/email-setup"),
+    ("PUT", "/api/pbx/extensions/{ext}/voicemail-email"),
+    ("GET", "/api/pbx/forwarding"),
+    ("PUT", "/api/pbx/extensions/{ext}/forwarding"),
+    ("GET", "/api/pbx/status/tenant"),
+    ("GET", "/api/pbx/recordings"),
+    ("GET", "/api/pbx/recordings/file/{name}"),
+    ("DELETE", "/api/pbx/recordings/file/{name}"),
+}
+_portal_call = contextvars.ContextVar("gw_portal_call", default=False)
+
+
+def portal_guard(request: Request):
+    """Every route's first dependency: a portal request may only reach the
+    routes in PORTAL_ROUTES (by the route that matched)."""
+    if _portal_call.get():
+        route = request.scope.get("route")
+        if (request.method, getattr(route, "path", None)) not in PORTAL_ROUTES:
+            raise HTTPException(403, "Not available to the portal.")
+
+
+# No generated API description or docs pages (/openapi.json, /docs, /redoc):
+# they'd describe every route to anyone who can reach the service.
+app = FastAPI(title="gwphones API", dependencies=[Depends(portal_guard)],
+              openapi_url=None, docs_url=None, redoc_url=None)
 
 if CORS_ORIGINS:
     app.add_middleware(CORSMiddleware, allow_origins=CORS_ORIGINS, allow_methods=["GET"], allow_headers=["*"])
@@ -89,6 +138,8 @@ def is_cross_site(request: Request) -> bool:
 
 @app.middleware("http")
 async def require_auth(request: Request, call_next):
+    if "x-portal-secret" in request.headers:
+        return await _as_portal(request, call_next)
     if request.url.path.startswith("/api/") and request.url.path != "/api/health":
         if not is_authorized(request):
             return JSONResponse({"detail": "Unauthorized"}, status_code=401)
@@ -122,6 +173,37 @@ async def _as_tenant(request: Request, call_next):
         return await call_next(request)
     finally:
         pbx._current_tenant.reset(token)
+
+
+def _portal_user(value: str) -> str:
+    """Who's acting, for the log only: printable, short, one line."""
+    return re.sub(r"[^\x20-\x7e]", "", value)[:120].strip()
+
+
+async def _as_portal(request: Request, call_next):
+    if not (PORTAL_SECRET and _matches(request.headers.get("x-portal-secret", ""), PORTAL_SECRET)):
+        return JSONResponse({"detail": "Unauthorized"}, status_code=401)
+    if "x-proxy-secret" in request.headers or "authorization" in request.headers:
+        return JSONResponse({"detail": "One credential per request."}, status_code=403)
+    import pbx
+    raw = request.headers.get("x-pbx-tenant", "")
+    row = None
+    if raw.isdigit():
+        with pbx.get_db() as conn:
+            row = conn.execute("SELECT id, status FROM tenants WHERE id = ?", (int(raw),)).fetchone()
+    if not row:
+        return JSONResponse({"detail": "Unknown tenant."}, status_code=400)
+    if row["status"] != "active" and request.method not in ("GET", "HEAD"):
+        return JSONResponse({"detail": "This account is suspended: you can still see and download, not change."},
+                            status_code=403)
+    tokens = (_portal_call.set(True), pbx._current_tenant.set(row["id"]),
+              pbx._acting_user.set(_portal_user(request.headers.get("x-portal-user", "")) or "unnamed"))
+    try:
+        return await call_next(request)
+    finally:
+        pbx._acting_user.reset(tokens[2])
+        pbx._current_tenant.reset(tokens[1])
+        _portal_call.reset(tokens[0])
 
 
 # ---------------------------------------------------------------------------
