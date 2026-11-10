@@ -8,7 +8,9 @@ import sys
 import pytest
 
 BACKEND = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "backend")
+PORTAL = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "portal")
 MODULES = ("main", "pbx", "lcr", "billing", "statements", "recordings", "ivr", "hours", "calllinks", "deskphones")
+PORTAL_ORIGIN = "https://testserver"
 
 
 def env_for(d: str) -> dict:
@@ -64,3 +66,33 @@ def client(env):
     c = TestClient(main.app)
     c.headers.update({"Authorization": "Bearer testtoken", "X-PBX-Tenant": "1"})
     return c
+
+
+@pytest.fixture
+def portal_env(tmp_path, monkeypatch):
+    """The portal's settings pointed at a scratch database; its modules
+    imported afresh."""
+    from cryptography.fernet import Fernet
+    monkeypatch.setenv("PORTAL_DB", str(tmp_path / "portal.db"))
+    monkeypatch.setenv("PORTAL_KEY", Fernet.generate_key().decode())
+    monkeypatch.setenv("PORTAL_ORIGIN", PORTAL_ORIGIN)
+    monkeypatch.setenv("PORTAL_GW_SECRET", "portal-test-secret")
+    for k in ("MS_GRAPH_TENANT_ID", "MS_GRAPH_CLIENT_ID", "MS_GRAPH_CLIENT_SECRET", "EMAIL_FROM_ADDRESS"):
+        monkeypatch.delenv(k, raising=False)
+    monkeypatch.syspath_prepend(PORTAL)
+    for m in [m for m in sys.modules if m == "gwportal" or m.startswith("gwportal.")]:
+        sys.modules.pop(m, None)
+    yield tmp_path
+    for m in [m for m in sys.modules if m == "gwportal" or m.startswith("gwportal.")]:
+        sys.modules.pop(m, None)
+
+
+@pytest.fixture
+def portal(portal_env):
+    """The portal app and a browser-like client on https (so the __Host-
+    cookie is sent), whose changes carry the portal's Origin."""
+    from fastapi.testclient import TestClient
+    from gwportal import app as portal_app
+    c = TestClient(portal_app.app, base_url=PORTAL_ORIGIN)
+    c.headers.update({"Origin": PORTAL_ORIGIN})
+    return portal_app, c

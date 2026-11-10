@@ -107,6 +107,37 @@ then, by what changed:
   `cat asterisk/extensions.conf > /etc/asterisk/extensions.conf && asterisk -rx "dialplan reload"`,
   after restarting the service if `backend/pbx.py` changed too.
 
+## The tenant portal (`portal/`)
+
+A tenant's own staff managing their phone system: a separate service
+(`gwportal`) with its own users database, doing every phone action
+through this API as the portal caller above. Being built (phase 4).
+
+- **Sign-in:** email and password (argon2id); two-factor codes (TOTP)
+  required for tenant admins and optional for users, with recovery codes;
+  the secrets encrypted with `PORTAL_KEY`.
+- **Sessions:** a `__Host-` cookie (Secure, HttpOnly, SameSite=Strict),
+  2 hours idle and 12 hours at most; every route says which session
+  states it accepts, fully signed in by default; a new token at each step.
+- **Lockouts:** an account after 5 wrong passwords or codes in a row, for
+  15 minutes; an address after 20 failures in 15 minutes. The trade-off:
+  anyone who knows an address can lock that account for 15 minutes at a
+  time, which is why it's short, why the per-address limit does most of
+  the work, and why a completed password reset clears it.
+- **Links** (invitations, resets) only ever built from `PORTAL_ORIGIN`,
+  with the token after `#`, so it never reaches the server's logs.
+- **One process:** lockouts are in its database, but its save limit and
+  Status cache are in memory, so it runs as a single uvicorn process.
+- **nginx must overwrite `X-Real-IP`** with the real address
+  (`proxy_set_header X-Real-IP $remote_addr;`): the portal trusts it for
+  lockouts and the audit log, and only listens on 127.0.0.1.
+
+Settings (its own `.env`): `PORTAL_DB`, `PORTAL_ORIGIN` (e.g.
+`https://portal.example.ie`), `PORTAL_KEY` (a Fernet key),
+`PORTAL_GW_URL`, `PORTAL_GW_SECRET` (gwphones' `GWPHONES_PORTAL_SECRET`),
+`PORTAL_BRAND`, and its own copy of `MS_GRAPH_*` and
+`EMAIL_FROM_ADDRESS`.
+
 ## Branches
 
 - `main`: what runs.
@@ -119,7 +150,7 @@ then, by what changed:
 ## Tests
 
 ```
-cd backend && venv/bin/pip install -r requirements.txt -r requirements-dev.txt
+cd backend && venv/bin/pip install -r requirements.txt -r ../portal/requirements.txt -r requirements-dev.txt
 cd .. && backend/venv/bin/pytest
 ```
 
