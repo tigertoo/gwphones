@@ -150,8 +150,9 @@ through this API as the portal caller above. Being built (phase 4).
 - **Call routing (admins only):** ring groups, IVR menus with their
   greetings (recorded in the page or from an audio file, converted to
   8 kHz there; up to 2 minutes, checked before reading), and business
-  hours with "close now / open now"; the tenant's numbers shown read
-  only. Destinations come from gwphones as a labelled list
+  hours with "close now / open now"; and where the tenant's own numbers
+  go (`PUT /api/pbx/inbound/{did}/target`: only that, never adding,
+  taking or removing a number, which stays the operator's). Destinations come from gwphones as a labelled list
   (`/api/pbx/routing`), only ever the tenant's own. These routes sit on a
   router that refuses anyone but an admin.
 - **Limits:** 20 saves a minute per tenant (each one reloads Asterisk for

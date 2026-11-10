@@ -78,3 +78,18 @@ def test_greeting_size_checked_first(world, monkeypatch):
     assert r.status_code == 400 and "2 minutes" in r.json()["detail"] and not calls
     r = admin.put("/api/menus/500/greeting", content=b"\xff" * 100, headers={"Content-Type": "application/octet-stream"})
     assert r.status_code == 400 and "too short" in r.json()["detail"] and not calls
+
+
+def test_number_target(world):
+    pbx, acme = world["pbx"], world["acme"]["id"]
+    token = pbx._current_tenant.set(acme)
+    try:
+        pbx.api_set_inbound_route(pbx.InboundRouteRequest(did="35315559999", target="201", label="Acme main"))
+    finally:
+        pbx._current_tenant.reset(token)
+    admin = world["client"]("admin")
+    admin.post("/api/menus", json={"name": "Welcome", "options": {"1": "201"}})
+    assert admin.put("/api/numbers/35315559999", json={"target": "500"}).status_code == 200
+    assert admin.get("/api/routing").json()["numbers"] == [{"did": "35315559999", "label": "Acme main", "target": "500"}]
+    assert admin.put("/api/numbers/35315550000", json={"target": "500"}).status_code == 404  # not Acme's
+    assert world["client"]("ann").put("/api/numbers/35315559999", json={"target": "201"}).status_code == 403

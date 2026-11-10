@@ -2741,6 +2741,25 @@ def api_set_inbound_route(req: InboundRouteRequest):
         return {"did": did, **apply_config(conn, f"Inbound route {did} -> {target}")}
 
 
+class InboundTargetRequest(BaseModel):
+    target: str
+
+
+@router.put("/inbound/{did}/target")
+def api_inbound_target(did: str, req: InboundTargetRequest):
+    """Where one of the current tenant's numbers sends calls, and nothing
+    else: never adds, takes or removes a number (that stays the
+    operator's), and anything not the tenant's is simply not found. For
+    tenant admins in the portal."""
+    with _lock, get_db() as conn:
+        target = _valid_target(conn, req.target)
+        if conn.execute("UPDATE inbound_routes SET target = ? WHERE did = ? AND tenant_id = ?",
+                        (target, normalize_did(did), current_tenant())).rowcount == 0:
+            raise HTTPException(404, "Number not found.")
+        conn.commit()
+        return apply_config(conn, f"Inbound route {normalize_did(did)} -> {target}")
+
+
 @router.delete("/inbound/{did}")
 def api_delete_inbound_route(did: str):
     with _lock, get_db() as conn:

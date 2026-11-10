@@ -127,3 +127,53 @@ def test_suspended_routing_read_only(routing):
     assert portal.get("/api/pbx/ivr/500/greeting").status_code == 200
     assert portal.put("/api/pbx/hours/400/override", json={"override": "open"}).status_code == 403
     assert portal.delete("/api/pbx/ivr/500/greeting").status_code == 403
+
+
+# -- where the tenant's own numbers go -----------------------------------------------------------
+
+@pytest.fixture
+def numbers(routing):
+    main, pbx, op, portal, acme = routing
+    token = pbx._current_tenant.set(acme)
+    try:
+        pbx.api_set_inbound_route(pbx.InboundRouteRequest(did="35315559999", target="201", label="Acme main"))
+    finally:
+        pbx._current_tenant.reset(token)
+    return routing
+
+
+def route(pbx, did):
+    return dict(pbx.get_db().execute("SELECT * FROM inbound_routes WHERE did = ?", (did,)).fetchone())
+
+
+def test_number_target_is_the_tenants(numbers):
+    main, pbx, op, portal, acme = numbers
+    theirs = route(pbx, "35315550000")
+    r = portal.put("/api/pbx/inbound/35315559999/target", json={"target": "500"})
+    assert r.status_code == 200
+    mine = route(pbx, "35315559999")
+    assert mine["target"] == "500" and mine["label"] == "Acme main" and mine["tenant_id"] == acme
+    assert route(pbx, "35315550000") == theirs
+    assert [n["target"] for n in portal.get("/api/pbx/routing").json()["numbers"]] == ["500"]
+
+
+def test_number_of_another_tenant_or_nobody_not_found(numbers):
+    main, pbx, op, portal, acme = numbers
+    theirs = route(pbx, "35315550000")
+    assert portal.put("/api/pbx/inbound/35315550000/target", json={"target": "201"}).status_code == 404
+    assert portal.put("/api/pbx/inbound/35318880000/target", json={"target": "201"}).status_code == 404
+    assert route(pbx, "35315550000") == theirs
+    assert pbx.get_db().execute("SELECT 1 FROM inbound_routes WHERE did = '35318880000'").fetchone() is None
+
+
+def test_numbers_cant_be_added_or_removed(numbers):
+    main, pbx, op, portal, acme = numbers
+    assert portal.post("/api/pbx/inbound", json={"did": "35318880000", "target": "201"}).status_code == 403
+    assert portal.delete("/api/pbx/inbound/35315559999").status_code == 403
+
+
+@pytest.mark.parametrize("target", ["203", "601", "vm:201", "hangup", ""])
+def test_number_target_must_be_the_tenants_and_a_place(numbers, target):
+    main, pbx, op, portal, acme = numbers
+    assert portal.put("/api/pbx/inbound/35315559999/target", json={"target": target}).status_code == 400
+    assert route(pbx, "35315559999")["target"] == "201"

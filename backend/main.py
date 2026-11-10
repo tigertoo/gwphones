@@ -88,6 +88,9 @@ PORTAL_ROUTES = {
     ("PUT", "/api/pbx/hours/{number}"),
     ("PUT", "/api/pbx/hours/{number}/override"),
     ("DELETE", "/api/pbx/hours/{number}"),
+    # Where the tenant's own numbers go (only that: adding, taking or
+    # removing a number is the operator's, POST /inbound isn't here).
+    ("PUT", "/api/pbx/inbound/{did}/target"),
 }
 _portal_call = contextvars.ContextVar("gw_portal_call", default=False)
 

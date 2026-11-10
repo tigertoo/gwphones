@@ -34,7 +34,7 @@ export function Routing() {
       {part === "hours" && <HoursList data={data} onChange={load} />}
       {part === "menus" && <Menus data={data} onChange={load} />}
       {part === "groups" && <Groups data={data} onChange={load} />}
-      {part === "numbers" && <Numbers data={data} />}
+      {part === "numbers" && <Numbers data={data} onChange={load} />}
     </section>
   );
 }
@@ -438,20 +438,41 @@ function GroupEditor({ data, g, onDone, onCancel }) {
 
 // -- numbers (read only) --------------------------------------------------------------------------------
 
-function Numbers({ data }) {
+function Numbers({ data, onChange }) {
   return (
     <>
-      <p className="small muted">Your phone numbers and where their calls go. To change where a number goes, contact us.</p>
+      <p className="small muted">Your phone numbers and where their calls go: an extension, a ring group, a menu or
+        opening hours. To add or give up a number, contact us.</p>
       {data.numbers.length === 0 ? <p className="muted">No numbers yet.</p> : (
-        <ul className="list compact">
-          {data.numbers.map((n) => (
-            <li key={n.did} className="row-head static">
-              <span className="grow">{n.label || n.did}<span className="small muted block">{n.did}</span></span>
-              <span className="small">→ {describe(data, n.target)}</span>
-            </li>
-          ))}
+        <ul className="list">
+          {data.numbers.map((n) => <NumberItem key={n.did} n={n} data={data} onChange={onChange} />)}
         </ul>
       )}
     </>
+  );
+}
+
+function NumberItem({ n, data, onChange }) {
+  const [target, setTarget] = useState(n.target);
+  const a = useAction();
+  const save = () => a.run(() => put(`/numbers/${n.did}`, { target }), "Saved.").then((r) => r && onChange());
+  return (
+    <li className="row">
+      <div className="row-head static">
+        <span className="grow">{n.label || n.did}<span className="small muted block">{n.did}</span></span>
+      </div>
+      <div className="editor">
+        <Field label="Calls to this number go to">
+          <Destination data={data} value={target} onChange={setTarget} exclude={["voicemail", "hangup"]}
+            label={`Calls to ${n.did}`} />
+        </Field>
+        <div className="buttons">
+          <Button busy={a.busy} kind="secondary" disabled={!target || target === n.target} onClick={() => window.confirm(
+            `Send every call to ${n.label || n.did} to ${describe(data, target)}? It takes effect straight away.`) && save()}>
+            Save</Button>
+        </div>
+        {a.show}
+      </div>
+    </li>
   );
 }

@@ -186,4 +186,16 @@ def api_delete_hours(number: str, request: Request, me: Signed = Depends(admin))
     return _done(r)
 
 
+# -- where the organisation's numbers go ------------------------------------------------------
+
+class NumberTarget(BaseModel):
+    target: str
+
+
+@router.put("/numbers/{did}")
+def api_number_target(did: str, req: NumberTarget, request: Request, me: Signed = Depends(admin)):
+    """Only where the number sends calls: the numbers themselves are ours."""
+    return _save(me, request, "PUT", f"/inbound/{did}/target", _body(req), f"number {did} now goes to {req.target}")
+
+
 app.include_router(router)
