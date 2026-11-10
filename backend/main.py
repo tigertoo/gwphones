@@ -72,6 +72,22 @@ PORTAL_ROUTES = {
     ("GET", "/api/pbx/recordings"),
     ("GET", "/api/pbx/recordings/file/{name}"),
     ("DELETE", "/api/pbx/recordings/file/{name}"),
+    # Ring groups, IVR menus (and greetings) and business hours: the portal
+    # lets only a tenant's admins at these.
+    ("GET", "/api/pbx/routing"),
+    ("POST", "/api/pbx/ringgroups"),
+    ("PUT", "/api/pbx/ringgroups/{number}"),
+    ("DELETE", "/api/pbx/ringgroups/{number}"),
+    ("POST", "/api/pbx/ivr"),
+    ("PUT", "/api/pbx/ivr/{number}"),
+    ("DELETE", "/api/pbx/ivr/{number}"),
+    ("GET", "/api/pbx/ivr/{number}/greeting"),
+    ("PUT", "/api/pbx/ivr/{number}/greeting"),
+    ("DELETE", "/api/pbx/ivr/{number}/greeting"),
+    ("POST", "/api/pbx/hours"),
+    ("PUT", "/api/pbx/hours/{number}"),
+    ("PUT", "/api/pbx/hours/{number}/override"),
+    ("DELETE", "/api/pbx/hours/{number}"),
 }
 _portal_call = contextvars.ContextVar("gw_portal_call", default=False)
 

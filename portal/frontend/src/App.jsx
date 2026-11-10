@@ -2,6 +2,7 @@ import React, { useCallback, useEffect, useState } from "react";
 import { get, post } from "./api";
 import { Account } from "./Account";
 import { Extensions, Recordings, Status } from "./Phones";
+import { Routing } from "./Routing";
 import { CodeStep, LinkPage, SetUpCodes, SignIn } from "./SignIn";
 import { Staff } from "./Staff";
 import { Message } from "./ui";
@@ -11,7 +12,8 @@ import { Message } from "./ui";
 // /reset#...
 
 const TABS = {
-  admin: [["extensions", "Extensions"], ["status", "Status"], ["recordings", "Recordings"], ["staff", "Staff"], ["account", "Account"]],
+  admin: [["extensions", "Extensions"], ["routing", "Call routing"], ["status", "Status"], ["recordings", "Recordings"],
+    ["staff", "Staff"], ["account", "Account"]],
   user: [["extensions", "My phone"], ["status", "Status"], ["recordings", "Recordings"], ["account", "Account"]],
 };
 
@@ -79,6 +81,7 @@ function Portal() {
           Contact us to restore it.</Message>
       )}
       {tab === "extensions" && <Extensions me={me} />}
+      {tab === "routing" && me.role === "admin" && <Routing />}
       {tab === "status" && <Status />}
       {tab === "recordings" && <Recordings me={me} />}
       {tab === "staff" && me.role === "admin" && <Staff me={me} />}

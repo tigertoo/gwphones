@@ -147,6 +147,13 @@ through this API as the portal caller above. Being built (phase 4).
   the request, and shows a save gwphones couldn't apply to Asterisk yet as
   "Saved. It takes effect in a moment." (logged as a warning: an alert to
   the operator is still to come).
+- **Call routing (admins only):** ring groups, IVR menus with their
+  greetings (recorded in the page or from an audio file, converted to
+  8 kHz there; up to 2 minutes, checked before reading), and business
+  hours with "close now / open now"; the tenant's numbers shown read
+  only. Destinations come from gwphones as a labelled list
+  (`/api/pbx/routing`), only ever the tenant's own. These routes sit on a
+  router that refuses anyone but an admin.
 - **Limits:** 20 saves a minute per tenant (each one reloads Asterisk for
   the whole server); Status and forwarding cached 5 seconds per tenant.
 

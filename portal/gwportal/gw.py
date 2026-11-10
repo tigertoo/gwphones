@@ -34,16 +34,22 @@ def _client():
 
 
 class Pending:
-    """A save that worked but isn't live in Asterisk yet."""
+    """A save that worked but isn't live in Asterisk yet; data is the rest
+    of gwphones' answer (e.g. the number a new group was given)."""
+    def __init__(self, data=None):
+        self.data = data or {}
 
 
-def call(user, method: str, path: str, json=None, params=None, raw: bool = False):
+def call(user, method: str, path: str, json=None, params=None, raw: bool = False, content: bytes = None):
+    """content: a raw body (audio) instead of JSON."""
     headers = {"X-Portal-Secret": config.GW_SECRET, "X-Portal-Tenant": user["tenant_code"],
                "X-Portal-User": user["email"]}
+    if content is not None:
+        headers["Content-Type"] = "application/octet-stream"
     try:
         c = _client()
         c.cookies.clear()
-        r = c.request(method, f"/api/pbx{path}", json=json, params=params, headers=headers)
+        r = c.request(method, f"/api/pbx{path}", json=json, params=params, headers=headers, content=content)
     except httpx.HTTPError as e:
         log.warning("gwphones unreachable: %s", type(e).__name__)
         raise Refused(UNAVAILABLE, 503)
@@ -54,7 +60,7 @@ def call(user, method: str, path: str, json=None, params=None, raw: bool = False
     data = r.json()
     if isinstance(data, dict) and data.get("ok") is False:
         log.warning("Saved but not applied for tenant %s: %s", user["tenant_code"], "; ".join(data.get("messages") or []))
-        return Pending()
+        return Pending(data)
     return data
 
 

@@ -2260,6 +2260,49 @@ def api_tenant_status():
             "phones": {ext: {"status": v.get("status")} for ext, v in s["extensions"].items()}, "calls": calls}
 
 
+@router.get("/routing")
+def api_routing():
+    """The tenant's ring groups, IVR menus and business hours, the places a
+    call can be sent (built here, with labels, so a caller never has to
+    know how they're written), and its numbers with where they go (read
+    only). For the tenant portal, which gets nothing else of /config."""
+    tid = current_tenant()
+    with get_db() as conn:
+        t = tenant_names(conn, tid)
+        exts = conn.execute("SELECT ext, name, enabled FROM extensions WHERE tenant_id = ? ORDER BY ext", (tid,)).fetchall()
+        groups = conn.execute("SELECT * FROM ring_groups WHERE tenant_id = ? ORDER BY number", (tid,)).fetchall()
+        menus = conn.execute("SELECT * FROM ivr_menus WHERE tenant_id = ? ORDER BY number", (tid,)).fetchall()
+        hours = conn.execute("SELECT * FROM business_hours WHERE tenant_id = ? ORDER BY number", (tid,)).fetchall()
+        numbers = conn.execute("SELECT did, label, target FROM inbound_routes WHERE tenant_id = ? ORDER BY did",
+                               (tid,)).fetchall()
+    places = ([{"value": e["ext"], "label": f"{e['ext']} · {e['name']}", "kind": "extension",
+                "enabled": bool(e["enabled"])} for e in exts]
+              + [{"value": g["number"], "label": f"{g['number']} · {g['name']}", "kind": "group", "enabled": True}
+                 for g in groups]
+              + [{"value": m["number"], "label": f"{m['number']} · {m['name']}", "kind": "menu", "enabled": True}
+                 for m in menus]
+              + [{"value": h["number"], "label": f"{h['number']} · {h['name']}", "kind": "hours", "enabled": True}
+                 for h in hours]
+              + [{"value": f"vm:{e['ext']}", "label": f"Voicemail {e['ext']} · {e['name']}", "kind": "voicemail",
+                  "enabled": bool(e["enabled"])} for e in exts]
+              + [{"value": "hangup", "label": "Hang up", "kind": "hangup", "enabled": True}])
+    return {
+        "ring_groups": [{"number": r["number"], "name": r["name"], "strategy": r["strategy"],
+                         "ring_time": r["ring_time"], "members": _members(r), "voicemail": r["voicemail"]} for r in groups],
+        "ivr_menus": [{"number": r["number"], "name": r["name"], "options": menu_options(r), "fallback": r["fallback"],
+                       "timeout": r["timeout"], "retries": r["retries"], "direct_dial": bool(r["direct_dial"]),
+                       "greeting": os.path.exists(greeting_path(r["number"], t))} for r in menus],
+        "business_hours": [{"number": r["number"], "name": r["name"], "week": hours_week(r), "holidays": hours_holidays(r),
+                            "open_target": r["open_target"], "closed_target": r["closed_target"],
+                            "override": r["override"], "open_now": hours_open_now(r)} for r in hours],
+        "destinations": places,
+        "numbers": [{"did": r["did"], "label": r["label"], "target": r["target"]} for r in numbers],
+        "limits": {"group_min": GROUP_MIN, "group_max": GROUP_MAX, "menu_min": MENU_MIN, "menu_max": MENU_MAX,
+                   "hours_min": HOURS_MIN, "hours_max": HOURS_MAX},
+        "timezone": PBX_TIMEZONE,
+    }
+
+
 @router.get("/forwarding")
 def api_forwarding():
     with get_db() as conn:

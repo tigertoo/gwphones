@@ -135,7 +135,7 @@ def api_new_extension(req: NewExtension, request: Request, me: Signed = Depends(
     _admin(me)
     _saving(me.user)
     r = gw.call(me.user, "POST", "/extensions", json={"name": req.name})
-    ext = r.get("ext") if isinstance(r, dict) else None
+    ext = (r.data if isinstance(r, gw.Pending) else r).get("ext")
     _audit(me, request, "extension created", f"{ext} {req.name}")
     return _done(r, {"ext": ext} if ext else None)
 

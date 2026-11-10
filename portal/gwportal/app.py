@@ -315,3 +315,4 @@ def mail_like(email: str) -> bool:
 
 # The phone actions and staff management register their routes on app.
 from . import phone  # noqa: E402,F401
+from . import routing  # noqa: E402,F401
