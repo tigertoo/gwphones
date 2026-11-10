@@ -132,6 +132,24 @@ through this API as the portal caller above. Being built (phase 4).
   (`proxy_set_header X-Real-IP $remote_addr;`): the portal trusts it for
   lockouts and the audit log, and only listens on 127.0.0.1.
 
+- **Roles:** a tenant admin manages the whole tenant and its staff. A
+  user has one extension, bound by its identity (number and creation
+  time): they see and act on that one only, and only its recordings made
+  since it was created; if it's deleted or replaced the binding ends and
+  they're signed out. Users may rename it, play its recordings and change
+  its forwarding, PIN, phone setup and voicemail email (setup and
+  voicemail emails go to their own address only); only admins create or
+  switch off extensions, invite staff and delete recordings, which takes
+  confirming a warning first (`?confirm=true`; without it the answer is
+  the warning). A tenant's last admin can't be demoted or disabled.
+- **What gwphones says** is never passed on whole: the portal picks
+  fields, keeps gwphones' messages only when they're plain answers about
+  the request, and shows a save gwphones couldn't apply to Asterisk yet as
+  "Saved. It takes effect in a moment." (logged as a warning: an alert to
+  the operator is still to come).
+- **Limits:** 20 saves a minute per tenant (each one reloads Asterisk for
+  the whole server); Status and forwarding cached 5 seconds per tenant.
+
 Settings (its own `.env`): `PORTAL_DB`, `PORTAL_ORIGIN` (e.g.
 `https://portal.example.ie`), `PORTAL_KEY` (a Fernet key),
 `PORTAL_GW_URL`, `PORTAL_GW_SECRET` (gwphones' `GWPHONES_PORTAL_SECRET`),

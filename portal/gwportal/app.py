@@ -311,3 +311,7 @@ def create_user(conn, email: str, tenant_code: str, role: str, name: str = "", e
 def mail_like(email: str) -> bool:
     import re
     return bool(re.fullmatch(r"[^@\s,;<>\"']{1,64}@[a-z0-9.-]{1,190}\.[a-z]{2,24}", email))
+
+
+# The phone actions and staff management register their routes on app.
+from . import phone  # noqa: E402,F401
