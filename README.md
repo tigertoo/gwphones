@@ -150,6 +150,23 @@ through this API as the portal caller above. Being built (phase 4).
 - **Limits:** 20 saves a minute per tenant (each one reloads Asterisk for
   the whole server); Status and forwarding cached 5 seconds per tenant.
 
+**The operator's command** (on the server, as the portal's user; it reads
+the portal's `.env` itself):
+
+```
+venv/bin/python -m gwportal.cli invite --tenant 1002 --email anne@acme.ie --name "Anne Byrne"
+venv/bin/python -m gwportal.cli invite --tenant 1002 --email anne@acme.ie --print-link
+venv/bin/python -m gwportal.cli list --tenant 1002
+venv/bin/python -m gwportal.cli reset-2fa --email anne@acme.ie
+venv/bin/python -m gwportal.cli disable --email anne@acme.ie        (and enable)
+```
+
+`invite` makes a tenant's first admin, who then invites their own staff,
+after checking with gwphones that the tenant exists and is active;
+`--print-link` shows the invitation link instead of emailing it.
+`reset-2fa` is for an admin who lost their phone and their recovery
+codes: they set two-factor codes up again at their next sign-in.
+
 Settings (its own `.env`): `PORTAL_DB`, `PORTAL_ORIGIN` (e.g.
 `https://portal.example.ie`), `PORTAL_KEY` (a Fernet key),
 `PORTAL_GW_URL`, `PORTAL_GW_SECRET` (gwphones' `GWPHONES_PORTAL_SECRET`),
