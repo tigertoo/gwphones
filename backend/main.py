@@ -48,7 +48,8 @@ PORTAL_SECRET = os.environ.get("GWPHONES_PORTAL_SECRET", "")
 # caller of its own. It may only use the routes below, matched by method
 # and route template after routing (never the raw path, so .., // or
 # encoded slashes can't get round it); anything else is refused. Its tenant
-# comes only from X-PBX-Tenant, never the switcher cookie; an unknown tenant
+# comes only from X-Portal-Tenant, by its code (1002; the operator's
+# X-PBX-Tenant and switcher cookie mean nothing here); an unknown tenant
 # is refused and a suspended one is read-only (it keeps its right to
 # download recordings). It never gets tenants, settings, trunks, routes,
 # apply, billing or raw passwords. X-Portal-User (who's acting) only goes
@@ -56,6 +57,7 @@ PORTAL_SECRET = os.environ.get("GWPHONES_PORTAL_SECRET", "")
 # ---------------------------------------------------------------------------
 
 PORTAL_ROUTES = {
+    ("GET", "/api/pbx/tenant"),
     ("GET", "/api/pbx/extensions"),
     ("POST", "/api/pbx/extensions"),
     ("PUT", "/api/pbx/extensions/{ext}"),
@@ -186,11 +188,11 @@ async def _as_portal(request: Request, call_next):
     if "x-proxy-secret" in request.headers or "authorization" in request.headers:
         return JSONResponse({"detail": "One credential per request."}, status_code=403)
     import pbx
-    raw = request.headers.get("x-pbx-tenant", "")
+    code = request.headers.get("x-portal-tenant", "")
     row = None
-    if raw.isdigit():
+    if re.fullmatch(r"[0-9]{4}", code):
         with pbx.get_db() as conn:
-            row = conn.execute("SELECT id, status FROM tenants WHERE id = ?", (int(raw),)).fetchone()
+            row = conn.execute("SELECT id, status FROM tenants WHERE code = ?", (code,)).fetchone()
     if not row:
         return JSONResponse({"detail": "Unknown tenant."}, status_code=400)
     if row["status"] != "active" and request.method not in ("GET", "HEAD"):

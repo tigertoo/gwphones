@@ -46,7 +46,7 @@ GWPHONES_PORTAL_SECRET=...  # the tenant portal's own credential (X-Portal-Secre
 The tenant portal is a separate, much narrower caller: with
 `X-Portal-Secret` it may only use the routes in `PORTAL_ROUTES`
 (`main.py`), matched after routing; its tenant comes only from
-`X-PBX-Tenant` (a suspended tenant is read-only), and `X-Portal-User`
+`X-Portal-Tenant`, by code (1002; a suspended tenant is read-only), and `X-Portal-User`
 names who's acting in `pbx-changes.log`. A request with both the
 portal's and the operator's credential is refused. There are no
 `/openapi.json` or `/docs` pages.

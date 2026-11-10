@@ -29,8 +29,9 @@ def two(env, monkeypatch):
                 pbx.api_create_extension(pbx.ExtensionCreate(ext=e, name=f"T{tid} {e}"))
         finally:
             pbx._current_tenant.reset(token)
+    code = conn.execute("SELECT code FROM tenants WHERE id = ?", (acme,)).fetchone()["code"]
     portal = TestClient(main.app)
-    portal.headers.update({"X-Portal-Secret": PORTAL, "X-PBX-Tenant": str(acme), "X-Portal-User": "alice@acme.example"})
+    portal.headers.update({"X-Portal-Secret": PORTAL, "X-Portal-Tenant": code, "X-Portal-User": "alice@acme.example"})
     return main, pbx, op, portal, acme
 
 
@@ -58,17 +59,26 @@ def test_both_credentials_refused(two):
     assert portal.get("/api/pbx/extensions", headers={"X-Proxy-Secret": "x"}).status_code == 403
 
 
-@pytest.mark.parametrize("tenant", ["", "abc", "999", "1 ", "-1"])
-def test_tenant_header_required_and_known(two, tenant):
+@pytest.mark.parametrize("tenant", ["", "abc", "999", "1", "2", "1002 ", "10022", "-100", "9999"])
+def test_tenant_code_required_and_known(two, tenant):
     main, pbx, op, portal, acme = two
-    assert portal.get("/api/pbx/extensions", headers={"X-PBX-Tenant": tenant}).status_code == 400
+    assert portal.get("/api/pbx/extensions", headers={"X-Portal-Tenant": tenant}).status_code == 400
 
 
-def test_switcher_cookie_ignored(two):
+def test_operator_tenant_header_and_cookie_ignored(two):
     main, pbx, op, portal, acme = two
     portal.cookies.set("pbx_tenant", "1")
-    exts = portal.get("/api/pbx/extensions").json()["extensions"]
+    exts = portal.get("/api/pbx/extensions", headers={"X-PBX-Tenant": "1"}).json()["extensions"]
     assert [e["ext"] for e in exts] == ["201", "202"] and all(e["name"].startswith(f"T{acme} ") for e in exts)
+    # the operator's header alone names no tenant for the portal
+    assert TestClient(main.app).get("/api/pbx/extensions", headers={
+        "X-Portal-Secret": PORTAL, "X-PBX-Tenant": str(acme)}).status_code == 400
+
+
+def test_own_tenant(two):
+    main, pbx, op, portal, acme = two
+    assert portal.get("/api/pbx/tenant").json() == {"code": portal.headers["X-Portal-Tenant"], "name": "Acme",
+                                                     "status": "active"}
 
 
 def test_operator_unaffected(two):

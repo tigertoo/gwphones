@@ -2224,6 +2224,15 @@ def forward_target(conn, ext: str, value: str) -> str:
     return national
 
 
+@router.get("/tenant")
+def api_own_tenant():
+    """The tenant being worked on: its code, name and status, nothing else
+    (for the tenant portal, which never sees the tenants list)."""
+    with get_db() as conn:
+        r = conn.execute("SELECT code, name, status FROM tenants WHERE id = ?", (current_tenant(),)).fetchone()
+    return {"code": r["code"], "name": r["name"], "status": r["status"]}
+
+
 @router.get("/extensions")
 def api_list_extensions():
     """The tenant's extensions, without passwords or PINs: for the tenant
