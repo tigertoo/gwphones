@@ -770,6 +770,13 @@ limit in its `/admin-api/` location:
 
 ### PBX certificate
 
+**It must be an RSA certificate, not ECDSA.** Desk phones' firmware (a
+Panasonic KX-HDV130, older Yealinks) often offers only RSA cipher suites,
+and with an ECDSA certificate the TLS handshake fails ("no shared cipher"
+in Asterisk's log); the apps don't mind either way. Since 11 November
+2026 the `pbx.amapforyourmoney.com` lineage is RSA 2048 (`--key-type rsa`,
+kept by certbot at every renewal).
+
 The phones' TLS certificate is Let's Encrypt's, for `PBX_PUBLIC_HOST` and
 the tenants' hostnames, `*.sip.amapforyourmoney.com` (one wildcard name,
 so a new tenant's hostname needs no new certificate; the DNS wildcard
