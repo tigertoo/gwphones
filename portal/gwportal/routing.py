@@ -198,4 +198,57 @@ def api_number_target(did: str, req: NumberTarget, request: Request, me: Signed 
     return _save(me, request, "PUT", f"/inbound/{did}/target", _body(req), f"number {did} now goes to {req.target}")
 
 
+# -- call links -------------------------------------------------------------------------------
+# A URL anyone can open to call the organisation from a browser. Video is
+# a paid add-on that isn't built yet: the portal keeps each link's video
+# setting as the operator set it, and its own new links are audio only.
+
+LINK_KEYS = ("id", "label", "target", "video", "max_minutes", "enabled", "live", "last_opened_at", "url", "qr")
+
+
+class CallLink(BaseModel):
+    label: str
+    target: str
+    max_minutes: int = 30
+    enabled: bool = True
+
+
+def _links(me: Signed) -> List[dict]:
+    return gw.call(me.user, "GET", "/call-links")["links"]
+
+
+@router.get("/call-links")
+def api_call_links(me: Signed = Depends(admin)):
+    r = gw.call(me.user, "GET", "/call-links")
+    return {"links": [{k: l.get(k) for k in LINK_KEYS} for l in r["links"]], "ready": r["ready"],
+            "max_minutes": r["max_minutes"]}
+
+
+@router.post("/call-links")
+def api_new_call_link(req: CallLink, request: Request, me: Signed = Depends(admin)):
+    return _save(me, request, "POST", "/call-links", {**_body(req), "video": False}, f"call link created ({req.label})")
+
+
+@router.put("/call-links/{link_id}")
+def api_change_call_link(link_id: int, req: CallLink, request: Request, me: Signed = Depends(admin)):
+    current = next((l for l in _links(me) if l["id"] == link_id), None)
+    if not current:
+        raise auth.Refused("Not found.", 404)
+    body = {**_body(req), "video": current["video"]}  # as the operator set it
+    return _save(me, request, "PUT", f"/call-links/{link_id}", body, f"call link {link_id} changed")
+
+
+@router.post("/call-links/{link_id}/new-url")
+def api_call_link_new_url(link_id: int, request: Request, me: Signed = Depends(admin)):
+    return _save(me, request, "POST", f"/call-links/{link_id}/new-url", None, f"call link {link_id}: new address")
+
+
+@router.delete("/call-links/{link_id}")
+def api_delete_call_link(link_id: int, request: Request, me: Signed = Depends(admin)):
+    _saving(me.user)
+    r = gw.call(me.user, "DELETE", f"/call-links/{link_id}")
+    _audit(me, request, "call link deleted", str(link_id))
+    return _done(r)
+
+
 app.include_router(router)

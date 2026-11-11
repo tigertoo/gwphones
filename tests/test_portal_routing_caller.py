@@ -177,3 +177,56 @@ def test_number_target_must_be_the_tenants_and_a_place(numbers, target):
     main, pbx, op, portal, acme = numbers
     assert portal.put("/api/pbx/inbound/35315559999/target", json={"target": target}).status_code == 400
     assert route(pbx, "35315559999")["target"] == "201"
+
+
+# -- call links ------------------------------------------------------------------------------------
+
+@pytest.fixture
+def links(routing):
+    """Each tenant has a call link to its own 600; the main tenant's has video."""
+    main, pbx, op, portal, acme = routing
+    import calllinks
+    ids = {}
+    for tid, video in ((1, True), (acme, False)):
+        token = pbx._current_tenant.set(tid)
+        try:
+            calllinks.api_add_call_link(calllinks.CallLinkRequest(label=f"T{tid} website", target="600", video=video))
+        finally:
+            pbx._current_tenant.reset(token)
+        ids[tid] = pbx.get_db().execute("SELECT id FROM call_links WHERE tenant_id = ?", (tid,)).fetchone()["id"]
+    return routing, ids
+
+
+def link(pbx, link_id):
+    r = pbx.get_db().execute("SELECT * FROM call_links WHERE id = ?", (link_id,)).fetchone()
+    return dict(r) if r else None
+
+
+def test_call_links_list_is_the_tenants(links):
+    (main, pbx, op, portal, acme), ids = links
+    r = portal.get("/api/pbx/call-links").json()["links"]
+    assert [l["label"] for l in r] == [f"T{acme} website"] and r[0]["url"].endswith(link(pbx, ids[acme])["token"])
+    assert link(pbx, ids[1])["token"] not in str(r)
+
+
+def test_call_link_changes_are_the_tenants(links):
+    (main, pbx, op, portal, acme), ids = links
+    theirs = link(pbx, ids[1])
+    body = {"label": "X", "target": "201"}
+    assert portal.put(f"/api/pbx/call-links/{ids[1]}", json=body).status_code == 404
+    assert portal.post(f"/api/pbx/call-links/{ids[1]}/new-url").status_code == 404
+    assert portal.delete(f"/api/pbx/call-links/{ids[1]}").status_code == 404
+    assert link(pbx, ids[1]) == theirs
+    old = link(pbx, ids[acme])["token"]
+    assert portal.post(f"/api/pbx/call-links/{ids[acme]}/new-url").status_code == 200
+    assert link(pbx, ids[acme])["token"] != old and link(pbx, ids[1]) == theirs
+    assert portal.put(f"/api/pbx/call-links/{ids[acme]}", json={"label": "Shop", "target": "500"}).status_code == 200
+    assert link(pbx, ids[acme])["label"] == "Shop" and link(pbx, ids[1]) == theirs
+    assert portal.delete(f"/api/pbx/call-links/{ids[acme]}").status_code == 200
+    assert link(pbx, ids[acme]) is None and link(pbx, ids[1]) == theirs
+
+
+@pytest.mark.parametrize("target", ["203", "601", "vm:201", "hangup"])
+def test_call_link_target_must_be_the_tenants(links, target):
+    (main, pbx, op, portal, acme), ids = links
+    assert portal.post("/api/pbx/call-links", json={"label": "Bad", "target": target}).status_code == 400

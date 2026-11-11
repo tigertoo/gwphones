@@ -26,7 +26,8 @@ export function Routing() {
     <section>
       <h2>Call routing</h2>
       <div className="seg" role="tablist">
-        {[["hours", "Opening hours"], ["menus", "Menus"], ["groups", "Ring groups"], ["numbers", "Numbers"]].map(([k, label]) => (
+        {[["hours", "Opening hours"], ["menus", "Menus"], ["groups", "Ring groups"], ["numbers", "Numbers"],
+          ["links", "Call links"]].map(([k, label]) => (
           <button key={k} role="tab" aria-selected={part === k} className={`seg-btn ${part === k ? "seg-on" : ""}`}
             onClick={() => setPart(k)}>{label}</button>
         ))}
@@ -35,6 +36,7 @@ export function Routing() {
       {part === "menus" && <Menus data={data} onChange={load} />}
       {part === "groups" && <Groups data={data} onChange={load} />}
       {part === "numbers" && <Numbers data={data} onChange={load} />}
+      {part === "links" && <CallLinks data={data} />}
     </section>
   );
 }
@@ -474,5 +476,107 @@ function NumberItem({ n, data, onChange }) {
         {a.show}
       </div>
     </li>
+  );
+}
+
+// -- call links ------------------------------------------------------------------------------------
+
+function CallLinks({ data }) {
+  const [links, setLinks] = useState(null);
+  const [info, setInfo] = useState(null);
+  const [error, setError] = useState(null);
+  const [making, setMaking] = useState(false);
+  const load = useCallback(() => get("/call-links").then((r) => { setLinks(r.links); setInfo(r); setError(null); })
+    .catch((e) => setError(e.message)), []);
+  useEffect(() => { load(); }, [load]);
+  if (error) return <Message kind="error">{error}</Message>;
+  if (!links) return <p className="muted">Loading…</p>;
+  return (
+    <>
+      <p className="small muted">A web address that calls you from the visitor's browser: put it on your website or in
+        your email signature. Visitors need no phone and no app; they press Call.</p>
+      {!info.ready && <Message kind="info">Call links aren't switched on for this system yet. Contact us.</Message>}
+      <ul className="list">
+        {links.map((l) => <LinkItem key={l.id} l={l} data={data} max={info.max_minutes} onChange={load} />)}
+      </ul>
+      {making ? <LinkEditor data={data} max={info.max_minutes} onDone={() => { setMaking(false); load(); }}
+        onCancel={() => setMaking(false)} />
+        : <Button kind="secondary" onClick={() => setMaking(true)}>New call link</Button>}
+    </>
+  );
+}
+
+function LinkItem({ l, data, max, onChange }) {
+  const [open, setOpen] = useState(false);
+  const [qr, setQr] = useState(false);
+  const a = useAction();
+  const copy = () => navigator.clipboard.writeText(l.url).then(() => a.setMsg({ kind: "ok", text: "Copied." }),
+    () => a.setMsg({ kind: "error", text: "Couldn't copy: select the address and copy it instead." }));
+  const working = l.enabled && l.live;
+  const state = !l.enabled ? "Switched off" : l.live ? "Working" : "Not working: where it rings is switched off or gone";
+  return (
+    <li className={`row ${open ? "row-open" : ""}`}>
+      <div className="row-head static">
+        <span className="grow">{l.label}<span className="small muted block">Rings {describe(data, l.target)}
+          {l.video ? " · with video" : ""}</span></span>
+        <span className={`tag ${working ? "" : "tag-off"}`}>{working ? "Working" : "Off"}</span>
+      </div>
+      <div className="editor">
+        <p className="small muted">{state}. Calls last at most {l.max_minutes} minutes.</p>
+        <input readOnly value={l.url} aria-label="The link's address" onFocus={(e) => e.target.select()} />
+        <div className="buttons">
+          <Button kind="secondary" onClick={copy}>Copy</Button>
+          <Button kind="secondary" onClick={() => setQr(!qr)}>{qr ? "Hide QR code" : "QR code"}</Button>
+          <Button kind="secondary" onClick={() => setOpen(!open)}>{open ? "Close" : "Change"}</Button>
+        </div>
+        {qr && l.qr && <img className="qr" src={l.qr} alt="QR code for the call link" />}
+        {a.show}
+        {open && <LinkEditor data={data} l={l} max={max} onDone={() => { setOpen(false); onChange(); }}
+          onCancel={() => setOpen(false)} />}
+      </div>
+    </li>
+  );
+}
+
+function LinkEditor({ data, l, max, onDone, onCancel }) {
+  const [label, setLabel] = useState(l?.label || "");
+  const [target, setTarget] = useState(l?.target || "");
+  const [minutes, setMinutes] = useState(l?.max_minutes || 30);
+  const [enabled, setEnabled] = useState(l ? l.enabled : true);
+  const a = useAction();
+  const save = async () => {
+    const body = { label, target, max_minutes: Number(minutes), enabled };
+    const r = await a.run(() => (l ? put(`/call-links/${l.id}`, body) : post("/call-links", body)), "Saved.");
+    if (r) onDone();
+  };
+  const newUrl = async () => {
+    if (!window.confirm("Make a new address for this link? The old one stops working at once, wherever it's been shared.")) return;
+    const r = await a.run(() => post(`/call-links/${l.id}/new-url`), "New address made.");
+    if (r) onDone();
+  };
+  const remove = async () => {
+    if (!window.confirm(`Delete the call link "${l.label}"? Its address stops working at once.`)) return;
+    const r = await a.run(() => del(`/call-links/${l.id}`), "Deleted.");
+    if (r) onDone();
+  };
+  return (
+    <div className="card">
+      <Field label="Name"><input maxLength={40} value={label} onChange={(e) => setLabel(e.target.value)} placeholder="e.g. Website" /></Field>
+      <Field label="It rings">
+        <Destination data={data} value={target} onChange={setTarget} exclude={["voicemail", "hangup"]} label="It rings" />
+      </Field>
+      <Field label="Longest call (minutes)">
+        <input type="number" min={1} max={max} value={minutes} onChange={(e) => setMinutes(e.target.value)} />
+      </Field>
+      <label className="check"><input type="checkbox" checked={enabled} onChange={(e) => setEnabled(e.target.checked)} />
+        Switched on</label>
+      {a.show}
+      <div className="buttons">
+        <Button busy={a.busy} disabled={!label.trim() || !target} onClick={save}>Save</Button>
+        <Button kind="secondary" onClick={onCancel}>Cancel</Button>
+        {l && <Button kind="secondary" busy={a.busy} onClick={newUrl}>New address</Button>}
+        {l && <Button kind="danger" busy={a.busy} onClick={remove}>Delete</Button>}
+      </div>
+    </div>
   );
 }

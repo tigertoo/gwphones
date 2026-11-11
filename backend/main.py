@@ -91,6 +91,12 @@ PORTAL_ROUTES = {
     # Where the tenant's own numbers go (only that: adding, taking or
     # removing a number is the operator's, POST /inbound isn't here).
     ("PUT", "/api/pbx/inbound/{did}/target"),
+    # Call links (a URL that calls the tenant from a browser), for admins.
+    ("GET", "/api/pbx/call-links"),
+    ("POST", "/api/pbx/call-links"),
+    ("PUT", "/api/pbx/call-links/{link_id}"),
+    ("POST", "/api/pbx/call-links/{link_id}/new-url"),
+    ("DELETE", "/api/pbx/call-links/{link_id}"),
 }
 _portal_call = contextvars.ContextVar("gw_portal_call", default=False)
 

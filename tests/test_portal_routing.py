@@ -93,3 +93,26 @@ def test_number_target(world):
     assert admin.get("/api/routing").json()["numbers"] == [{"did": "35315559999", "label": "Acme main", "target": "500"}]
     assert admin.put("/api/numbers/35315550000", json={"target": "500"}).status_code == 404  # not Acme's
     assert world["client"]("ann").put("/api/numbers/35315559999", json={"target": "201"}).status_code == 403
+
+
+def test_call_links(world):
+    pbx, acme = world["pbx"], world["acme"]["id"]
+    admin = world["client"]("admin")
+    r = admin.post("/api/call-links", json={"label": "Website", "target": "201", "max_minutes": 20})
+    assert r.status_code == 200
+    links = admin.get("/api/call-links").json()["links"]
+    assert len(links) == 1 and links[0]["label"] == "Website" and links[0]["video"] is False
+    assert links[0]["url"].endswith(pbx.get_db().execute("SELECT token FROM call_links").fetchone()["token"])
+    lid = links[0]["id"]
+    # the operator turned video on: an admin's edit keeps it
+    pbx.get_db().execute("UPDATE call_links SET video = 1 WHERE id = ?", (lid,)).connection.commit()
+    assert admin.put(f"/api/call-links/{lid}", json={"label": "Shop", "target": "202"}).status_code == 200
+    row = pbx.get_db().execute("SELECT * FROM call_links WHERE id = ?", (lid,)).fetchone()
+    assert row["label"] == "Shop" and row["target"] == "202" and row["video"] == 1
+    old = row["token"]
+    assert admin.post(f"/api/call-links/{lid}/new-url").status_code == 200
+    assert pbx.get_db().execute("SELECT token FROM call_links WHERE id = ?", (lid,)).fetchone()["token"] != old
+    assert admin.put("/api/call-links/99999", json={"label": "X", "target": "201"}).status_code == 404
+    assert world["client"]("ann").get("/api/call-links").status_code == 403
+    assert admin.delete(f"/api/call-links/{lid}").status_code == 200
+    assert admin.get("/api/call-links").json()["links"] == []
