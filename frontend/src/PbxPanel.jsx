@@ -532,7 +532,7 @@ function OutboundCid({ ext, current, fallback, dids, send, busy }) {
         {dids.map((d) => <option key={d} value={d} />)}
       </datalist>
       <button className="ticket-action-btn" disabled={busy || clean === (current || "")}>Save</button>
-      <span className="pbx-hint">Shown to people this extension calls, e.g. a company number or the user's mobile so calls come back to them. Leave blank for the default.</span>
+      <span className="pbx-hint">Shown to people this extension calls, e.g. a company number or the user's mobile so calls come back to them. Leave blank for the default. A number outside Ireland in full, e.g. +61 2 9123 4567: one starting with 0 is taken as Irish.</span>
     </form>
   );
 }
@@ -1167,6 +1167,24 @@ function TrunksSection({ config, status, send, busy, apiBase }) {
           </label>
         ))}
       </div>
+      <div className="ticket-action-label">Caller IDs each route can show</div>
+      <p className="pbx-hint">
+        Carriers block calls showing their own country&rsquo;s numbers that arrive from abroad, so a caller ID has to
+        leave through a carrier in its own country. List the calling codes each route can show (e.g. 353 for Irish
+        numbers, 61 for Australian, or 353,61). A call then only goes out on routes that can show its caller ID; if
+        none can, the tenant&rsquo;s main number is shown instead, and if not even that, the call is refused.
+        <b> Empty means any caller ID</b>, as before: once you fill one in, fill in the routes that can&rsquo;t show
+        everything too.
+      </p>
+      <div className="pbx-mapping">
+        {config.all_routes.map((r) => (
+          <label key={r.key} className="pbx-field">
+            <span>{r.label}</span>
+            <input className="idea-input" placeholder="any" value={form.cli_countries?.[r.key] ?? ""}
+              onChange={(e) => setForm({ ...form, cli_countries: { ...form.cli_countries, [r.key]: e.target.value } })} />
+          </label>
+        ))}
+      </div>
 
       <div className="pbx-fields">
         <label className="pbx-field">
@@ -1177,7 +1195,7 @@ function TrunksSection({ config, status, send, busy, apiBase }) {
             value={form.outbound_cid}
             onChange={(e) => setForm({ ...form, outbound_cid: e.target.value })}
           />
-          <small className="pbx-hint">Shown on outbound calls from extensions without their own. An extension can have its own under Phone setup.</small>
+          <small className="pbx-hint">Shown on outbound calls from extensions without their own, on emergency calls, and when no route can show an extension&rsquo;s own (see Caller IDs each route can show). An extension can have its own under Phone setup. A number outside Ireland in full (+61…).</small>
         </label>
         <label className="pbx-field">
           <span>Voxbeam route</span>
@@ -1244,13 +1262,14 @@ function TrunksSection({ config, status, send, busy, apiBase }) {
 // Try a number against the saved routing, and see the recent real checks.
 function RouteTest({ apiBase }) {
   const [number, setNumber] = useState("");
+  const [cli, setCli] = useState("");
   const [data, setData] = useState(null);
   const [error, setError] = useState("");
 
   const run = async (e) => {
     e?.preventDefault();
     setError("");
-    const res = await fetch(`${apiBase}/api/pbx/route-test?${new URLSearchParams({ number: number || "0" })}`);
+    const res = await fetch(`${apiBase}/api/pbx/route-test?${new URLSearchParams({ number: number || "0", cli })}`);
     const d = await res.json().catch(() => ({}));
     if (res.ok) setData(d); else setError(d.detail || `Error ${res.status}`);
   };
@@ -1265,6 +1284,8 @@ function RouteTest({ apiBase }) {
       <form className="idea-form-row" onSubmit={run}>
         <input className="idea-input" placeholder="e.g. +44 20 8759 9036 or 087 123 4567" value={number}
           onChange={(e) => setNumber(e.target.value)} />
+        <input className="idea-input" placeholder="Showing caller ID (blank: the main number)" value={cli}
+          onChange={(e) => setCli(e.target.value)} />
         <button className="ticket-action-btn ticket-action-btn-primary" disabled={!number.trim()}>Check</button>
         <span className="pbx-hint">Uses the saved settings: save changes above first.</span>
       </form>
@@ -1275,6 +1296,7 @@ function RouteTest({ apiBase }) {
         <>
           <p>
             <b>{r.refuse ? `Refused: ${r.refuse}` : `Tries ${r.routes.map((x) => x.label).join(", then ")}`}</b>
+            {r.cli_note && <><br /><span className="pbx-tenant-flag">{r.cli_note}</span></>}
             <span className="pbx-hint"> · {r.kind}, {r.mode === "cheapest" ? "cheapest route" : r.mode === "default" ? "trunk order" : r.mode}, cap €{r.cap}/min</span>
           </p>
           <table className="users-table">
@@ -1317,7 +1339,8 @@ function RouteTest({ apiBase }) {
           <tbody>
             {data.recent.map((x, i) => (
               <tr key={i}><td>{new Date(x.at).toLocaleTimeString()}</td><td>{x.kind}</td><td>+{x.number}</td>
-                <td>{x.reply.startsWith("OK:") ? x.routes.join(" → ") : x.reply.replace("REFUSE:", "Refused: ")}</td><td>{x.ms} ms</td></tr>
+                <td>{x.reply.startsWith("OK:") ? x.routes.join(" → ") : x.reply.replace("REFUSE:", "Refused: ")}
+                  {x.note && <div className="pbx-hint">{x.note}</div>}</td><td>{x.ms} ms</td></tr>
             ))}
           </tbody>
         </table>

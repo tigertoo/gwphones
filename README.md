@@ -768,6 +768,25 @@ limit in its `/admin-api/` location:
         client_max_body_size 30m;
 ```
 
+### Caller IDs and carriers
+
+Carriers block calls showing their own country's numbers that arrive from
+abroad (ComReg's blocking of Irish numbers on calls from abroad;
+Australia's code C661), so a caller ID has to leave through a carrier in
+its own country. Each route can list the calling codes of the caller IDs
+it can show (Trunks & Outbound, `cli_<route>`, e.g. `353` or `61,353`;
+empty means any, as before). The route check (`lcr.py`) then only offers
+routes that can show the call's caller ID; if none can, it answers
+`OK:<routes>|CLI:<main number>` and the dialplan shows the tenant's main
+number instead (logged in `pbx-changes.log`); if not even that, the call is
+refused. 112/999 skip the route check and always use Irish VoIP, so an
+extension whose own caller ID Irish VoIP can't show (`EMERG_OWN_CID=0` on
+its endpoint) shows the main number on emergency calls. Nothing of this is
+generated while no route has a list. If the route check doesn't answer
+(the service restarting), calls go out in trunk order without the rule,
+as they always did then. Caller IDs outside Ireland must be written in
+full (+61...): one starting with 0 is taken as Irish.
+
 ### PBX certificate
 
 **It must be an RSA certificate, not ECDSA.** Desk phones' firmware (a
