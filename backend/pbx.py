@@ -1255,8 +1255,10 @@ def _weblinks_context(conn, notices: Dict[int, bool]) -> List[str]:
                 " same => n,Set(GROUP(webguests)=all)",
                 f" same => n,GotoIf($[${{GROUP_COUNT(all@webguests)}} > {total}]?busy)",
                 f" same => n,Set(TIMEOUT(absolute)={int(r['max_minutes']) * 60})",
-                " same => n,Set(WNAME=${FILTER(A-Za-z0-9 ._,${CALLERID(name)})})",
-                f" same => n,Set(CALLERID(name)=Web ${{WNAME:0:24}} ({label}))",
+                # The name the visitor typed comes in its own header (the
+                # endpoint's fixed caller ID would hide it), filtered and cut.
+                " same => n,Set(WNAME=${FILTER(A-Za-z0-9 ._,${PJSIP_HEADER(read,X-Web-Name)})})",
+                f" same => n,Set(CALLERID(name)=${{IF($[\"${{WNAME}}\" = \"\"]?Web visitor:${{WNAME:0:24}})}} ({label}))",
                 " same => n,Set(CALLERID(num)=web)",
                 *t.accountcode(),
                 *([f" same => n,Playback({t.notice[:-len('.ulaw')]})  ; calls may be recorded"] if notices[t.id] else []),
