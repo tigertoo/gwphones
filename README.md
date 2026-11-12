@@ -156,8 +156,11 @@ through this API as the portal caller above. Being built (phase 4).
   links (address, QR code, where it rings, longest call, on/off, a new
   address). Video on a link is a paid add-on not built yet: the portal
   keeps each link's video as the operator set it, and its new links are
-  audio only. Browser calls share one limit of 5 at once across all
-  tenants: a per-tenant limit is needed before real customers. Destinations come from gwphones as a labelled list
+  audio only. Browser calls don't use a carrier, so they don't count
+  in a tenant's calls at once (its plan, PSTN calls only); they're
+  limited to protect the server and other tenants: 2 at once per link,
+  the tenant's own `web_max` (default 10, set in the Tenants tab) and
+  `web_max_total` over all tenants (default 30, Trunks & Outbound). Destinations come from gwphones as a labelled list
   (`/api/pbx/routing`), only ever the tenant's own. These routes sit on a
   router that refuses anyone but an admin.
 - **Limits:** 20 saves a minute per tenant (each one reloads Asterisk for

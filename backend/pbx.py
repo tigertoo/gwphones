@@ -117,7 +117,11 @@ PICKUP_GROUP = "portal"  # every extension; *8 answers any of them ringing
 WEB_GUEST = "webguest"
 WEBLINKS_CONTEXT = "portal-weblinks"
 WEBLINK_MAX_PER_LINK = 2  # calls at once through one link
-WEBLINK_MAX_TOTAL = 5  # through all links together
+# Browser calls aren't PSTN calls (no carrier channel), so they don't count
+# towards a tenant's calls at once, its plan. They're limited only to
+# protect the server and other tenants (call links are public): per
+# tenant (web_max, its own setting) and over all of them (web_max_total).
+WEB_MAX_LIMIT, WEB_MAX_TOTAL_LIMIT = 50, 200
 
 FORWARD_FAMILIES = {"always": "CF", "busy": "CFB", "no_answer": "CFU"}
 DND_FAMILY = "DND"
@@ -203,7 +207,7 @@ TENANT_TABLES = ("extensions", "ring_groups", "inbound_routes", "provision_token
 # Settings each tenant has its own of (tenant_settings); everything else in
 # settings (trunks, routes, video, the default inbound route) is the server's.
 TENANT_SETTINGS = ("outbound_cid", "max_outbound", "rec_days", "cap_default", *[f"cap_{t}" for t in NUMBER_TYPES],
-                   "main_mailbox")
+                   "main_mailbox", "web_max")
 
 
 C2C_RING = "portal-c2c-ring"
@@ -354,6 +358,8 @@ DEFAULT_SETTINGS = {
     # Takes incoming calls over a tenant's limit (not the main tenant's: its
     # limit counts outbound calls only). Empty = its lowest extension.
     "main_mailbox": "",
+    "web_max": "10",  # browser calls at once, per tenant (call links)
+    "web_max_total": "30",  # browser calls at once, all tenants together
     "rec_days": "90",  # recordings older than this are deleted
     "route_mobile": "irishvoip",
     "route_landline": "default",
@@ -1235,15 +1241,19 @@ def _weblinks_context(conn, notices: Dict[int, bool]) -> List[str]:
     out = ["; ---- Call links: what browsers (endpoint webguest) can reach, nothing else ----",
            f"[{WEBLINKS_CONTEXT}]"]
     names = {t.id: t for t in all_tenant_names(conn)}
+    total = int(get_settings(conn)["web_max_total"])
     for r in live_call_links(conn):
         t = names[r["tenant_id"]]
+        per_tenant = int(get_settings(conn, t.id)["web_max"])
         target = target_goto(r["target"], destinations(conn, t.id), t)
         label = re.sub(r"[^A-Za-z0-9 .'_-]", "", r["label"])[:30]
         out += [f"exten => wl-{r['token']},1,NoOp(Call link {r['id']}: {label})",
                 f" same => n,Set(GROUP(weblink)=link{r['id']})",
                 f" same => n,GotoIf($[${{GROUP_COUNT(link{r['id']}@weblink)}} > {WEBLINK_MAX_PER_LINK}]?busy)",
+                f" same => n,Set(GROUP(webtenant)={t.code})",
+                f" same => n,GotoIf($[${{GROUP_COUNT({t.code}@webtenant)}} > {per_tenant}]?busy)",
                 " same => n,Set(GROUP(webguests)=all)",
-                f" same => n,GotoIf($[${{GROUP_COUNT(all@webguests)}} > {WEBLINK_MAX_TOTAL}]?busy)",
+                f" same => n,GotoIf($[${{GROUP_COUNT(all@webguests)}} > {total}]?busy)",
                 f" same => n,Set(TIMEOUT(absolute)={int(r['max_minutes']) * 60})",
                 " same => n,Set(WNAME=${FILTER(A-Za-z0-9 ._,${CALLERID(name)})})",
                 f" same => n,Set(CALLERID(name)=Web ${{WNAME:0:24}} ({label}))",
@@ -2000,12 +2010,20 @@ class TenantCreate(BaseModel):
     outbound_cid: str  # required: what its calls show (and 112/999 without an extension's own)
     max_calls: int = 4  # calls in and out together
     sip_host: str = ""
+    web_max: int = 10  # browser calls at once (call links): protection, not its plan
 
 
 class TenantUpdate(BaseModel):
     name: str
     status: str = "active"  # or suspended
     sip_host: str = ""
+    web_max: Optional[int] = None  # None = unchanged
+
+
+def _web_max(value: int) -> int:
+    if not 1 <= value <= WEB_MAX_LIMIT:
+        raise HTTPException(400, f"Browser calls at once must be 1-{WEB_MAX_LIMIT}.")
+    return value
 
 
 def _host_free(conn, host: str, tenant_id: int = 0):
@@ -2030,7 +2048,7 @@ def api_tenants():
         counts = {r["tenant_id"]: r["n"] for r in conn.execute(
             "SELECT tenant_id, COUNT(*) AS n FROM extensions GROUP BY tenant_id")}
         return {"host_suffix": TENANT_HOST_SUFFIX, "tenants": [{**_tenant_json(r), "extensions": counts.get(r["id"], 0),
-                             "settings": {k: get_settings(conn, r["id"])[k] for k in ("outbound_cid", "max_outbound")}}
+                             "settings": {k: get_settings(conn, r["id"])[k] for k in ("outbound_cid", "max_outbound", "web_max")}}
                             for r in conn.execute("SELECT * FROM tenants ORDER BY id")]}
 
 
@@ -2046,6 +2064,7 @@ def api_create_tenant(req: TenantCreate):
     if not 1 <= req.max_calls <= 30:
         raise HTTPException(400, "Calls at once (in and out) must be 1-30.")
     host = _clean_host(req.sip_host)
+    web_max = _web_max(req.web_max)
     with _lock, get_db() as conn:
         _host_free(conn, host)
         used = max([int(r["code"]) for r in conn.execute("SELECT code FROM tenants")] + [TENANT_CODE_FIRST - 1])
@@ -2057,6 +2076,7 @@ def api_create_tenant(req: TenantCreate):
         _set_setting(conn, "tenant_code_next", str(code + 1))
         _set_setting(conn, "outbound_cid", cid, tenant=tid)
         _set_setting(conn, "max_outbound", str(req.max_calls), tenant=tid)
+        _set_setting(conn, "web_max", str(web_max), tenant=tid)
         conn.commit()
         result = apply_config(conn, f"Created tenant {code} ({name}): caller ID {cid}, {req.max_calls} calls at once")
     return {"id": tid, "code": str(code), **result}
@@ -2070,13 +2090,17 @@ def api_update_tenant(tenant_id: int, req: TenantUpdate):
     if tenant_id == MAIN_TENANT and req.status != "active":
         raise HTTPException(400, "The main tenant can't be suspended.")
     host = _clean_host(req.sip_host)
+    web_max = None if req.web_max is None else _web_max(req.web_max)
     with _lock, get_db() as conn:
         _host_free(conn, host, tenant_id)
         if conn.execute("UPDATE tenants SET name = ?, status = ?, sip_host = ? WHERE id = ?",
                         (name, req.status, host, tenant_id)).rowcount == 0:
             raise HTTPException(404, "Tenant not found.")
+        if web_max is not None:
+            _set_setting(conn, "web_max", str(web_max), tenant=tenant_id)
         conn.commit()
-        return apply_config(conn, f"Tenant {tenant_id}: {name}, {req.status}, host {host or 'none'}")
+        return apply_config(conn, f"Tenant {tenant_id}: {name}, {req.status}, host {host or 'none'}"
+                                  + (f", {web_max} browser calls at once" if web_max is not None else ""))
 
 
 @router.get("/config")
@@ -2121,6 +2145,7 @@ def api_config():
                 "caps": {"default": s.get("cap_default", ""), **{k: s.get(f"cap_{k}", "") for k in NUMBER_TYPES}},
                 "lcr_allow": {f"{t}{r}": s.get(f"lcr_allow_{t}{r}", "1") == "1" for t, r in ALL_ROUTES},
                 "cli_countries": {f"{t}{r}": s.get(f"cli_{t}{r}", "") for t, r in ALL_ROUTES},
+                "web_max_total": int(s["web_max_total"]),
                 "video": s["video"] == "1",
                 "trunk_max": {t: s.get(f"trunk_max_{t}", "") for t in TRUNKS},
             },
@@ -2839,6 +2864,7 @@ class SettingsRequest(BaseModel):
     caps: Optional[Dict[str, str]] = None  # "default" or a number type -> € per minute ("" = the default)
     lcr_allow: Optional[Dict[str, bool]] = None  # route key (irishvoip, voxbeam0011103...) -> usable for cheapest
     cli_countries: Optional[Dict[str, str]] = None  # route key -> calling codes it can show ("353,61"; "" = any)
+    web_max_total: Optional[int] = None  # browser calls at once, all tenants; None = unchanged
     video: Optional[bool] = None  # None = unchanged
     main_mailbox: Optional[str] = None  # None = unchanged; "" = the lowest extension
     trunk_max: Optional[Dict[str, str]] = None  # trunk -> most calls at once ("" = no ceiling); None = unchanged
@@ -2878,6 +2904,8 @@ def api_update_settings(req: SettingsRequest):
         caps[k] = _cap(v, "The default price cap" if k == "default" else f"The {NUMBER_TYPES[k].split(' (')[0]} cap")
     if req.caps is not None and not caps.get("default"):
         raise HTTPException(400, "Set a default price cap (e.g. 0.05). It's what stops an expensive call.")
+    if req.web_max_total is not None and not 1 <= req.web_max_total <= WEB_MAX_TOTAL_LIMIT:
+        raise HTTPException(400, f"Browser calls at once, all tenants, must be 1-{WEB_MAX_TOTAL_LIMIT}.")
     cli_countries = {}
     for k, v in (req.cli_countries or {}).items():
         if k not in {f"{t}{r}" for t, r in ALL_ROUTES}:
@@ -2922,6 +2950,8 @@ def api_update_settings(req: SettingsRequest):
             _set_setting(conn, f"lcr_allow_{k}", "1" if v else "0")
         for k, v in cli_countries.items():
             _set_setting(conn, f"cli_{k}", v)
+        if req.web_max_total is not None:
+            _set_setting(conn, "web_max_total", str(req.web_max_total))
         if req.video is not None:
             _set_setting(conn, "video", "1" if req.video else "0")
         for t, v in ceilings.items():

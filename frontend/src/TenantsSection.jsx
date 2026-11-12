@@ -4,7 +4,7 @@ import React, { useCallback, useEffect, useState } from "react";
 // main tenant is today's system; every other has its own extensions,
 // numbering, voicemail, recordings, park lot, caller ID and call limit.
 
-const EMPTY = { name: "", outbound_cid: "", max_calls: 4, sip_host: "" };
+const EMPTY = { name: "", outbound_cid: "", max_calls: 4, sip_host: "", web_max: 10 };
 
 export default function TenantsSection({ config, send, busy, apiBase, switchTo }) {
   const [tenants, setTenants] = useState(null);
@@ -26,7 +26,7 @@ export default function TenantsSection({ config, send, busy, apiBase, switchTo }
   const hostExample = suffix ? `acme${suffix}` : "acme.sip.example.ie";
 
   const create = async () => {
-    const data = await send("POST", "/tenants", { ...form, max_calls: Number(form.max_calls) },
+    const data = await send("POST", "/tenants", { ...form, max_calls: Number(form.max_calls), web_max: Number(form.web_max) },
       `Tenant ${form.name} created.`);
     if (data) { setForm(null); load(); }
   };
@@ -46,7 +46,7 @@ export default function TenantsSection({ config, send, busy, apiBase, switchTo }
         suspended tenant can&rsquo;t call out (112 and 999 still work) and its incoming calls go to its main mailbox.
       </p>
       <table className="users-table">
-        <thead><tr><th>Code</th><th>Name</th><th>Extensions</th><th>Caller ID</th><th>Calls at once</th><th>SIP hostname</th><th>Status</th><th></th></tr></thead>
+        <thead><tr><th>Code</th><th>Name</th><th>Extensions</th><th>Caller ID</th><th>Calls at once</th><th>Browser calls</th><th>SIP hostname</th><th>Status</th><th></th></tr></thead>
         <tbody>
           {tenants.map((t) => (edit?.id === t.id ? (
             <tr key={t.id}>
@@ -55,13 +55,15 @@ export default function TenantsSection({ config, send, busy, apiBase, switchTo }
                 onChange={(e) => setEdit({ ...edit, name: e.target.value })} /></td>
               <td>{t.extensions}</td>
               <td colSpan={2} className="pbx-hint">Set under Trunks &amp; Outbound while working on it</td>
+              <td><input className="idea-input pbx-num-input" type="number" min={1} max={50} value={edit.web_max}
+                onChange={(e) => setEdit({ ...edit, web_max: e.target.value })} /></td>
               <td><input className="idea-input" placeholder={hostExample} value={edit.sip_host}
                 onChange={(e) => setEdit({ ...edit, sip_host: e.target.value })} /></td>
               <td>{t.status}</td>
               <td className="pbx-actions">
                 <button className="ticket-action-btn" onClick={() => setEdit(null)}>Cancel</button>
                 <button className="ticket-action-btn ticket-action-btn-primary" disabled={busy || !edit.name.trim()}
-                  onClick={() => save(t, { name: edit.name, sip_host: edit.sip_host }, "Tenant saved.")}>Save</button>
+                  onClick={() => save(t, { name: edit.name, sip_host: edit.sip_host, web_max: Number(edit.web_max) }, "Tenant saved.")}>Save</button>
               </td>
             </tr>
           ) : (
@@ -72,13 +74,14 @@ export default function TenantsSection({ config, send, busy, apiBase, switchTo }
               <td>{t.extensions}</td>
               <td>{t.settings.outbound_cid || <span className="pbx-hint">none</span>}</td>
               <td>{t.settings.max_outbound}{t.main && <span className="pbx-hint"> out</span>}</td>
+              <td>{t.settings.web_max}</td>
               <td>{t.sip_host || <span className="pbx-hint">—</span>}</td>
               <td>{t.status === "active" ? "Active" : <span className="pbx-tenant-flag">Suspended</span>}</td>
               <td className="pbx-actions">
                 {t.id !== config.tenant.id && (
                   <button className="ticket-action-btn" onClick={() => switchTo(t.id)}>Work on it</button>
                 )}
-                <button className="ticket-action-btn" onClick={() => setEdit({ id: t.id, name: t.name, sip_host: t.sip_host })}>Edit</button>
+                <button className="ticket-action-btn" onClick={() => setEdit({ id: t.id, name: t.name, sip_host: t.sip_host, web_max: t.settings.web_max })}>Edit</button>
                 {!t.main && (t.status === "active" ? (
                   <button className="ticket-action-btn idea-delete-btn" disabled={busy}
                     onClick={() => window.confirm(`Suspend ${t.name}? Its calls out stop (112 and 999 still work) and calls in go to its main mailbox.`)
@@ -105,12 +108,19 @@ export default function TenantsSection({ config, send, busy, apiBase, switchTo }
               <input className="idea-input pbx-num-input" type="number" min={1} max={30} value={form.max_calls}
                 onChange={(e) => setForm({ ...form, max_calls: e.target.value })} />
             </label>
+            <label className="idea-field">
+              Browser calls
+              <input className="idea-input pbx-num-input" type="number" min={1} max={50} value={form.web_max}
+                onChange={(e) => setForm({ ...form, web_max: e.target.value })} />
+            </label>
             <input className="idea-input" placeholder={`SIP hostname, e.g. ${hostExample}`} value={form.sip_host}
               onChange={(e) => setForm({ ...form, sip_host: e.target.value })} />
           </div>
           <p className="pbx-hint">
             The caller ID is what its calls show, and its emergency calls when an extension has none of its own: an Irish
-            number of the tenant&rsquo;s. Calls at once counts calls in and out together. It gets the next tenant code;
+            number of the tenant&rsquo;s. Calls at once counts calls in and out together: its numbers&rsquo; calls, the ones that
+            use a carrier (its plan). Browser calls (call links) don&rsquo;t count in it: they have their own limit, there to
+            protect the server and other tenants since call links are public. It gets the next tenant code;
             add its extensions, numbers and menus by choosing it at the top. With a SIP hostname, its phones are set
             up to register to it (so it can move to another server by DNS); without one, to this server&rsquo;s.
           </p>

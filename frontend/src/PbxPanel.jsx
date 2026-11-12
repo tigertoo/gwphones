@@ -1167,6 +1167,14 @@ function TrunksSection({ config, status, send, busy, apiBase }) {
           </label>
         ))}
       </div>
+      <label className="pbx-field">
+        <span>Browser calls at once, all tenants</span>
+        <input className="idea-input pbx-num-input" type="number" min={1} max={200} value={form.web_max_total ?? 30}
+          onChange={(e) => setForm({ ...form, web_max_total: Number(e.target.value) })} />
+        <small className="pbx-hint">Calls through call links, every tenant together: what this server can carry (each
+          tenant has its own limit too, in Tenants, and each link 2). Browser calls don&rsquo;t use a carrier, so they
+          don&rsquo;t count in tenants&rsquo; calls at once.</small>
+      </label>
       <div className="ticket-action-label">Caller IDs each route can show</div>
       <p className="pbx-hint">
         Carriers block calls showing their own country&rsquo;s numbers that arrive from abroad, so a caller ID has to

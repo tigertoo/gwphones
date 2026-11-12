@@ -32,6 +32,8 @@
   "trunk_voxbeam_enabled": "1",
   "video": "1",
   "voxbeam_prefix": "0011101",
+  "web_max": "10",
+  "web_max_total": "30",
   "webguest_password": "webguest-test-password"
  }
 }
