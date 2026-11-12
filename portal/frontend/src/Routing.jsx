@@ -497,16 +497,17 @@ function CallLinks({ data }) {
         your email signature. Visitors need no phone and no app; they press Call.</p>
       {!info.ready && <Message kind="info">Call links aren't switched on for this system yet. Contact us.</Message>}
       <ul className="list">
-        {links.map((l) => <LinkItem key={l.id} l={l} data={data} max={info.max_minutes} onChange={load} />)}
+        {links.map((l) => <LinkItem key={l.id} l={l} data={data} max={info.max_minutes} video={info.video_on}
+          onChange={load} />)}
       </ul>
-      {making ? <LinkEditor data={data} max={info.max_minutes} onDone={() => { setMaking(false); load(); }}
+      {making ? <LinkEditor data={data} max={info.max_minutes} video={info.video_on} onDone={() => { setMaking(false); load(); }}
         onCancel={() => setMaking(false)} />
         : <Button kind="secondary" onClick={() => setMaking(true)}>New call link</Button>}
     </>
   );
 }
 
-function LinkItem({ l, data, max, onChange }) {
+function LinkItem({ l, data, max, video, onChange }) {
   const [open, setOpen] = useState(false);
   const [qr, setQr] = useState(false);
   const a = useAction();
@@ -518,7 +519,7 @@ function LinkItem({ l, data, max, onChange }) {
     <li className={`row ${open ? "row-open" : ""}`}>
       <div className="row-head static">
         <span className="grow">{l.label}<span className="small muted block">Rings {describe(data, l.target)}
-          {l.video ? " · with video" : ""}</span></span>
+          {l.video && video ? " · with video" : ""}</span></span>
         <span className={`tag ${working ? "" : "tag-off"}`}>{working ? "Working" : "Off"}</span>
       </div>
       <div className="editor">
@@ -531,21 +532,22 @@ function LinkItem({ l, data, max, onChange }) {
         </div>
         {qr && l.qr && <img className="qr" src={l.qr} alt="QR code for the call link" />}
         {a.show}
-        {open && <LinkEditor data={data} l={l} max={max} onDone={() => { setOpen(false); onChange(); }}
+        {open && <LinkEditor data={data} l={l} max={max} video={video} onDone={() => { setOpen(false); onChange(); }}
           onCancel={() => setOpen(false)} />}
       </div>
     </li>
   );
 }
 
-function LinkEditor({ data, l, max, onDone, onCancel }) {
+function LinkEditor({ data, l, max, video, onDone, onCancel }) {
   const [label, setLabel] = useState(l?.label || "");
   const [target, setTarget] = useState(l?.target || "");
   const [minutes, setMinutes] = useState(l?.max_minutes || 30);
   const [enabled, setEnabled] = useState(l ? l.enabled : true);
+  const [withVideo, setWithVideo] = useState(!!l?.video);
   const a = useAction();
   const save = async () => {
-    const body = { label, target, max_minutes: Number(minutes), enabled };
+    const body = { label, target, max_minutes: Number(minutes), enabled, video: video && withVideo };
     const r = await a.run(() => (l ? put(`/call-links/${l.id}`, body) : post("/call-links", body)), "Saved.");
     if (r) onDone();
   };
@@ -568,6 +570,10 @@ function LinkEditor({ data, l, max, onDone, onCancel }) {
       <Field label="Longest call (minutes)">
         <input type="number" min={1} max={max} value={minutes} onChange={(e) => setMinutes(e.target.value)} />
       </Field>
+      {video && (
+        <label className="check"><input type="checkbox" checked={withVideo} onChange={(e) => setWithVideo(e.target.checked)} />
+          Allow video (the visitor can turn on their camera)</label>
+      )}
       <label className="check"><input type="checkbox" checked={enabled} onChange={(e) => setEnabled(e.target.checked)} />
         Switched on</label>
       {a.show}

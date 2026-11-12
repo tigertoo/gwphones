@@ -78,7 +78,7 @@ def test_operator_tenant_header_and_cookie_ignored(two):
 def test_own_tenant(two):
     main, pbx, op, portal, acme = two
     assert portal.get("/api/pbx/tenant").json() == {"code": portal.headers["X-Portal-Tenant"], "name": "Acme",
-                                                     "status": "active"}
+                                                     "status": "active", "video": False}
 
 
 def test_operator_unaffected(two):

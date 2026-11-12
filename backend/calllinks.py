@@ -107,7 +107,7 @@ def api_call_links():
         live_ids = {r["id"] for r in live_call_links(conn)}
         links = [_row(conn, r, live_ids) for r in conn.execute("SELECT * FROM call_links WHERE tenant_id = ? ORDER BY id",
                                                                 (current_tenant(),))]
-        video_on = get_settings(conn)["video"] == "1"
+        video_on = get_settings(conn, current_tenant())["video"] == "1"  # its video add-on
     return {"links": links, "ready": bool(PROVISION_BASE_URL and PUBLIC_HOST and WS_URL), "ws_url": WS_URL,
             "video_on": video_on, "max_minutes": MAX_MINUTES}
 

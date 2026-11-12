@@ -200,8 +200,9 @@ def api_number_target(did: str, req: NumberTarget, request: Request, me: Signed 
 
 # -- call links -------------------------------------------------------------------------------
 # A URL anyone can open to call the organisation from a browser. Video is
-# a paid add-on that isn't built yet: the portal keeps each link's video
-# setting as the operator set it, and its own new links are audio only.
+# a paid add-on (the tenant's "video", set by the operator): with it, a
+# link can allow the visitor's camera; without it, the portal keeps each
+# link's video as it was (gwphones ignores it while the add-on is off).
 
 LINK_KEYS = ("id", "label", "target", "video", "max_minutes", "enabled", "live", "last_opened_at", "url", "qr")
 
@@ -211,30 +212,40 @@ class CallLink(BaseModel):
     target: str
     max_minutes: int = 30
     enabled: bool = True
+    video: bool = False  # only with the video add-on
 
 
-def _links(me: Signed) -> List[dict]:
-    return gw.call(me.user, "GET", "/call-links")["links"]
+def _links(me: Signed) -> dict:
+    return gw.call(me.user, "GET", "/call-links")
+
+
+def _link_body(req: CallLink) -> dict:
+    return {k: v for k, v in _body(req).items() if k != "video"}
 
 
 @router.get("/call-links")
 def api_call_links(me: Signed = Depends(admin)):
     r = gw.call(me.user, "GET", "/call-links")
     return {"links": [{k: l.get(k) for k in LINK_KEYS} for l in r["links"]], "ready": r["ready"],
-            "max_minutes": r["max_minutes"]}
+            "max_minutes": r["max_minutes"], "video_on": r["video_on"]}
 
 
 @router.post("/call-links")
 def api_new_call_link(req: CallLink, request: Request, me: Signed = Depends(admin)):
-    return _save(me, request, "POST", "/call-links", {**_body(req), "video": False}, f"call link created ({req.label})")
+    video = req.video and _links(me)["video_on"]
+    return _save(me, request, "POST", "/call-links", {**_link_body(req), "video": video},
+                 f"call link created ({req.label}{', video' if video else ''})")
 
 
 @router.put("/call-links/{link_id}")
 def api_change_call_link(link_id: int, req: CallLink, request: Request, me: Signed = Depends(admin)):
-    current = next((l for l in _links(me) if l["id"] == link_id), None)
+    links = _links(me)
+    current = next((l for l in links["links"] if l["id"] == link_id), None)
     if not current:
         raise auth.Refused("Not found.", 404)
-    body = {**_body(req), "video": current["video"]}  # as the operator set it
+    # with the add-on, as the admin chose; without it, as it was
+    video = req.video if links["video_on"] else current["video"]
+    body = {**_link_body(req), "video": video}
     return _save(me, request, "PUT", f"/call-links/{link_id}", body, f"call link {link_id} changed")
 
 

@@ -154,9 +154,12 @@ through this API as the portal caller above. Being built (phase 4).
   go (`PUT /api/pbx/inbound/{did}/target`: only that, never adding,
   taking or removing a number, which stays the operator's); and call
   links (address, QR code, where it rings, longest call, on/off, a new
-  address). Video on a link is a paid add-on not built yet: the portal
-  keeps each link's video as the operator set it, and its new links are
-  audio only. Browser calls don't use a carrier, so they don't count
+  address). Video is a paid add-on, each tenant's own setting
+  (`video`, the Tenants tab; off for a new tenant): with it, the tenant's
+  extensions get video codecs and its admins can let a link allow the
+  visitor's camera; without it, everything is audio only (a link's own
+  video setting is kept but has no effect). The main tenant's is the
+  "video calls" switch under Extensions, as before. Browser calls don't use a carrier, so they don't count
   in a tenant's calls at once (its plan, PSTN calls only); they're
   limited to protect the server and other tenants: 2 at once per link,
   the tenant's own `web_max` (default 10, set in the Tenants tab) and

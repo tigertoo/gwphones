@@ -116,3 +116,25 @@ def test_call_links(world):
     assert world["client"]("ann").get("/api/call-links").status_code == 403
     assert admin.delete(f"/api/call-links/{lid}").status_code == 200
     assert admin.get("/api/call-links").json()["links"] == []
+
+
+def test_call_link_video_needs_the_add_on(world):
+    pbx, acme = world["pbx"], world["acme"]["id"]
+    admin = world["client"]("admin")
+    video = lambda: pbx.get_db().execute("SELECT video FROM call_links").fetchone()["video"]
+    # without it: asking for video makes an audio link
+    assert admin.get("/api/call-links").json()["video_on"] is False
+    assert admin.post("/api/call-links", json={"label": "Website", "target": "201", "video": True}).status_code == 200
+    assert video() == 0
+    lid = admin.get("/api/call-links").json()["links"][0]["id"]
+    assert admin.put(f"/api/call-links/{lid}", json={"label": "Website", "target": "201", "video": True}).status_code == 200
+    assert video() == 0
+    # with it: the admin's choice
+    conn = pbx.get_db()
+    pbx._set_setting(conn, "video", "1", tenant=acme)
+    conn.commit()
+    assert admin.get("/api/call-links").json()["video_on"] is True
+    assert admin.put(f"/api/call-links/{lid}", json={"label": "Website", "target": "201", "video": True}).status_code == 200
+    assert video() == 1
+    assert admin.put(f"/api/call-links/{lid}", json={"label": "Website", "target": "201", "video": False}).status_code == 200
+    assert video() == 0
