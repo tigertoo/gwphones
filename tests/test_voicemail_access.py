@@ -111,3 +111,17 @@ def test_phone_pin_files_checked(two, tmp_path, monkeypatch):
     assert os.listdir(tmp_path) == [".in.abc"]
     assert {r["ext"]: r["vm_pin"] for r in pbx.get_db().execute("SELECT ext, vm_pin FROM extensions")} == before
     assert "582047" not in open(pbx.CHANGES_LOG_PATH).read()
+
+
+def test_from_the_console_for_the_main_tenant(two):
+    main, pbx, op, portal, acme = two
+    assert op.put("/api/pbx/extensions/201/voicemail-nopin", json={"on": True}).status_code == 200
+    assert op.put("/api/pbx/extensions/201/voicemail-pin", json={"pin": "731942"}).status_code == 200
+    assert op.put("/api/pbx/extensions/201/voicemail-pin", json={"pin": "2012"}).status_code == 400
+    row, theirs = ext(pbx, 1, "201"), ext(pbx, acme, "201")
+    assert (row["vm_nopin"], row["vm_pin"]) == (1, "731942") and theirs["vm_nopin"] == 0
+    assert [e["vm_nopin"] for e in op.get("/api/pbx/config").json()["extensions"] if e["ext"] == "201"] == [True]
+    conf = open(pbx.EXT_CONF).read()
+    assert "set_var=VM_NOPIN=1" in conf.split("[201](endpoint-ext)")[1].split("\n[")[0]
+    assert 'exten => *97,1,GotoIf($["${VM_NOPIN}" = "1"]?nopin)' in \
+        open(pbx.PORTAL_DIALPLAN).read().split("[portal-internal]")[1].split("\n[")[0]

@@ -102,6 +102,7 @@ export default function PbxPanel({ apiBase, callNumber }) {
     setToast({ busy: true, text: busyText(method, path, [
       [/reset-password$/, "Setting a new password and applying it…"],
       [/reset-voicemail-pin$/, "Setting a new voicemail PIN…"],
+      [/\/voicemail-pin$/, "Saving the PIN…"],
       [/^\/apply$/, "Applying to the phone system…"],
       [/^\/click-to-call$/, "Ringing your extension…"],
       [/^\/call-links/, method === "DELETE" ? "Deleting the link…" : "Saving the link and applying…"],
@@ -510,6 +511,37 @@ function VoicemailEmail({ ext, current, send, busy }) {
   );
 }
 
+// The PIN its user would choose (the same rules as the portal and the
+// phone's menu, checked by gwphones), and *97 without it from its own phones.
+function VoicemailAccess({ ext, nopin, send, busy, onPin }) {
+  const [pin, setPin] = useState("");
+  const save = async (ev) => {
+    ev.preventDefault();
+    if (await send("PUT", `/extensions/${ext}/voicemail-pin`, { pin }, `Voicemail PIN for ${ext} saved.`)) {
+      setPin("");
+      onPin();
+    }
+  };
+  return (
+    <>
+      <form className="idea-form-row pbx-gap" onSubmit={save}>
+        <input className="idea-input pbx-num-input" type="password" inputMode="numeric" autoComplete="new-password"
+          placeholder="Choose a PIN" maxLength={8} value={pin} aria-label="Choose a voicemail PIN"
+          onChange={(e) => setPin(e.target.value.replace(/\D/g, ""))} />
+        <button className="ticket-action-btn" disabled={busy || pin.length < 4}>Save PIN</button>
+        <span className="pbx-hint">4 to 8 digits; not 1234, repeats like 1111, or the extension number.</span>
+      </form>
+      <label className="pbx-toggle pbx-gap">
+        <input type="checkbox" checked={!!nopin} disabled={busy}
+          onChange={(ev) => send("PUT", `/extensions/${ext}/voicemail-nopin`, { on: ev.target.checked },
+            ev.target.checked ? `*97 from ${ext}'s own phones goes straight in.` : `*97 from ${ext} asks for the PIN again.`)} />
+        Voicemail without the PIN from its own phones (*97). Anywhere else still asks; anyone holding one of its
+        unlocked phones (apps too) could hear its messages.
+      </label>
+    </>
+  );
+}
+
 function OutboundCid({ ext, current, fallback, dids, send, busy }) {
   const [value, setValue] = useState(current || "");
   useEffect(() => setValue(current || ""), [current]);
@@ -773,6 +805,8 @@ function ExtensionsSection({ config, status, send, busy, apiBase, reload }) {
                         }
                       }}
                     >New voicemail PIN</button>
+                    <VoicemailAccess ext={e.ext} nopin={e.vm_nopin} send={send} busy={busy}
+                      onPin={() => { setCreds(null); showCreds(e.ext); }} />
                     <VoicemailEmail ext={e.ext} current={e.voicemail_email} send={send} busy={busy} />
                     <OutboundCid ext={e.ext} current={e.outbound_cid} fallback={config.settings.outbound_cid}
                       dids={config.inbound_routes.map((r) => r.did)} send={send} busy={busy} />
