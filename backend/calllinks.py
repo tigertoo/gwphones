@@ -40,6 +40,18 @@ WS_URL = os.environ.get("PBX_WEBRTC_WS_URL", "") or (
     "wss://" + PROVISION_BASE_URL.split("://", 1)[-1] + "/pbx-ws" if PROVISION_BASE_URL else "")
 STATIC_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static", "call")
 STATIC_FILES = {"call.js": "text/javascript", "call.css": "text/css", "jssip-3.13.8.min.js": "text/javascript"}
+
+
+def _version(name: str) -> str:
+    """A fingerprint of a static file, for its address (call.js?v=...):
+    browsers keep these an hour, so a changed file needs a new address to
+    be fetched at once."""
+    import hashlib
+    with open(os.path.join(STATIC_DIR, name), "rb") as f:
+        return hashlib.sha256(f.read()).hexdigest()[:10]
+
+
+STATIC_VERSIONS = {name: _version(name) for name in STATIC_FILES}
 MAX_MINUTES = 120
 
 PAGE_LOADS_PER_IP = 30  # per 10 minutes; nginx limits too
@@ -163,7 +175,7 @@ def _headers() -> dict:
 def _page(title: str, body: str, status: int = 200) -> HTMLResponse:
     return HTMLResponse(f"""<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
-<title>{title}</title><link rel="stylesheet" href="/call/static/call.css"></head>
+<title>{title}</title><link rel="stylesheet" href="/call/static/call.css?v={STATIC_VERSIONS['call.css']}"></head>
 <body><main class="card">{body}</main></body></html>""", status_code=status, headers=_headers())
 
 
@@ -218,5 +230,5 @@ def call_page(token: str, request: Request):
 <p class="hint small">Calls are limited to {link['max_minutes']} minutes. In an app's built-in browser (Gmail, LinkedIn)
 the microphone may be blocked: open the link in Safari or Chrome.</p>
 <script type="application/json" id="config">{data}</script>
-<script src="/call/static/jssip-3.13.8.min.js"></script>
-<script src="/call/static/call.js"></script>""")
+<script src="/call/static/jssip-3.13.8.min.js?v={STATIC_VERSIONS['jssip-3.13.8.min.js']}"></script>
+<script src="/call/static/call.js?v={STATIC_VERSIONS['call.js']}"></script>""")

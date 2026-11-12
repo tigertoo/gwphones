@@ -60,3 +60,14 @@ def test_no_api_description(env):
     c = TestClient(main.app)
     for path in ("/openapi.json", "/docs", "/redoc"):
         assert c.get(path).status_code == 404, path
+
+
+def test_call_page_scripts_versioned(env):
+    """The call page's scripts are kept by browsers for an hour, so their
+    addresses carry a fingerprint: a changed file is fetched at once."""
+    import calllinks, hashlib, os
+    html = calllinks._page("Test", "").body.decode()
+    v = calllinks.STATIC_VERSIONS["call.css"]
+    assert f"/call/static/call.css?v={v}" in html
+    with open(os.path.join(calllinks.STATIC_DIR, "call.js"), "rb") as f:
+        assert calllinks.STATIC_VERSIONS["call.js"] == hashlib.sha256(f.read()).hexdigest()[:10]
