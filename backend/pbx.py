@@ -135,6 +135,10 @@ VOICEMAIL_NUMBER = "*97"  # check your own voicemail (static dialplan)
 # in voicemail.conf), which drops it here; the dashboard sends it on
 # through Microsoft Graph (see "Voicemail by email" below).
 VM_OUTBOX = os.environ.get("PBX_VM_OUTBOX", "/var/spool/asterisk/vm-outbox")
+# PINs changed from a phone's voicemail menu: asterisk/vm-pin.sh (Asterisk's
+# externpass) drops "<context> <mailbox> <pin>" here, and vm_pin_loop saves
+# each like a PIN chosen in the portal.
+VM_PINS = os.environ.get("PBX_VM_PINS", "/var/spool/asterisk/vm-pins")
 STATIC_DIALPLAN = os.path.join(ASTERISK_DIR, "extensions.conf")
 
 # Must line up with the static dialplan: _2XX dials extensions, and ring
@@ -3355,6 +3359,61 @@ async def apply_on_startup(attempts: int = 6, wait: int = 10):
         if result["ok"] or any("couldn't write" in m for m in result["messages"]):
             return
         await asyncio.sleep(wait)
+
+
+def take_phone_pins() -> int:
+    """One pass over VM_PINS. Each file is removed whatever happens, and
+    the PIN itself is never logged. Returns how many were saved."""
+    if not os.path.isdir(VM_PINS) or not os.access(VM_PINS, os.W_OK | os.X_OK):
+        return 0
+    saved = 0
+    for name in sorted(os.listdir(VM_PINS)):
+        if not name.endswith(".pin"):
+            continue  # .in.* files are still being written
+        path = os.path.join(VM_PINS, name)
+        try:
+            with open(path) as f:
+                parts = f.read(64).split()
+        except OSError:
+            parts = []
+        try:
+            os.remove(path)
+        except OSError:
+            pass
+        if len(parts) != 3:
+            changes_log.info(f"Ignored a voicemail PIN file from Asterisk ({name}): not readable")
+            continue
+        context, mailbox, pin = parts
+        with _lock, get_db() as conn:
+            tenant = next((t for t in all_tenant_names(conn) if t.vm == context), None)
+            row = tenant and conn.execute("SELECT 1 FROM extensions WHERE tenant_id = ? AND ext = ?",
+                                          (tenant.id, mailbox)).fetchone()
+            if not row:
+                changes_log.info(f"Ignored a voicemail PIN change from a phone for {mailbox}@{context}: no such mailbox")
+                continue
+            try:
+                pin = _clean_pin(pin, mailbox)
+            except HTTPException:
+                changes_log.info(f"Ignored a voicemail PIN change from a phone for {mailbox}@{context}: "
+                                 "too easy to guess")
+                continue
+            conn.execute("UPDATE extensions SET vm_pin = ?, updated_at = ? WHERE tenant_id = ? AND ext = ?",
+                         (pin, _now(), tenant.id, mailbox))
+            conn.commit()
+            apply_config(conn, f"Voicemail PIN for extension {mailbox} changed from the phone"
+                               + ("" if tenant.id == MAIN_TENANT else f" (tenant {tenant.code})"))
+            saved += 1
+    return saved
+
+
+async def vm_pin_loop():
+    import asyncio
+    while True:
+        try:
+            await asyncio.to_thread(take_phone_pins)
+        except Exception:
+            pass
+        await asyncio.sleep(3)
 
 
 async def voicemail_mail_loop():

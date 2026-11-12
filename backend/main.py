@@ -246,11 +246,12 @@ async def _as_portal(request: Request, call_next):
 async def startup():
     if os.environ.get("PBX_DISABLE_BACKGROUND") == "1":
         return
-    from pbx import apply_on_startup, voicemail_mail_loop
+    from pbx import apply_on_startup, voicemail_mail_loop, vm_pin_loop
     from recordings import recordings_expiry_loop
     from billing import billing_loop
     asyncio.create_task(apply_on_startup())
     asyncio.create_task(voicemail_mail_loop())
+    asyncio.create_task(vm_pin_loop())
     asyncio.create_task(recordings_expiry_loop())
     asyncio.create_task(billing_loop())
 

@@ -457,6 +457,34 @@ The service unit must allow writing to the outbox
 unit). If Graph is down, emails wait in the outbox and are retried; after
 a day they're dropped and logged in `pbx-changes.log`.
 
+### Voicemail PINs
+
+A PIN can be chosen in the portal (Phones, Voicemail access), and each
+extension can let `*97` from its own phones skip the PIN (`vm_nopin`:
+`set_var=VM_NOPIN=1` on its endpoint; `*98` and every other way in still
+asks). A PIN can also be changed from the phone's voicemail menu: Asterisk
+would write that into the generated mailbox file, which the next save
+overwrites, so it goes through `asterisk/vm-pin.sh` instead. Asterisk runs
+it to check a new PIN (the portal's rules: 4-8 digits, no repeats, runs
+or the extension number) and to save it, which drops it in
+`/var/spool/asterisk/vm-pins` (`PBX_VM_PINS`); the service saves it within
+a few seconds like a portal PIN and rewrites the file. Set up once:
+
+```
+install -m 755 asterisk/vm-pin.sh /usr/local/bin/asterisk-vm-pin
+install -d -o asterisk -g asterisk -m 2770 /var/spool/asterisk/vm-pins
+```
+
+in the `[general]` section of `/etc/asterisk/voicemail.conf`:
+
+```
+externpass=/usr/local/bin/asterisk-vm-pin set
+externpasscheck=/usr/local/bin/asterisk-vm-pin check
+```
+
+and `-/var/spool/asterisk/vm-pins` in the unit's `ReadWritePaths` (as in
+the example unit). PINs are never written to the logs.
+
 ### Call links (`backend/calllinks.py`)
 
 A call link is a URL anyone can open to call an extension or ring group

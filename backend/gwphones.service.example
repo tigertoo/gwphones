@@ -32,7 +32,7 @@ RestartSec=5
 # the recordings.
 NoNewPrivileges=yes
 ProtectSystem=strict
-ReadWritePaths=/var/lib/admin-dashboard /var/log/admin-dashboard /etc/asterisk/portal -/run/asterisk -/var/spool/asterisk/vm-outbox
+ReadWritePaths=/var/lib/admin-dashboard /var/log/admin-dashboard /etc/asterisk/portal -/run/asterisk -/var/spool/asterisk/vm-outbox -/var/spool/asterisk/vm-pins
 ReadWritePaths=-/var/spool/asterisk/monitor/portal
 ProtectHome=yes
 PrivateTmp=yes
