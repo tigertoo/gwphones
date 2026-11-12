@@ -63,6 +63,8 @@ PORTAL_ROUTES = {
     ("PUT", "/api/pbx/extensions/{ext}"),
     ("POST", "/api/pbx/extensions/{ext}/reset-password"),
     ("POST", "/api/pbx/extensions/{ext}/reset-voicemail-pin"),
+    ("PUT", "/api/pbx/extensions/{ext}/voicemail-pin"),
+    ("PUT", "/api/pbx/extensions/{ext}/voicemail-nopin"),
     ("POST", "/api/pbx/extensions/{ext}/setup-link"),
     ("POST", "/api/pbx/extensions/{ext}/email-setup"),
     ("PUT", "/api/pbx/extensions/{ext}/voicemail-email"),

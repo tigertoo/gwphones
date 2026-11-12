@@ -116,7 +116,7 @@ def test_path_tricks(two, path):
 def test_list_without_secrets(two):
     main, pbx, op, portal, acme = two
     for e in portal.get("/api/pbx/extensions").json()["extensions"]:
-        assert set(e) == {"ext", "name", "enabled", "created_at", "vm_email", "record"}
+        assert set(e) == {"ext", "name", "enabled", "created_at", "vm_email", "record", "vm_nopin"}
 
 
 # -- the right tenant's 201, never the other's -----------------------------------------

@@ -122,7 +122,7 @@ def api_tenant(me: Signed = Depends(signed_in())):
 def api_extensions(request: Request, me: Signed = Depends(signed_in())):
     exts = _extensions(me.user)
     mine = _bound(me, request, exts)
-    keep = ("ext", "name", "enabled", "vm_email", "record")
+    keep = ("ext", "name", "enabled", "vm_email", "record", "vm_nopin")
     return {"extensions": [{k: e[k] for k in keep} for e in exts if mine is None or e["ext"] == mine]}
 
 
@@ -176,6 +176,35 @@ def api_new_pin(ext: str, request: Request, me: Signed = Depends(signed_in())):
     r = gw.call(me.user, "POST", f"/extensions/{ext}/reset-voicemail-pin")
     _audit(me, request, "new voicemail PIN", ext)
     return _done(r, {"message": "New voicemail PIN made: it's in the next setup email."})
+
+
+class VoicemailPin(BaseModel):
+    pin: str
+
+
+@app.put("/api/extensions/{ext}/voicemail-pin")
+def api_choose_pin(ext: str, req: VoicemailPin, request: Request, me: Signed = Depends(signed_in())):
+    """The user's own PIN (gwphones turns away weak ones); never logged."""
+    _may(me, request, ext)
+    _saving(me.user)
+    r = gw.call(me.user, "PUT", f"/extensions/{ext}/voicemail-pin", json={"pin": req.pin})
+    _audit(me, request, "voicemail PIN chosen", ext)
+    return _done(r, {"message": "PIN saved."})
+
+
+class NoPin(BaseModel):
+    on: bool
+
+
+@app.put("/api/extensions/{ext}/voicemail-nopin")
+def api_voicemail_nopin(ext: str, req: NoPin, request: Request, me: Signed = Depends(signed_in())):
+    """*97 from the extension's own phones without the PIN (they've signed
+    in with its password already); anywhere else still asks."""
+    _may(me, request, ext)
+    _saving(me.user)
+    r = gw.call(me.user, "PUT", f"/extensions/{ext}/voicemail-nopin", json={"on": req.on})
+    _audit(me, request, "voicemail without PIN " + ("on" if req.on else "off"), ext)
+    return _done(r)
 
 
 class SetupLink(BaseModel):

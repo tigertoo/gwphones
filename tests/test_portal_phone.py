@@ -83,7 +83,7 @@ def test_admin_sees_the_tenant_only(world):
     a = world["client"]("admin")
     exts = a.get("/api/extensions").json()["extensions"]
     assert [e["ext"] for e in exts] == ["201", "202"] and all(e["name"].startswith(f"T{world['acme']['id']} ") for e in exts)
-    assert set(exts[0]) == {"ext", "name", "enabled", "vm_email", "record"}
+    assert set(exts[0]) == {"ext", "name", "enabled", "vm_email", "record", "vm_nopin"}
     assert a.get("/api/tenant").json() == {"code": world["acme"]["code"], "name": "Acme", "status": "active"}
 
 
@@ -394,3 +394,20 @@ def test_forwarding_cached_and_refreshed_after_a_change(world, monkeypatch):
     assert admin.put("/api/extensions/201/forwarding", json={"dnd": True}).status_code == 200
     admin.get("/api/forwarding")
     assert len(shows) == 2
+
+
+def test_voicemail_pin_and_no_pin(world):
+    pbx, acme = world["pbx"], world["acme"]["id"]
+    ann = world["client"]("ann")
+    assert ann.put("/api/extensions/201/voicemail-pin", json={"pin": "582047"}).status_code == 200
+    assert ext_row(world, acme, "201")["vm_pin"] == "582047"
+    r = ann.put("/api/extensions/201/voicemail-pin", json={"pin": "1234"})
+    assert r.status_code == 400 and "too easy" in r.json()["detail"]
+    assert ann.put("/api/extensions/202/voicemail-pin", json={"pin": "582047"}).status_code == 404  # Bob's
+    assert ann.put("/api/extensions/201/voicemail-nopin", json={"on": True}).status_code == 200
+    assert ext_row(world, acme, "201")["vm_nopin"] == 1
+    assert [e["vm_nopin"] for e in ann.get("/api/extensions").json()["extensions"]] == [True]
+    assert ann.put("/api/extensions/202/voicemail-nopin", json={"on": True}).status_code == 404
+    from gwportal import db
+    with db.connect() as conn:
+        assert "582047" not in str([dict(r) for r in conn.execute("SELECT * FROM audit")])

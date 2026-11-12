@@ -78,6 +78,7 @@ function ExtensionEditor({ ext, me, fwd, onChange }) {
       <NameAndSwitch ext={ext} admin={admin} onChange={onChange} />
       <Forwarding ext={ext.ext} fwd={fwd} onChange={onChange} />
       <VoicemailEmail ext={ext} me={me} onChange={onChange} />
+      <VoicemailAccess ext={ext} me={me} onChange={onChange} />
       <PhoneSetup ext={ext} me={me} />
       <NewSecrets ext={ext.ext} />
     </div>
@@ -153,6 +154,54 @@ function VoicemailEmail({ ext, me, onChange }) {
         </label>
       )}
       {a.show}
+    </div>
+  );
+}
+
+function VoicemailAccess({ ext, me, onChange }) {
+  const own = me.role !== "admin";
+  const [pin, setPin] = useState("");
+  const [again, setAgain] = useState("");
+  const a = useAction();
+  const b = useAction();
+  const toggle = (on) => a.run(() => put(`/extensions/${ext.ext}/voicemail-nopin`, { on }),
+    on ? "Done: *97 from this extension's phones goes straight in." : "Done: *97 asks for the PIN again.")
+    .then((r) => r && onChange());
+  const choose = async (e) => {
+    e.preventDefault();
+    if (pin !== again) {
+      b.setMsg({ kind: "error", text: "The two PINs aren't the same." });
+      return;
+    }
+    const r = await b.run(() => put(`/extensions/${ext.ext}/voicemail-pin`, { pin }), "PIN saved.");
+    if (r) {
+      setPin("");
+      setAgain("");
+    }
+  };
+  return (
+    <div className="block">
+      <h3>Voicemail access</h3>
+      <label className="check">
+        <input type="checkbox" checked={!!ext.vm_nopin} disabled={a.busy} onChange={(e) => toggle(e.target.checked)} />
+        Listen without the PIN from {own ? "my" : "this extension's"} own phones (dial *97)
+      </label>
+      <p className="small muted">Safe because those phones have already signed in with the extension&rsquo;s password.
+        From anywhere else the PIN is still asked. Anyone who picks up {own ? "your" : "its"} unlocked phone could
+        then hear the messages.</p>
+      {a.show}
+      <form className="block" onSubmit={choose}>
+        <Field label={own ? "Choose my PIN" : "Choose its PIN"} hint="4 to 8 digits; not 1234, repeats like 1111, or the extension number.">
+          <input type="password" inputMode="numeric" autoComplete="new-password" pattern="[0-9]{4,8}" maxLength={8}
+            value={pin} onChange={(e) => setPin(e.target.value.replace(/\D/g, ""))} aria-label="New PIN" />
+        </Field>
+        <Field label="The same again">
+          <input type="password" inputMode="numeric" autoComplete="new-password" pattern="[0-9]{4,8}" maxLength={8}
+            value={again} onChange={(e) => setAgain(e.target.value.replace(/\D/g, ""))} aria-label="PIN again" />
+        </Field>
+        <Button busy={b.busy} kind="secondary" type="submit" disabled={pin.length < 4}>Save PIN</Button>
+        {b.show}
+      </form>
     </div>
   );
 }

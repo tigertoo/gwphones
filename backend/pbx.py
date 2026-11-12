@@ -553,6 +553,8 @@ def get_db() -> sqlite3.Connection:
                    "extensions ADD COLUMN outbound_cid TEXT NOT NULL DEFAULT ''",
                    "ring_groups ADD COLUMN voicemail TEXT NOT NULL DEFAULT ''",
                    "extensions ADD COLUMN record INTEGER NOT NULL DEFAULT 0",
+                   # *97 from the extension's own phones without the PIN
+                   "extensions ADD COLUMN vm_nopin INTEGER NOT NULL DEFAULT 0",
                    *[f"{t} ADD COLUMN tenant_id INTEGER NOT NULL DEFAULT {MAIN_TENANT}" for t in TENANT_TABLES]):
         try:
             conn.execute(f"ALTER TABLE {column}")
@@ -622,7 +624,8 @@ TENANT_KEYED = {
     "extensions": ("ext", """(ext TEXT NOT NULL, name TEXT NOT NULL, password TEXT NOT NULL,
         enabled INTEGER NOT NULL DEFAULT 1, created_at TEXT NOT NULL, updated_at TEXT NOT NULL, vm_pin TEXT,
         vm_email TEXT NOT NULL DEFAULT '', setup_email TEXT NOT NULL DEFAULT '', outbound_cid TEXT NOT NULL DEFAULT '',
-        record INTEGER NOT NULL DEFAULT 0, tenant_id INTEGER NOT NULL DEFAULT 1, PRIMARY KEY (tenant_id, ext))"""),
+        record INTEGER NOT NULL DEFAULT 0, vm_nopin INTEGER NOT NULL DEFAULT 0, tenant_id INTEGER NOT NULL DEFAULT 1,
+        PRIMARY KEY (tenant_id, ext))"""),
     "ring_groups": ("number", """(number TEXT NOT NULL, name TEXT NOT NULL, strategy TEXT NOT NULL DEFAULT 'ringall',
         ring_time INTEGER NOT NULL DEFAULT 25, members TEXT NOT NULL DEFAULT '', voicemail TEXT NOT NULL DEFAULT '',
         tenant_id INTEGER NOT NULL DEFAULT 1, PRIMARY KEY (tenant_id, number))"""),
@@ -890,6 +893,11 @@ def build_extensions_conf(conn) -> str:
             out.append(f"set_var=EXT_CID={r['outbound_cid']}")
             if emergency_needs_main_number(settings, r["outbound_cid"]):
                 out.append("set_var=EMERG_OWN_CID=0")  # Irish VoIP can't show it: 112/999 show the main number
+        if r["vm_nopin"]:
+            # Its own phones signed in with its password (TLS): *97 from
+            # them needn't ask for the voicemail PIN. On the endpoint, so
+            # nothing a caller sends can set it.
+            out.append("set_var=VM_NOPIN=1")
         out += ["",
                 f"[{login}](auth-ext)",
                 f"username={login}",
@@ -1431,7 +1439,8 @@ OUTBOUND_PATTERNS = [
 ]
 
 
-def _internal_context(t: TenantNames, outbound_cid: str, emergency_opts: str = "", emergency_check: bool = False) -> List[str]:
+def _internal_context(t: TenantNames, outbound_cid: str, emergency_opts: str = "", emergency_check: bool = False,
+                      vm_nopin: bool = False) -> List[str]:
     """Everything a tenant's phone can dial: its own extensions, groups,
     menus, schedules and feature codes, voicemail, 112/999 and outside
     numbers. Other tenants' phones start here (endpoint context); the main
@@ -1448,8 +1457,14 @@ def _internal_context(t: TenantNames, outbound_cid: str, emergency_opts: str = "
            f"include => {t.features}",
            "include => portal-outbound",
            f"exten => _2XX,1,Goto({t.call_ext},${{EXTEN}},1)",
-           # Its own mailbox by the endpoint, not the caller ID a phone sends.
-           f"exten => *97,1,VoiceMailMain(${{PBX_EXT}}@{t.vm})",
+           # Its own mailbox by the endpoint, not the caller ID a phone sends;
+           # without the PIN from its own phones if it chose that (VM_NOPIN
+           # on the endpoint).
+           *([f'exten => *97,1,GotoIf($["${{VM_NOPIN}}" = "1"]?nopin)',
+              f" same => n,VoiceMailMain(${{PBX_EXT}}@{t.vm})",
+              " same => n,Hangup()",
+              f" same => n(nopin),VoiceMailMain(${{PBX_EXT}}@{t.vm},s)"] if vm_nopin
+             else [f"exten => *97,1,VoiceMailMain(${{PBX_EXT}}@{t.vm})"]),
            " same => n,Hangup()",
            f"exten => *98,1,VoiceMailMain(@{t.vm})",
            " same => n,Hangup()"]
@@ -1585,8 +1600,10 @@ def build_portal_dialplan(conn) -> str:
     for t in tenants:
         out += _ringgroups_context(conn, t) + _ivr_contexts(conn, t) + _hours_contexts(conn, t)
     for t in tenants:
+        nopin = bool(conn.execute("SELECT 1 FROM extensions WHERE tenant_id = ? AND enabled = 1 AND vm_nopin = 1",
+                                  (t.id,)).fetchone())
         out += [""] + _internal_context(t, get_settings(conn, t.id)["outbound_cid"], _trunk_dial_opts(s, "irishvoip"),
-                                        bool(cli_lists(s).get("irishvoip")))
+                                        bool(cli_lists(s).get("irishvoip")), nopin)
         if t.id != MAIN_TENANT:
             out += [""] + _full_context(conn, t)
     out += [""] + OUTBOUND_PATTERNS
@@ -2115,6 +2132,7 @@ def api_config():
             "extensions": [{"ext": r["ext"], "name": r["name"], "enabled": bool(r["enabled"]),
                             "voicemail_email": r["vm_email"], "setup_email": r["setup_email"],
                             "outbound_cid": r["outbound_cid"], "record": bool(r["record"]),
+                            "vm_nopin": bool(r["vm_nopin"]),
                             "created_at": r["created_at"], "updated_at": r["updated_at"]}
                            for r in conn.execute("SELECT * FROM extensions WHERE tenant_id = ? ORDER BY ext", (tid,))],
             "ring_groups": [{"number": r["number"], "name": r["name"], "strategy": r["strategy"],
@@ -2325,11 +2343,11 @@ def api_list_extensions():
     portal, which gets nothing else of /config. created_at tells one
     extension from a later one with the same number."""
     with get_db() as conn:
-        rows = conn.execute("SELECT ext, name, enabled, created_at, vm_email, record FROM extensions "
+        rows = conn.execute("SELECT ext, name, enabled, created_at, vm_email, record, vm_nopin FROM extensions "
                             "WHERE tenant_id = ? ORDER BY ext", (current_tenant(),)).fetchall()
     return {"extensions": [{"ext": r["ext"], "name": r["name"], "enabled": bool(r["enabled"]),
-                            "created_at": r["created_at"], "vm_email": r["vm_email"], "record": bool(r["record"])}
-                           for r in rows]}
+                            "created_at": r["created_at"], "vm_email": r["vm_email"], "record": bool(r["record"]),
+                            "vm_nopin": bool(r["vm_nopin"])} for r in rows]}
 
 
 @router.get("/status/tenant")
@@ -2473,6 +2491,51 @@ def api_click_to_call(req: ClickToCallRequest):
     if re.search(r"no such command|usage:|unable to", out, re.I):
         raise HTTPException(502, f"Asterisk said: {out.strip()[:200]}")
     return {"ok": True, "number": target, "asterisk_said": out.strip()[:200]}
+
+
+WEAK_PINS = {"1234", "12345", "123456", "1234567", "12345678", "4321", "654321", "1111", "0000"}
+
+
+class VoicemailPinRequest(BaseModel):
+    pin: str
+
+
+def _clean_pin(pin: str, ext: str) -> str:
+    """A voicemail PIN its user chose: 4-8 digits, not one anyone would
+    guess first (all the same digit, a run up or down, the extension)."""
+    pin = (pin or "").strip()
+    if not re.fullmatch(r"[0-9]{4,8}", pin):
+        raise HTTPException(400, "A PIN is 4 to 8 digits.")
+    run = "01234567890"
+    if (len(set(pin)) == 1 or pin in WEAK_PINS or pin in run or pin in run[::-1] or ext in pin):
+        raise HTTPException(400, "That PIN is too easy to guess: avoid repeats, runs like 1234, and the extension number.")
+    return pin
+
+
+@router.put("/extensions/{ext}/voicemail-pin")
+def api_set_voicemail_pin(ext: str, req: VoicemailPinRequest):
+    pin = _clean_pin(req.pin, ext)
+    with _lock, get_db() as conn:
+        if conn.execute("UPDATE extensions SET vm_pin = ?, updated_at = ? WHERE ext = ? AND tenant_id = ?",
+                        (pin, _now(), ext, current_tenant())).rowcount == 0:
+            raise HTTPException(404, "Extension not found.")
+        conn.commit()
+        return apply_config(conn, f"Voicemail PIN for extension {ext} chosen")  # never the PIN itself
+
+
+class VoicemailNoPinRequest(BaseModel):
+    on: bool
+
+
+@router.put("/extensions/{ext}/voicemail-nopin")
+def api_voicemail_nopin(ext: str, req: VoicemailNoPinRequest):
+    with _lock, get_db() as conn:
+        if conn.execute("UPDATE extensions SET vm_nopin = ?, updated_at = ? WHERE ext = ? AND tenant_id = ?",
+                        (int(req.on), _now(), ext, current_tenant())).rowcount == 0:
+            raise HTTPException(404, "Extension not found.")
+        conn.commit()
+        return apply_config(conn, f"Voicemail for extension {ext} from its own phones: "
+                                  + ("no PIN" if req.on else "PIN asked"))
 
 
 @router.post("/extensions/{ext}/reset-voicemail-pin")
