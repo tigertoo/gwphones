@@ -265,6 +265,13 @@ def api_health():
 # Routes
 # ---------------------------------------------------------------------------
 
+# Desk phones: /api/pbx/desk-phones and their config, /prov/yealink/ (before
+# pbx.py's /prov router, so its own paths are matched first).
+from deskphones import router as deskphones_router, public_router as deskphones_public_router  # noqa: E402
+
+app.include_router(deskphones_router)
+app.include_router(deskphones_public_router)
+
 # The phone system itself, /api/pbx/*, and phone setup links, /prov/.
 from pbx import router as pbx_router, public_router as pbx_public_router  # noqa: E402
 

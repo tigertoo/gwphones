@@ -195,11 +195,9 @@ Settings (its own `.env`): `PORTAL_DB`, `PORTAL_ORIGIN` (e.g.
 ## Branches
 
 - `main`: what runs.
-- `desk-phones`: Yealink desk phones (`backend/deskphones.py`), waiting
-  for a real phone to test on. It was split from the admin dashboard
-  without a `main.py` of its own, so merging it needs its two routers
-  added to `main.py` (`router` and `public_router`, the public one before
-  pbx.py's `/prov` router); `tests/test_routes.py` fails until they are.
+- `desk-phones`: Yealink desk phones (`backend/deskphones.py`, its
+  routers in `main.py`, `tests/test_desk_phones.py`), being tested on a
+  real T46G before it joins `main`.
 
 ## Tests
 

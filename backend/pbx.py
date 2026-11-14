@@ -206,7 +206,7 @@ LCR_URL = os.environ.get("PBX_LCR_URL", "http://127.0.0.1:8010/lcr/route")
 # nothing reads tenant_id yet.
 MAIN_TENANT, MAIN_TENANT_CODE = 1, "1001"
 TENANT_TABLES = ("extensions", "ring_groups", "inbound_routes", "provision_tokens", "call_links", "ivr_menus",
-                 "business_hours")
+                 "business_hours", "desk_phones")
 
 # Settings each tenant has its own of (tenant_settings); everything else in
 # settings (trunks, routes, video, the default inbound route) is the server's.
@@ -537,6 +537,16 @@ def get_db() -> sqlite3.Connection:
                open_target TEXT NOT NULL,
                closed_target TEXT NOT NULL,
                override TEXT NOT NULL DEFAULT '');
+           CREATE TABLE IF NOT EXISTS desk_phones (
+               mac TEXT PRIMARY KEY,
+               ext TEXT NOT NULL,
+               model TEXT NOT NULL DEFAULT '',
+               prov_pass TEXT NOT NULL,
+               admin_pass TEXT NOT NULL,
+               created_at TEXT NOT NULL,
+               last_fetch_at TEXT,
+               last_fetch_ip TEXT,
+               last_fetch_agent TEXT);
            CREATE TABLE IF NOT EXISTS tenants (
                id INTEGER PRIMARY KEY,
                code TEXT NOT NULL UNIQUE,
