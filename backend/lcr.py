@@ -45,7 +45,8 @@ from fastapi.responses import PlainTextResponse
 
 import billing
 from billing import bill_seconds, from_micro, latest_fx, rate_for, route_label, to_micro
-from pbx import NUMBER_TYPES, PBX_DB_PATH, TRUNKS, VOXBEAM_ROUTES, classify_dialled, current_tenant, lcr_routes
+from pbx import (NUMBER_TYPES, PBX_DB_PATH, TRUNKS, VOXBEAM_ROUTES, changes_log, classify_dialled, cli_lists,
+                 current_tenant, e164, lcr_routes)
 
 TYPICAL_SECONDS = 120  # "cheapest" compares the cost of a call this long
 public_router = APIRouter(prefix="/lcr")
@@ -87,10 +88,17 @@ def _tenant_by_code(code: str) -> Optional[int]:
     return r["id"] if r else None
 
 
-def decide(kind: str, number: str, tenant: Optional[int] = None) -> dict:
+def _shows(lists: dict, c: dict, cli: str) -> bool:
+    codes = lists.get(f"{c['trunk']}{c['route']}")
+    return not codes or any(cli.startswith(code) for code in codes)
+
+
+def decide(kind: str, number: str, tenant: Optional[int] = None, cli: str = "") -> dict:
     """The routes to try for `number` (international, no 00) of type `kind`,
     with each candidate's price (against the tenant's caps) and why any
-    were dropped."""
+    were dropped. cli: the caller ID the call would show; routes that
+    can't show it are dropped, and if none can, the tenant's main number is
+    tried instead (out["cli"] then says which to show)."""
     from pbx import DEFAULT_SETTINGS
     s = {**DEFAULT_SETTINGS, **_pbx_settings(tenant)}
     mode = s.get(f"route_{kind}", "default")
@@ -127,10 +135,27 @@ def decide(kind: str, number: str, tenant: Optional[int] = None) -> dict:
             if cap is not None and c["per_min"] > cap:
                 c["dropped"] = f"€{from_micro(c['per_min'], 4)}/min is over the €{cap_text} cap"
     usable = [c for c in out["candidates"] if "dropped" not in c]
+    lists = cli_lists(s)
+    shown = e164(cli)
+    if lists and shown and usable:
+        can = [c for c in usable if _shows(lists, c, shown)]
+        if not can:
+            main = e164(s.get("outbound_cid", ""))
+            fallback = [c for c in usable if _shows(lists, c, main)] if main and main != shown else []
+            if fallback:
+                out["cli"] = "+" + main
+                out["cli_note"] = f"No route can show +{shown}: the main number +{main} is shown instead"
+                can = fallback
+            else:
+                out["refuse"] = f"No route can show the caller ID +{shown}" + (f" or the main number +{main}" if main else "")
+        for c in usable:
+            if c not in can:
+                c["dropped"] = f"Can't show caller ID +{shown}"
+        usable = can
     if mode == "cheapest":
         usable.sort(key=lambda c: (c["typical"], c["per_min"]))
     out["routes"] = usable
-    if not usable:
+    if not usable and "refuse" not in out:
         out["refuse"] = "No route has a price under the cap for this number"
     for c in out["candidates"]:
         for k in ("per_min", "typical"):
@@ -144,7 +169,7 @@ def _token(r: dict) -> str:
 
 
 @public_router.get("/route", response_class=PlainTextResponse)
-def lcr_route(request: Request, kind: str, num: str, tenant: str = ""):
+def lcr_route(request: Request, kind: str, num: str, tenant: str = "", cli: str = ""):
     """Asked by Asterisk itself only: from this machine, not through nginx,
     with the token from the generated dialplan."""
     host = request.client.host if request.client else ""
@@ -156,20 +181,30 @@ def lcr_route(request: Request, kind: str, num: str, tenant: str = ""):
         raise HTTPException(403)
     if kind not in NUMBER_TYPES or not re.fullmatch(r"\d{3,20}", num) or not re.fullmatch(r"\d{0,4}", tenant):
         return PlainTextResponse("REFUSE:bad request")
+    if cli and not re.fullmatch(r"\+?[0-9]{6,20}", cli):
+        # Unreadable: never refuse a call for it, just don't filter by it.
+        changes_log.info(f"Route check: caller ID {cli[:30]!r} isn't a number, so no caller-ID rule applied")
+        cli = ""
     tid = _tenant_by_code(tenant)  # the caller's account code: empty for the main tenant
     if tid is None:
         return PlainTextResponse("REFUSE:unknown tenant")
     started = time.time()
-    d = decide(kind, num, tid)
+    d = decide(kind, num, tid, cli)
     reply = f"REFUSE:{d['refuse']}" if d.get("refuse") else "OK:" + "/".join(_token(r) for r in d["routes"])
+    if not d.get("refuse") and d.get("cli"):
+        reply += f"|CLI:{d['cli']}"  # the dialplan shows this number instead
+        changes_log.info(f"Call to +{num} (tenant {tenant or '1001'}): {d['cli_note']}")
+    elif d.get("refuse", "").startswith("No route can show"):
+        changes_log.info(f"Call to +{num} (tenant {tenant or '1001'}) refused: {d['refuse']}")
     _last_check["at"] = datetime.now(timezone.utc).isoformat(timespec="seconds")
-    _recent.appendleft({"at": _last_check["at"], "kind": kind, "number": num, "reply": reply,
+    _recent.appendleft({"at": _last_check["at"], "kind": kind, "number": num, "reply": reply, "cli": cli,
+                        "note": d.get("cli_note", ""),
                         "routes": [r["label"] for r in d["routes"]], "ms": round((time.time() - started) * 1000)})
     return PlainTextResponse(reply)
 
 
 @router.get("/route-test")
-def api_route_test(number: str):
+def api_route_test(number: str, cli: str = ""):
     """What a call to `number` (as dialled) would do now, with every
     candidate route's price; plus the recent real decisions."""
     kind, national, intl = classify_dialled(number)
@@ -177,7 +212,9 @@ def api_route_test(number: str):
     if kind == "emergency":
         result = {"kind": kind, "note": "Emergency calls always go straight out via Irish VoIP."}
     elif kind:
-        result = decide(kind, intl, current_tenant())
+        # as a call showing cli would go, or the tenant's main number
+        main = _pbx_settings(current_tenant()).get("outbound_cid", "")
+        result = decide(kind, intl, current_tenant(), cli or main)
         result["national"] = national
     return {"result": result, "recognised": bool(kind), "recent": list(_recent),
             "last_check": _last_check["at"], "started_at": STARTED_AT,

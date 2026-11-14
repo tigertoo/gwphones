@@ -58,7 +58,7 @@
         sockets: [socket],
         uri: `sip:${cfg.user}@${cfg.domain}`,
         password: cfg.password,
-        display_name: name || "Visitor",  // the PBX shows "Web <name> (<link>)"
+        display_name: name || "Visitor",
         register: false,
         session_timers: false,
         user_agent: "Call link",
@@ -78,8 +78,13 @@
     try {
       stream = await navigator.mediaDevices.getUserMedia({ audio: true, video: wantVideo });
     } catch {
-      cleanUp(wantVideo ? "The browser wasn't allowed to use the microphone or camera." :
-        "The browser wasn't allowed to use the microphone.");
+      // Often the phone's own setting, not the site's: on an iPhone each
+      // browser app needs the microphone allowed in Settings first.
+      const what = wantVideo ? "microphone or camera" : "microphone";
+      const iphone = /iPhone|iPad/.test(navigator.userAgent);
+      cleanUp(`The browser wasn't allowed to use the ${what}. Allow it for this page (the lock or ⓘ by the ` +
+        `address), then press Call again.` + (iphone ? ` On an iPhone, also check Settings, then your browser ` +
+        `(e.g. Chrome), then ${wantVideo ? "Microphone and Camera" : "Microphone"}.` : ""));
       return;
     }
     if (wantVideo) {
@@ -99,6 +104,9 @@
       // No STUN: the PBX has a public address, so the browser's own
       // addresses are enough, and no third party sees the call.
       pcConfig: { iceServers: [] },
+      // The visitor's name for the phone's display: its own header, since
+      // the PBX gives this login a fixed caller ID (pbx.py, WEB_GUEST).
+      extraHeaders: name ? [`X-Web-Name: ${name}`] : [],
       rtcOfferConstraints: { offerToReceiveAudio: true, offerToReceiveVideo: wantVideo },
       eventHandlers: {
         peerconnection: (e) => {

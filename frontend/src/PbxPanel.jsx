@@ -103,6 +103,7 @@ export default function PbxPanel({ apiBase, callNumber }) {
     setToast({ busy: true, text: busyText(method, path, [
       [/reset-password$/, "Setting a new password and applying it…"],
       [/reset-voicemail-pin$/, "Setting a new voicemail PIN…"],
+      [/\/voicemail-pin$/, "Saving the PIN…"],
       [/^\/apply$/, "Applying to the phone system…"],
       [/^\/desk-phones/, method === "DELETE" ? "Removing the phone…" : "Saving the desk phone…"],
       [/^\/click-to-call$/, "Ringing your extension…"],
@@ -261,6 +262,10 @@ function StatusSection({ config, status, send, busy }) {
               <div className="vital-detail">
                 {trunks[key].host}
                 {s.rtt_ms != null && ` · ${s.rtt_ms} ms`}
+              </div>
+              <div className="vital-detail">
+                Calls now: {status.channels.filter((c) => c.channel.startsWith(`PJSIP/${key}-`)).length}
+                {settings.trunk_max?.[key] ? ` of ${settings.trunk_max[key]}` : ""}
               </div>
               {!settings.trunks_enabled[key] ? (
                 <div className="vital-detail">Outbound: off</div>
@@ -509,6 +514,37 @@ function VoicemailEmail({ ext, current, send, busy }) {
   );
 }
 
+// The PIN its user would choose (the same rules as the portal and the
+// phone's menu, checked by gwphones), and *97 without it from its own phones.
+function VoicemailAccess({ ext, nopin, send, busy, onPin }) {
+  const [pin, setPin] = useState("");
+  const save = async (ev) => {
+    ev.preventDefault();
+    if (await send("PUT", `/extensions/${ext}/voicemail-pin`, { pin }, `Voicemail PIN for ${ext} saved.`)) {
+      setPin("");
+      onPin();
+    }
+  };
+  return (
+    <>
+      <form className="idea-form-row pbx-gap" onSubmit={save}>
+        <input className="idea-input pbx-num-input" type="password" inputMode="numeric" autoComplete="new-password"
+          placeholder="Choose a PIN" maxLength={8} value={pin} aria-label="Choose a voicemail PIN"
+          onChange={(e) => setPin(e.target.value.replace(/\D/g, ""))} />
+        <button className="ticket-action-btn" disabled={busy || pin.length < 4}>Save PIN</button>
+        <span className="pbx-hint">4 to 8 digits; not 1234, repeats like 1111, or the extension number.</span>
+      </form>
+      <label className="pbx-toggle pbx-gap">
+        <input type="checkbox" checked={!!nopin} disabled={busy}
+          onChange={(ev) => send("PUT", `/extensions/${ext}/voicemail-nopin`, { on: ev.target.checked },
+            ev.target.checked ? `*97 from ${ext}'s own phones goes straight in.` : `*97 from ${ext} asks for the PIN again.`)} />
+        Voicemail without the PIN from its own phones (*97). Anywhere else still asks; anyone holding one of its
+        unlocked phones (apps too) could hear its messages.
+      </label>
+    </>
+  );
+}
+
 function OutboundCid({ ext, current, fallback, dids, send, busy }) {
   const [value, setValue] = useState(current || "");
   useEffect(() => setValue(current || ""), [current]);
@@ -531,7 +567,7 @@ function OutboundCid({ ext, current, fallback, dids, send, busy }) {
         {dids.map((d) => <option key={d} value={d} />)}
       </datalist>
       <button className="ticket-action-btn" disabled={busy || clean === (current || "")}>Save</button>
-      <span className="pbx-hint">Shown to people this extension calls, e.g. a company number or the user's mobile so calls come back to them. Leave blank for the default.</span>
+      <span className="pbx-hint">Shown to people this extension calls, e.g. a company number or the user's mobile so calls come back to them. Leave blank for the default. A number outside Ireland in full, e.g. +61 2 9123 4567: one starting with 0 is taken as Irish.</span>
     </form>
   );
 }
@@ -772,6 +808,8 @@ function ExtensionsSection({ config, status, send, busy, apiBase, reload }) {
                         }
                       }}
                     >New voicemail PIN</button>
+                    <VoicemailAccess ext={e.ext} nopin={e.vm_nopin} send={send} busy={busy}
+                      onPin={() => { setCreds(null); showCreds(e.ext); }} />
                     <VoicemailEmail ext={e.ext} current={e.voicemail_email} send={send} busy={busy} />
                     <OutboundCid ext={e.ext} current={e.outbound_cid} fallback={config.settings.outbound_cid}
                       dids={config.inbound_routes.map((r) => r.did)} send={send} busy={busy} />
@@ -1219,8 +1257,10 @@ function TrunksSection({ config, status, send, busy, apiBase }) {
       <h2>Outbound trunks</h2>
       <p className="pbx-hint pbx-intro">
         Calls go out through the first enabled trunk, unless the table below sends that kind of number elsewhere.
-        The next one is only tried if that trunk can't take the call (down, refused or congested). 112/999 always
-        go via Irish VoIP, whatever is set here.
+        The next one is only tried if that trunk can't take the call (down, refused or congested), or it&rsquo;s at
+        its most calls at once: set that to match what the carrier allows, counting calls in and out. When every
+        trunk is full or down the caller hears the engaged tone. 112/999 always go via Irish VoIP, whatever is set
+        here, and are never refused for being over the most calls.
       </p>
       <ol className="pbx-trunk-order">
         {form.trunk_order.map((key, i) => {
@@ -1238,6 +1278,18 @@ function TrunksSection({ config, status, send, busy, apiBase }) {
                   onChange={(e) => setForm({ ...form, trunks_enabled: { ...form.trunks_enabled, [key]: e.target.checked } })}
                 />
                 Use for outbound
+              </label>
+              <label className="idea-field" title="The most calls at once this carrier allows (its channels, in and out together), as set with the carrier. Empty: no ceiling here.">
+                Most calls
+                <input
+                  className="idea-input pbx-num-input"
+                  type="number"
+                  min={1}
+                  max={200}
+                  placeholder="No limit"
+                  value={form.trunk_max?.[key] ?? ""}
+                  onChange={(e) => setForm({ ...form, trunk_max: { ...form.trunk_max, [key]: e.target.value } })}
+                />
               </label>
               <button type="button" className="ticket-action-btn" disabled={i === 0} onClick={() => move(i, -1)} aria-label="Move up">↑</button>
               <button type="button" className="ticket-action-btn" disabled={i === form.trunk_order.length - 1} onClick={() => move(i, 1)} aria-label="Move down">↓</button>
@@ -1304,6 +1356,32 @@ function TrunksSection({ config, status, send, busy, apiBase }) {
           </label>
         ))}
       </div>
+      <label className="pbx-field">
+        <span>Browser calls at once, all tenants</span>
+        <input className="idea-input pbx-num-input" type="number" min={1} max={200} value={form.web_max_total ?? 30}
+          onChange={(e) => setForm({ ...form, web_max_total: Number(e.target.value) })} />
+        <small className="pbx-hint">Calls through call links, every tenant together: what this server can carry (each
+          tenant has its own limit too, in Tenants, and each link 2). Browser calls don&rsquo;t use a carrier, so they
+          don&rsquo;t count in tenants&rsquo; calls at once.</small>
+      </label>
+      <div className="ticket-action-label">Caller IDs each route can show</div>
+      <p className="pbx-hint">
+        Carriers block calls showing their own country&rsquo;s numbers that arrive from abroad, so a caller ID has to
+        leave through a carrier in its own country. List the calling codes each route can show (e.g. 353 for Irish
+        numbers, 61 for Australian, or 353,61). A call then only goes out on routes that can show its caller ID; if
+        none can, the tenant&rsquo;s main number is shown instead, and if not even that, the call is refused.
+        <b> Empty means any caller ID</b>, as before: once you fill one in, fill in the routes that can&rsquo;t show
+        everything too.
+      </p>
+      <div className="pbx-mapping">
+        {config.all_routes.map((r) => (
+          <label key={r.key} className="pbx-field">
+            <span>{r.label}</span>
+            <input className="idea-input" placeholder="any" value={form.cli_countries?.[r.key] ?? ""}
+              onChange={(e) => setForm({ ...form, cli_countries: { ...form.cli_countries, [r.key]: e.target.value } })} />
+          </label>
+        ))}
+      </div>
 
       <div className="pbx-fields">
         <label className="pbx-field">
@@ -1314,7 +1392,7 @@ function TrunksSection({ config, status, send, busy, apiBase }) {
             value={form.outbound_cid}
             onChange={(e) => setForm({ ...form, outbound_cid: e.target.value })}
           />
-          <small className="pbx-hint">Shown on outbound calls from extensions without their own. An extension can have its own under Phone setup.</small>
+          <small className="pbx-hint">Shown on outbound calls from extensions without their own, on emergency calls, and when no route can show an extension&rsquo;s own (see Caller IDs each route can show). An extension can have its own under Phone setup. A number outside Ireland in full (+61…).</small>
         </label>
         <label className="pbx-field">
           <span>Voxbeam route</span>
@@ -1381,13 +1459,14 @@ function TrunksSection({ config, status, send, busy, apiBase }) {
 // Try a number against the saved routing, and see the recent real checks.
 function RouteTest({ apiBase }) {
   const [number, setNumber] = useState("");
+  const [cli, setCli] = useState("");
   const [data, setData] = useState(null);
   const [error, setError] = useState("");
 
   const run = async (e) => {
     e?.preventDefault();
     setError("");
-    const res = await fetch(`${apiBase}/api/pbx/route-test?${new URLSearchParams({ number: number || "0" })}`);
+    const res = await fetch(`${apiBase}/api/pbx/route-test?${new URLSearchParams({ number: number || "0", cli })}`);
     const d = await res.json().catch(() => ({}));
     if (res.ok) setData(d); else setError(d.detail || `Error ${res.status}`);
   };
@@ -1402,6 +1481,8 @@ function RouteTest({ apiBase }) {
       <form className="idea-form-row" onSubmit={run}>
         <input className="idea-input" placeholder="e.g. +44 20 8759 9036 or 087 123 4567" value={number}
           onChange={(e) => setNumber(e.target.value)} />
+        <input className="idea-input" placeholder="Showing caller ID (blank: the main number)" value={cli}
+          onChange={(e) => setCli(e.target.value)} />
         <button className="ticket-action-btn ticket-action-btn-primary" disabled={!number.trim()}>Check</button>
         <span className="pbx-hint">Uses the saved settings: save changes above first.</span>
       </form>
@@ -1412,6 +1493,7 @@ function RouteTest({ apiBase }) {
         <>
           <p>
             <b>{r.refuse ? `Refused: ${r.refuse}` : `Tries ${r.routes.map((x) => x.label).join(", then ")}`}</b>
+            {r.cli_note && <><br /><span className="pbx-tenant-flag">{r.cli_note}</span></>}
             <span className="pbx-hint"> · {r.kind}, {r.mode === "cheapest" ? "cheapest route" : r.mode === "default" ? "trunk order" : r.mode}, cap €{r.cap}/min</span>
           </p>
           <table className="users-table">
@@ -1454,7 +1536,8 @@ function RouteTest({ apiBase }) {
           <tbody>
             {data.recent.map((x, i) => (
               <tr key={i}><td>{new Date(x.at).toLocaleTimeString()}</td><td>{x.kind}</td><td>+{x.number}</td>
-                <td>{x.reply.startsWith("OK:") ? x.routes.join(" → ") : x.reply.replace("REFUSE:", "Refused: ")}</td><td>{x.ms} ms</td></tr>
+                <td>{x.reply.startsWith("OK:") ? x.routes.join(" → ") : x.reply.replace("REFUSE:", "Refused: ")}
+                  {x.note && <div className="pbx-hint">{x.note}</div>}</td><td>{x.ms} ms</td></tr>
             ))}
           </tbody>
         </table>

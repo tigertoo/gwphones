@@ -1,0 +1,43 @@
+# Example systemd unit for the tenant portal: copy to
+# /etc/systemd/system/gwportal.service.
+#
+# sudo systemctl daemon-reload
+# sudo systemctl enable --now gwportal
+#
+# Its own user, gwportal, in no other group: it can't read the phone
+# system's data (/var/lib/admin-dashboard), Asterisk's files or gwphones'
+# .env, and talks to gwphones only through its API with the portal's
+# secret. One process (its save limit and Status cache are in memory).
+
+[Unit]
+Description=gwphones tenant portal
+After=network.target gwphones.service
+
+[Service]
+Type=simple
+User=gwportal
+Group=gwportal
+WorkingDirectory=/opt/gwphones/portal
+EnvironmentFile=/opt/gwphones/portal/.env
+Environment=HOME=/var/lib/gwportal
+ExecStart=/opt/gwphones/portal/venv/bin/uvicorn gwportal.app:app --host 127.0.0.1 --port 8020 --workers 1
+Restart=on-failure
+RestartSec=5
+
+# Lockdown: read-only everywhere but its own database folder; the phone
+# system's data, Asterisk and gwphones' settings out of sight altogether.
+NoNewPrivileges=yes
+ProtectSystem=strict
+ReadWritePaths=/var/lib/gwportal
+InaccessiblePaths=-/var/lib/admin-dashboard -/etc/asterisk -/var/spool/asterisk -/opt/gwphones/backend/.env
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+
+[Install]
+WantedBy=multi-user.target

@@ -57,7 +57,7 @@ CDR_CSV = os.environ.get("PBX_CDR_CSV", "/var/log/asterisk/cdr-csv/Master.csv")
 # usegmtime). Statements and months are in local (Irish) time.
 CDR_TZ = ZoneInfo(os.environ.get("PBX_CDR_TIMEZONE", "UTC"))
 LOCAL_TZ = ZoneInfo(os.environ.get("PBX_TIMEZONE", "Europe/Dublin"))
-FX_URL = os.environ.get("PBX_FX_URL", "https://api.frankfurter.dev/v1")  # ECB rates, as Money Mapper
+FX_URL = os.environ.get("PBX_FX_URL", "https://api.frankfurter.dev/v1")  # ECB rates
 MAX_SHEET_BYTES = 20 * 1024 * 1024
 
 MICRO = Decimal(1_000_000)
