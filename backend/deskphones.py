@@ -95,6 +95,9 @@ def build_config(conn, phone) -> str:
              "static.auto_provision.repeat.enable = 1",
              f"static.auto_provision.repeat.minutes = {REPEAT_MINUTES}",
              f"static.security.user_password = admin:{phone['admin_pass']}",
+             # Only Accept Trusted Certificates: checked on the T46G (28.83), which
+             # trusts Let's Encrypt's root, so a phone set up with it off turns it on.
+             "static.security.trust_certificates = 1",
              "local_time.time_zone = 0",
              "local_time.time_zone_name = Ireland(Dublin)",
              "local_time.summer_time = 2",

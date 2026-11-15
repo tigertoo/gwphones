@@ -45,6 +45,7 @@ def test_challenge_then_config(phones):
     # busy lamps: the main tenant's other extensions only
     assert "linekey.2.value = 202" in cfg and "linekey.3.value = 203" in cfg and "linekey.4.type = 0" in cfg
     assert "linekey.2.pickup_value = **202" in cfg
+    assert "static.security.trust_certificates = 1" in cfg
 
 
 def test_tenant_phone(phones):

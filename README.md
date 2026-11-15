@@ -887,8 +887,11 @@ last official firmware is Yealink's
 (phone web page, Settings, Upgrade). The T46G is end of life, so RPS
 doesn't take it: enter the URL, username and password on the phone's web
 page (Settings, Auto Provision, then Autoprovision Now), and again after
-every factory reset, which clears them. Turn off Security, Trusted
-Certificates, "Only Accept Trusted Certificates" for now.
+every factory reset, which clears them. A factory-reset phone may need
+Security, Trusted Certificates, "Only Accept Trusted Certificates" turned
+off for its first fetch; the config turns it back on
+(`static.security.trust_certificates = 1`). The T46G on 28.83.0.120
+trusts Let's Encrypt's root, so later fetches work with it on.
 
 Once it has fetched its config the phone's web page login is `admin` with
 the admin password shown under RPS details (the config sets it), not
