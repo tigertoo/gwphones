@@ -70,6 +70,7 @@ nginx, on the Tailscale-only site, behind its login:
 
 ```nginx
     location /phone-api/ {
+        client_max_body_size 110m;   # rate sheets, greetings, desk-phone firmware
         auth_basic "Restricted";
         auth_basic_user_file /etc/nginx/.htpasswd;
         proxy_pass http://127.0.0.1:8010/;
@@ -803,11 +804,11 @@ left out and counted. These are statements, not VAT invoices ("VAT not
 charged"); the totals keep a VAT line, zero for now.
 
 Rate sheets are large, so the Tailscale nginx site needs a bigger upload
-limit in its `/admin-api/` location (110m since desk-phone firmware, see
-Desk phones):
+limit in its `/phone-api/` location (110m since desk-phone firmware, see
+Desk phones; `/admin-api/` is the VPS dashboard's since the split):
 
 ```nginx
-        client_max_body_size 30m;
+        client_max_body_size 110m;
 ```
 
 ### Caller IDs and carriers
@@ -966,8 +967,10 @@ would strand itself. The target can't be removed. The files are served under `/p
 phone with valid credentials. `pbx-changes.log` notes each "told to
 upgrade", each download, and each "firmware A -> B". A phone has to reach
 the server first: a T46G below 28.83 can't, so its first upgrade is by
-hand. Uploading needs the Tailscale site's `/admin-api/` location to take
-the size:
+hand. Uploading needs the Tailscale site's `/phone-api/` location (the
+console's; `/admin-api/` is the VPS dashboard's) to take the size; without
+it nginx's 1 MB default refuses it ("client intended to send too large
+body" in `/var/log/nginx/error.log`):
 
 ```nginx
         client_max_body_size 110m;

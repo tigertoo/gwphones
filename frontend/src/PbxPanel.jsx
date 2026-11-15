@@ -1004,7 +1004,7 @@ function sendRaw(url, file, onProgress) {
       let data = {};
       try { data = JSON.parse(xhr.responseText); } catch { /* not JSON */ }
       if (xhr.status >= 200 && xhr.status < 300) resolve(data);
-      else if (xhr.status === 413 && !data.detail) reject(new Error("Too big for the web server: raise client_max_body_size (see the README)."));
+      else if (xhr.status === 413 && !data.detail) reject(new Error("Too big for the web server: raise client_max_body_size in the /phone-api/ location (see the README)."));
       else reject(new Error(data.detail || `Error ${xhr.status}`));
     };
     xhr.onerror = () => reject(new Error("The upload failed. Check your connection and try again."));
