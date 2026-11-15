@@ -826,6 +826,29 @@ in Asterisk's log); the apps don't mind either way. Since 11 November
 2026 the `pbx.amapforyourmoney.com` lineage is RSA 2048 (`--key-type rsa`,
 kept by certbot at every renewal).
 
+**The TLS transport needs a cipher list without DHE.** Asterisk
+(pjproject) has no DH parameters, so when a phone offers DHE-RSA ciphers
+first, as a T46G does, Asterisk picks one and the handshake fails:
+`SSL_ERROR_SSL (Handshake) ... internal error` in
+`/var/log/asterisk/messages.log`, alert 80 at the phone, and the phone
+shows "No service". In `[transport-tls]` in `/etc/asterisk/pjsip.conf`,
+under `method=tlsv1_2` (since 15 November 2026):
+
+```
+cipher=ECDHE-RSA-AES256-GCM-SHA384,ECDHE-RSA-AES128-GCM-SHA256,AES256-GCM-SHA384,AES128-GCM-SHA256,AES256-SHA,AES128-SHA
+```
+
+The apps keep ECDHE; a T46G (no ECDHE) gets `AES256-GCM-SHA384`, without
+forward secrecy, and calls are still encrypted (SRTP). A transport change
+needs `asterisk -rx "core restart when convenient"`, not a reload. To
+check, these should give `Cipher is AES256-GCM-SHA384` with no alert, and
+`Verify return code: 0 (ok)`:
+
+```
+openssl s_client -connect pbx.amapforyourmoney.com:15061 -servername pbx.amapforyourmoney.com \
+  -tls1_2 -cipher 'DHE-RSA-AES256-GCM-SHA384:AES256-GCM-SHA384' </dev/null 2>&1 | grep -E 'Cipher is|Verify return|alert'
+```
+
 The phones' TLS certificate is Let's Encrypt's, for `PBX_PUBLIC_HOST` and
 the tenants' hostnames, `*.sip.amapforyourmoney.com` (one wildcard name,
 so a new tenant's hostname needs no new certificate; the DNS wildcard
@@ -899,3 +922,10 @@ the admin password shown under RPS details (the config sets it), not
 `tail -f /var/log/nginx/pbx-prov.access.log /var/log/admin-dashboard/pbx-changes.log`:
 a 401 and "refused … wrong credentials" means the username or password is
 wrong; 10 wrong tries from one IP give a 429 for 10 minutes.
+
+Give a desk phone its own extension. `aor-ext` allows one contact with
+`remove_existing`, so a phone and an app on the same extension (the app
+through its push server) keep logging each other out. A phone can be moved
+to another extension in the console without a new password; it picks it
+up at its next fetch. If it then shows "No service", see the cipher list
+in the PBX certificate section.
