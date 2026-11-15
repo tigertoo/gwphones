@@ -893,8 +893,13 @@ the hook without a renewal:
 
 A phone fetches `<mac>.cfg` from `/prov/yealink/` with its own username
 (its MAC) and password, shown in the console under Desk phones, RPS
-details. The address it's given comes from `PBX_DESKPHONE_BASE_URL`, or
-`PBX_PROVISION_BASE_URL` when that isn't set:
+details. A tenant with its own SIP hostname is given
+`https://<that hostname>/prov/yealink/` (e.g.
+`https://test.sip.amapforyourmoney.com/prov/yealink/`), the name its
+phones register to, so its phones follow it if it's moved by DNS; a
+phone's file is never served under another tenant's hostname. Other
+tenants get `PBX_DESKPHONE_BASE_URL`, or `PBX_PROVISION_BASE_URL` when
+that isn't set:
 
 ```
 PBX_DESKPHONE_BASE_URL=https://pbx.amapforyourmoney.com
@@ -905,8 +910,9 @@ PBX_DESKPHONE_BASE_URL=https://pbx.amapforyourmoney.com
 ECDHE. Against `amapforyourmoney.com`'s ECDSA certificate the handshake
 fails straight away (alert 40, `handshake_failure`) and nothing shows in
 the access log; `tcpdump -X` on port 443 shows it. The nginx site
-`pbx-prov` serves `pbx.amapforyourmoney.com` with the RSA certificate from
-the section above and passes `/prov/yealink/` to port 8010; keep its
+`pbx-prov` serves `pbx.amapforyourmoney.com` and the tenants' hostnames
+(`server_name pbx.amapforyourmoney.com *.sip.amapforyourmoney.com;`) with
+the RSA certificate from the section above, which covers both, and passes `/prov/yealink/` to port 8010; keep its
 ciphers including `DHE-RSA-AES256-GCM-SHA384`. To check what the phone
 needs:
 
@@ -929,9 +935,9 @@ trusts Let's Encrypt's root, so later fetches work with it on. The
 config also turns on Common Name Validation
 (`static.security.cn_validation = 1`), so the certificate must be for the
 server the phone reaches, not just any trusted one; checked on the T46G
-against `pbx.amapforyourmoney.com`. A tenant on its own SIP hostname (the
-`*.sip` wildcard) hasn't been tried with it yet: check its first phone
-registers.
+against `pbx.amapforyourmoney.com` and against a tenant's own SIP hostname
+(`test.sip.amapforyourmoney.com`, the `*.sip` wildcard), set up from the
+portal on 15 November 2026.
 
 Once it has fetched its config the phone's web page login is `admin` with
 the admin password shown under RPS details (the config sets it), not

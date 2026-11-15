@@ -33,7 +33,12 @@ the tenant's own extensions (its endpoint subscribes to the tenant's
 hints, which are bare extensions). The dashboard only lists and changes
 the phones of the tenant it's working on. A MAC is unique on the server.
 
-The address: PBX_DESKPHONE_BASE_URL (falls back to PBX_PROVISION_BASE_URL).
+The address: a tenant with its own SIP hostname gets
+https://<that hostname>/prov/yealink/, the same name its phones register
+to (so it can move with that tenant by DNS); others get
+PBX_DESKPHONE_BASE_URL (falls back to PBX_PROVISION_BASE_URL). nginx's
+pbx-prov site has to answer for *.sip.<domain> too. A phone's file is
+never served under another tenant's hostname.
 It must be a site with an RSA certificate and DHE-RSA ciphers: a T46G on
 its last firmware (28.83) speaks TLS 1.2 but offers no ECDHE ciphers, so
 against an ECDSA certificate the handshake fails before any request
@@ -100,7 +105,7 @@ def build_config(conn, phone) -> str:
              "static.security.trust_certificates = 1",
              # Common Name Validation: the certificate must be for the server it
              # reaches, not just any trusted one. Checked on the T46G against
-             # pbx.amapforyourmoney.com; a tenant hostname (*.sip wildcard) not yet.
+             # pbx.amapforyourmoney.com and a tenant's *.sip wildcard hostname.
              "static.security.cn_validation = 1",
              "local_time.time_zone = 0",
              "local_time.time_zone_name = Ireland(Dublin)",
@@ -195,7 +200,8 @@ def prov_yealink(filename: str, request: Request):
         phone = conn.execute("SELECT * FROM desk_phones WHERE mac = ?", (m.group(1),)).fetchone()
         # A phone's credentials only open its own file.
         if not phone or not hmac.compare_digest(user.encode(), phone["mac"].encode()) \
-                or not hmac.compare_digest(password.encode(), phone["prov_pass"].encode()):
+                or not hmac.compare_digest(password.encode(), phone["prov_pass"].encode()) \
+                or _host_refused(conn, request, phone["tenant_id"]):
             changes_log.info(f"Desk phone config for {_pretty(m.group(1))} refused from {ip}: wrong credentials")
             return _challenge(ip)
         agent = request.headers.get("user-agent", "")[:160]
@@ -236,6 +242,23 @@ def _ext_free(conn, ext: str, mac: str = ""):
                                  "Give each desk phone its own extension.")
 
 
+def server_url(tenant: int) -> str:
+    """Where the tenant's phones fetch their file."""
+    if not DESKPHONE_BASE_URL:
+        return ""
+    host = sip_host_for(tenant)
+    if host and host != PUBLIC_HOST:
+        return f"https://{host}/prov/yealink/"
+    return f"{DESKPHONE_BASE_URL}/prov/yealink/"
+
+
+def _host_refused(conn, request: Request, tenant: int) -> bool:
+    """The request came in under another tenant's own hostname."""
+    host = (request.headers.get("host") or "").split(":")[0].lower()
+    r = conn.execute("SELECT id FROM tenants WHERE sip_host = ? AND sip_host != ''", (host,)).fetchone()
+    return bool(r and r["id"] != tenant)
+
+
 def _row(r) -> dict:
     return {"mac": r["mac"], "mac_pretty": _pretty(r["mac"]), "ext": r["ext"], "model": r["model"],
             "username": r["mac"], "password": r["prov_pass"], "admin_password": r["admin_pass"],
@@ -249,7 +272,7 @@ def api_desk_phones():
         phones = [_row(r) for r in conn.execute("SELECT * FROM desk_phones WHERE tenant_id = ? ORDER BY ext, mac",
                                                  (current_tenant(),))]
     return {"phones": phones, "models": MODELS, "repeat_minutes": REPEAT_MINUTES,
-            "server_url": f"{DESKPHONE_BASE_URL}/prov/yealink/" if DESKPHONE_BASE_URL else "",
+            "server_url": server_url(current_tenant()),
             "ready": bool(DESKPHONE_BASE_URL and PUBLIC_HOST)}
 
 

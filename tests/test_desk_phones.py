@@ -147,3 +147,17 @@ def test_failure_table_forgets_expired_ips(phones, monkeypatch):
     monkeypatch.setattr(deskphones, "FAILURE_WINDOW", -1)  # everything has expired
     assert fetch(main, MAC, basic(MAC, pw[MAC])).status_code == 200
     assert deskphones._failures == {}
+
+
+def test_tenant_hostname_for_provisioning(phones):
+    main, pbx, op, acme_op, acme, code, pw = phones
+    host = "acme.sip.example.ie"
+    assert op.put(f"/api/pbx/tenants/{acme}", json={"name": "Acme", "status": "active", "sip_host": host}).status_code == 200
+    assert acme_op.get("/api/pbx/desk-phones").json()["server_url"] == f"https://{host}/prov/yealink/"
+    assert op.get("/api/pbx/desk-phones").json()["server_url"] == "https://pbx.example/prov/yealink/"  # no hostname
+    c = TestClient(main.app)
+    # its own hostname, or the shared one: served
+    assert c.get(f"/prov/yealink/{MAC2}.cfg", headers={**basic(MAC2, pw[MAC2]), "Host": host}).status_code == 200
+    assert c.get(f"/prov/yealink/{MAC2}.cfg", headers={**basic(MAC2, pw[MAC2]), "Host": "pbx.example"}).status_code == 200
+    # the main tenant's phone under Acme's hostname: refused
+    assert c.get(f"/prov/yealink/{MAC}.cfg", headers={**basic(MAC, pw[MAC]), "Host": host}).status_code == 401
