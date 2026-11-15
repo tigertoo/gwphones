@@ -125,6 +125,18 @@ through this API as the portal caller above. Being built (phase 4).
   use. Changing or resetting the password, any change to two-factor
   codes, `reset-2fa` or `disable` forgets every trusted device; the
   Account page shows how many there are and forgets this one or all.
+- **Passkeys** (`gwportal/passkeys.py`, `webauthn` 2.8): "Sign in with a
+  passkey" instead of a password and code; each user adds and removes
+  their own on the Account page (adding one needs the password too, so a
+  stolen session can't add one). User verification (Face ID, fingerprint,
+  the device's PIN) is required, so a passkey counts as both factors; an
+  admin without two-factor codes (after `reset-2fa`) still sets them up.
+  The relying party is `PORTAL_ORIGIN`'s host and the origin checked is
+  `PORTAL_ORIGIN`, never the request's. Challenges are server-side, 5
+  minutes, used once; the passkey gets a random user handle, not the
+  email. Signing in with one goes through the same address limit,
+  lockout and disabled checks as a password. `reset-2fa` removes them (a
+  lost phone may hold a synced one). Up to 10 per account.
 - **Sessions:** a `__Host-` cookie (Secure, HttpOnly, SameSite=Strict),
   2 hours idle and 12 hours at most; every route says which session
   states it accepts, fully signed in by default; a new token at each step.
@@ -204,7 +216,8 @@ venv/bin/python -m gwportal.cli disable --email anne@acme.ie        (and enable)
 after checking with gwphones that the tenant exists and is active;
 `--print-link` shows the invitation link instead of emailing it.
 `reset-2fa` is for an admin who lost their phone and their recovery
-codes: it also forgets their trusted devices and signs them out, and
+codes: it also removes their passkeys, forgets their trusted devices and
+signs them out, and
 they set two-factor codes up again at their next sign-in. Run it as the
 portal's user: `cd /opt/gwphones/portal && sudo -u gwportal
 venv/bin/python -m gwportal.cli reset-2fa --email ...`.

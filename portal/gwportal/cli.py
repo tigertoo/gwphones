@@ -10,8 +10,8 @@ invite makes a tenant's first admin (who then invites their own staff),
 after checking with gwphones that the tenant exists and is active, and
 emails the invitation; --print-link shows the link here instead, to pass
 on yourself. reset-2fa is for an admin who lost their phone and their
-recovery codes: their two-factor setup is cleared, their trusted devices
-forgotten and they're signed out, so they set it up again at their next
+recovery codes: their two-factor setup and passkeys are cleared, their
+trusted devices forgotten and they're signed out, so they set it up again at their next
 sign-in.
 
 It reads the portal's .env (--env, default /opt/gwphones/portal/.env, or
@@ -103,15 +103,16 @@ def _one(conn, email: str):
 
 
 def cmd_reset_2fa(args) -> int:
-    from . import auth, db
+    from . import auth, db, passkeys
     with db.connect() as conn:
         u = _one(conn, args.email)
         if not u:
             return 1
         auth.turn_off_totp(conn, u)  # also forgets its trusted devices
+        passkeys.delete_all(conn, u["id"])  # a lost phone may hold a synced one
         auth.end_all_sessions(conn, u["id"])
         db.audit(conn, "two-factor reset by the operator", u)
-    print(f"{u['email']}: two-factor codes cleared and signed out everywhere."
+    print(f"{u['email']}: two-factor codes and passkeys cleared, trusted devices forgotten, signed out everywhere."
           + (" They set them up again at their next sign-in." if u["role"] == "admin" else ""))
     return 0
 

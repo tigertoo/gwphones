@@ -1,6 +1,7 @@
 import React, { useEffect, useState } from "react";
 import { post, takeFragmentToken } from "./api";
 import { Button, Field, Message, useAction } from "./ui";
+import { cancelled, passkeysAvailable, signInWithPasskey } from "./passkey";
 
 // Signing in, step by step as the API says: password, then the
 // two-factor code (or a recovery code), or for an admin without codes
@@ -12,6 +13,15 @@ export function SignIn({ onState }) {
   const [password, setPassword] = useState("");
   const [forgot, setForgot] = useState(false);
   const a = useAction();
+  const withPasskey = async () => {
+    a.setMsg(null);
+    try {
+      const r = await signInWithPasskey();
+      if (r) onState(r);
+    } catch (e) {
+      if (!cancelled(e)) a.setMsg({ kind: "error", text: e.message || "That passkey didn't work." });
+    }
+  };
 
   if (forgot) return <Forgot email={email} onBack={() => setForgot(false)} />;
 
@@ -32,6 +42,7 @@ export function SignIn({ onState }) {
       </Field>
       {a.show}
       <Button busy={a.busy} type="submit">Sign in</Button>
+      {passkeysAvailable() && <Button kind="secondary" type="button" onClick={withPasskey}>Sign in with a passkey</Button>}
       <button type="button" className="link" onClick={() => setForgot(true)}>Forgotten your password?</button>
     </form>
   );

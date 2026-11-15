@@ -328,7 +328,9 @@ def test_earlier_holders_recordings_stay_hidden(world):
 
 PUBLIC = {("GET", "/api/session"), ("POST", "/api/login"), ("POST", "/api/logout"), ("POST", "/api/login/code"),
           ("POST", "/api/password/forgot"), ("POST", "/api/password/reset"), ("POST", "/api/invite/check"),
-          ("POST", "/api/invite/accept"), ("POST", "/api/2fa/start"), ("POST", "/api/2fa/finish")}
+          ("POST", "/api/invite/accept"), ("POST", "/api/2fa/start"), ("POST", "/api/2fa/finish"),
+          # signing in with a passkey (test_portal_passkeys.py): open, like the password step
+          ("POST", "/api/passkey/login/start"), ("POST", "/api/passkey/login/finish")}
 
 
 def test_every_route_needs_a_full_session(world):

@@ -68,6 +68,25 @@ CREATE TABLE IF NOT EXISTS trusted_devices (  -- "don't ask for a code here for 
     last_used TEXT
 );
 CREATE INDEX IF NOT EXISTS trusted_devices_user ON trusted_devices (user_id);
+CREATE TABLE IF NOT EXISTS passkeys (
+    id INTEGER PRIMARY KEY,
+    user_id INTEGER NOT NULL,
+    credential_id TEXT NOT NULL UNIQUE,  -- base64url, as the browser sends it
+    public_key BLOB NOT NULL,            -- COSE
+    sign_count INTEGER NOT NULL DEFAULT 0,
+    transports TEXT NOT NULL DEFAULT '',
+    name TEXT NOT NULL DEFAULT '',
+    created_at TEXT NOT NULL,
+    last_used TEXT
+);
+CREATE TABLE IF NOT EXISTS webauthn_challenges (
+    token_hash TEXT PRIMARY KEY,
+    kind TEXT NOT NULL,                  -- register | login
+    user_id INTEGER,                     -- register: whose
+    challenge BLOB NOT NULL,
+    expires_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS passkeys_user ON passkeys (user_id);
 CREATE INDEX IF NOT EXISTS sessions_user ON sessions (user_id);
 CREATE INDEX IF NOT EXISTS failures_ip ON failures (ip, at);
 """
@@ -81,6 +100,11 @@ def connect() -> sqlite3.Connection:
     if fresh:
         os.chmod(config.DB_PATH, 0o600)  # password hashes and encrypted two-factor secrets
     conn.executescript(SCHEMA)
+    for migration in ("ALTER TABLE users ADD COLUMN webauthn_handle TEXT",):  # passkeys' user handle
+        try:
+            conn.execute(migration)
+        except sqlite3.OperationalError:
+            pass  # already there
     return conn
 
 
