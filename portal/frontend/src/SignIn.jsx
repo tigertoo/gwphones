@@ -40,10 +40,11 @@ export function SignIn({ onState }) {
 export function CodeStep({ onState }) {
   const [code, setCode] = useState("");
   const [recovery, setRecovery] = useState(false);
+  const [remember, setRemember] = useState(false);
   const a = useAction();
   const submit = async (e) => {
     e.preventDefault();
-    const r = await a.run(() => post("/login/code", recovery ? { recovery_code: code } : { code }));
+    const r = await a.run(() => post("/login/code", recovery ? { recovery_code: code, remember } : { code, remember }));
     if (r) onState(r);
     else setCode("");
   };
@@ -55,6 +56,8 @@ export function CodeStep({ onState }) {
         <input autoFocus required inputMode={recovery ? "text" : "numeric"} autoComplete="one-time-code"
           pattern={recovery ? undefined : "[0-9 ]{6,7}"} value={code} onChange={(e) => setCode(e.target.value)} />
       </Field>
+      <label className="check"><input type="checkbox" checked={remember} onChange={(e) => setRemember(e.target.checked)} />
+        Don't ask for a code on this device for 30 days (not on a shared or public computer)</label>
       {a.show}
       <Button busy={a.busy} type="submit">Continue</Button>
       <button type="button" className="link" onClick={() => { setRecovery(!recovery); setCode(""); }}>

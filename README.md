@@ -117,6 +117,14 @@ through this API as the portal caller above. Being built (phase 4).
 - **Sign-in:** email and password (argon2id); two-factor codes (TOTP)
   required for tenant admins and optional for users, with recovery codes;
   the secrets encrypted with `PORTAL_KEY`.
+- **Trusted devices:** at the code step, "Don't ask for a code on this
+  device for 30 days" (off by default; admins too). A random token in a
+  second cookie, `__Host-gwportal-device` (same flags, 30 days), only its
+  hash stored, and only for the account that chose it: the password is
+  always needed. Fixed 30 days from when it was chosen, not renewed by
+  use. Changing or resetting the password, any change to two-factor
+  codes, `reset-2fa` or `disable` forgets every trusted device; the
+  Account page shows how many there are and forgets this one or all.
 - **Sessions:** a `__Host-` cookie (Secure, HttpOnly, SameSite=Strict),
   2 hours idle and 12 hours at most; every route says which session
   states it accepts, fully signed in by default; a new token at each step.
@@ -196,7 +204,10 @@ venv/bin/python -m gwportal.cli disable --email anne@acme.ie        (and enable)
 after checking with gwphones that the tenant exists and is active;
 `--print-link` shows the invitation link instead of emailing it.
 `reset-2fa` is for an admin who lost their phone and their recovery
-codes: they set two-factor codes up again at their next sign-in.
+codes: it also forgets their trusted devices and signs them out, and
+they set two-factor codes up again at their next sign-in. Run it as the
+portal's user: `cd /opt/gwphones/portal && sudo -u gwportal
+venv/bin/python -m gwportal.cli reset-2fa --email ...`.
 
 Settings (its own `.env`): `PORTAL_DB`, `PORTAL_ORIGIN` (e.g.
 `https://portal.example.ie`), `PORTAL_KEY` (a Fernet key),

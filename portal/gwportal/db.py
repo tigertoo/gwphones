@@ -60,6 +60,14 @@ CREATE TABLE IF NOT EXISTS audit (
     action TEXT NOT NULL,
     detail TEXT NOT NULL DEFAULT ''
 );
+CREATE TABLE IF NOT EXISTS trusted_devices (  -- "don't ask for a code here for 30 days"
+    token_hash TEXT PRIMARY KEY,         -- the device cookie's token, hashed
+    user_id INTEGER NOT NULL,
+    created_at TEXT NOT NULL,
+    expires_at TEXT NOT NULL,            -- fixed: 30 days from when it was trusted
+    last_used TEXT
+);
+CREATE INDEX IF NOT EXISTS trusted_devices_user ON trusted_devices (user_id);
 CREATE INDEX IF NOT EXISTS sessions_user ON sessions (user_id);
 CREATE INDEX IF NOT EXISTS failures_ip ON failures (ip, at);
 """

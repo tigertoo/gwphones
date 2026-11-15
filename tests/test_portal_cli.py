@@ -102,9 +102,12 @@ def test_reset_2fa(setup, capsys):
                      (auth.hash_password("correct horse battery"), auth._fernet().encrypt(secret.encode()).decode(), u["id"]))
     c = TestClient(portal_app.app, base_url=PORTAL_ORIGIN, headers={"Origin": PORTAL_ORIGIN})
     c.post("/api/login", json={"email": "anne@acme.example", "password": "correct horse battery"})
-    c.post("/api/login/code", json={"code": pyotp.TOTP(secret).now()})
-    assert c.get("/api/me").status_code == 200
+    c.post("/api/login/code", json={"code": pyotp.TOTP(secret).now(), "remember": True})
+    assert c.get("/api/me").status_code == 200 and c.cookies.get("__Host-gwportal-device")
     assert setup["run"]("reset-2fa", "--email", "anne@acme.example") == 0
+    from gwportal import db
+    with db.connect() as conn:
+        assert conn.execute("SELECT COUNT(*) FROM trusted_devices").fetchone()[0] == 0
     assert c.get("/api/me").status_code == 401  # signed out
     r = c.post("/api/login", json={"email": "anne@acme.example", "password": "correct horse battery"})
     assert r.json()["state"] == "enrol"  # an admin sets them up again
@@ -114,7 +117,14 @@ def test_reset_2fa(setup, capsys):
 def test_disable_and_enable(setup):
     code = setup["acme"]["code"]
     setup["run"]("invite", "--tenant", code, "--email", "x@acme.example", "--print-link")
+    from gwportal import db
+    with db.connect() as conn:
+        conn.execute("INSERT INTO trusted_devices (token_hash, user_id, created_at, expires_at) VALUES ('h', ?, 'a', 'z')",
+                     (users()["x@acme.example"]["id"],))
+        conn.commit()
     assert setup["run"]("disable", "--email", "x@acme.example") == 0 and users()["x@acme.example"]["disabled"]
+    with db.connect() as conn:
+        assert conn.execute("SELECT COUNT(*) FROM trusted_devices").fetchone()[0] == 0
     assert setup["run"]("enable", "--email", "x@acme.example") == 0 and not users()["x@acme.example"]["disabled"]
 
 

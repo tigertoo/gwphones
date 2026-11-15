@@ -76,6 +76,11 @@ def _cookie(response: Response, token: str):
     response.set_cookie(config.COOKIE, token, httponly=True, secure=True, samesite="strict", path="/")
 
 
+def _device_cookie(response: Response, token: str):
+    response.set_cookie(config.DEVICE_COOKIE, token, httponly=True, secure=True, samesite="strict", path="/",
+                        max_age=auth.DEVICE_DAYS * 86400)
+
+
 def _me(user) -> dict:
     return {"email": user["email"], "name": user["name"], "role": user["role"], "tenant": user["tenant_code"],
             "ext": user["ext"], "two_factor": bool(user["totp_secret"])}
@@ -91,6 +96,7 @@ class SignIn(BaseModel):
 class Code(BaseModel):
     code: str = ""
     recovery_code: str = ""
+    remember: bool = False  # don't ask on this device for auth.DEVICE_DAYS
 
 
 @app.get("/api/session")
@@ -108,12 +114,14 @@ def api_login(req: SignIn, request: Request, response: Response):
     ip = client_ip(request)
     with db.connect() as conn:
         try:
-            token, state, user = auth.sign_in(conn, req.email, req.password, ip)
+            token, state, user, trusted = auth.sign_in(conn, req.email, req.password, ip,
+                                                       request.cookies.get(config.DEVICE_COOKIE, ""))
         except auth.Refused:
             db.audit(conn, "sign-in refused", ip=ip, detail=auth.normal_email(req.email)[:120])
             conn.commit()
             raise
-        db.audit(conn, "signed in" if state == "full" else f"password right ({state})", user, ip)
+        db.audit(conn, ("signed in (trusted device)" if trusted else "signed in") if state == "full"
+                 else f"password right ({state})", user, ip)
     _cookie(response, token)
     return {"state": state, **({"me": _me(user)} if state == "full" else {})}
 
@@ -130,6 +138,9 @@ def api_login_code(req: Code, request: Request, response: Response,
             conn.commit()
             raise
         db.audit(conn, "signed in" + (" with a recovery code" if req.recovery_code else ""), me.user, ip)
+        if req.remember:
+            _device_cookie(response, auth.trust_device(conn, me.user))
+            db.audit(conn, f"device trusted for {auth.DEVICE_DAYS} days", me.user, ip)
     _cookie(response, token)
     return {"state": "full", "me": _me(me.user)}
 
@@ -197,6 +208,29 @@ def api_recovery_codes(req: Code, request: Request, me: Signed = Depends(signed_
     return {"recovery_codes": codes}
 
 
+# -- trusted devices -------------------------------------------------------------------------------
+
+@app.get("/api/devices")
+def api_devices(request: Request, me: Signed = Depends(signed_in())):
+    with db.connect() as conn:
+        here = auth.device_trusted(conn, me.user, request.cookies.get(config.DEVICE_COOKIE, ""))
+        return {"count": auth.trusted_devices(conn, me.user), "this_device": here, "days": auth.DEVICE_DAYS}
+
+
+class Forget(BaseModel):
+    everywhere: bool = False
+
+
+@app.post("/api/devices/forget")
+def api_devices_forget(req: Forget, request: Request, response: Response, me: Signed = Depends(signed_in())):
+    with db.connect() as conn:
+        auth.forget_devices(conn, me.user["id"], None if req.everywhere else request.cookies.get(config.DEVICE_COOKIE, ""))
+        db.audit(conn, "trusted devices forgotten" if req.everywhere else "this device forgotten", me.user,
+                 client_ip(request))
+    response.delete_cookie(config.DEVICE_COOKIE, path="/", secure=True, httponly=True, samesite="strict")
+    return {"ok": True}
+
+
 # -- passwords -----------------------------------------------------------------------------------
 
 class PasswordChange(BaseModel):
@@ -213,6 +247,7 @@ def api_password_change(req: PasswordChange, request: Request, me: Signed = Depe
         conn.execute("UPDATE users SET pw_hash = ?, updated_at = ? WHERE id = ?",
                      (auth.hash_password(req.new), db.iso(), me.user["id"]))
         auth.end_all_sessions(conn, me.user["id"], keep_token=me.token)  # signed out everywhere else
+        auth.forget_devices(conn, me.user["id"])
         db.audit(conn, "password changed", me.user, client_ip(request))
     return {"ok": True}
 

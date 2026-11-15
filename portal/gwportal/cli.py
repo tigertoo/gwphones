@@ -10,8 +10,9 @@ invite makes a tenant's first admin (who then invites their own staff),
 after checking with gwphones that the tenant exists and is active, and
 emails the invitation; --print-link shows the link here instead, to pass
 on yourself. reset-2fa is for an admin who lost their phone and their
-recovery codes: their two-factor setup is cleared and they're signed out,
-so they set it up again at their next sign-in.
+recovery codes: their two-factor setup is cleared, their trusted devices
+forgotten and they're signed out, so they set it up again at their next
+sign-in.
 
 It reads the portal's .env (--env, default /opt/gwphones/portal/.env, or
 PORTAL_ENV_FILE) before anything else, so it uses the service's settings.
@@ -107,7 +108,7 @@ def cmd_reset_2fa(args) -> int:
         u = _one(conn, args.email)
         if not u:
             return 1
-        auth.turn_off_totp(conn, u)
+        auth.turn_off_totp(conn, u)  # also forgets its trusted devices
         auth.end_all_sessions(conn, u["id"])
         db.audit(conn, "two-factor reset by the operator", u)
     print(f"{u['email']}: two-factor codes cleared and signed out everywhere."
@@ -124,6 +125,7 @@ def cmd_disable(args, disabled: bool) -> int:
         conn.execute("UPDATE users SET disabled = ?, updated_at = ? WHERE id = ?", (int(disabled), db.iso(), u["id"]))
         if disabled:
             auth.end_all_sessions(conn, u["id"])
+            auth.forget_devices(conn, u["id"])
         db.audit(conn, ("disabled" if disabled else "enabled") + " by the operator", u)
     print(f"{u['email']}: {'disabled and signed out' if disabled else 'enabled'}.")
     return 0

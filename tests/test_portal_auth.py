@@ -348,3 +348,141 @@ def test_password_change_signs_out_elsewhere(portal, clock):
     login(c)
     assert c.post("/api/password/change", json={"current": PW, "new": "a different long one"}).status_code == 200
     assert c.get("/api/me").status_code == 200 and other.get("/api/me").status_code == 401
+
+
+# -- trusted devices ("don't ask for a code here for 30 days") -------------------------------
+
+DEVICE = "__Host-gwportal-device"
+
+
+def trusted_client(portal_app, clock, secret, email="user@acme.example"):
+    """Signed in with a code, the device trusted; then signed out."""
+    c = TestClient(portal_app.app, base_url=PORTAL_ORIGIN, headers={"Origin": PORTAL_ORIGIN})
+    login(c, email)
+    r = c.post("/api/login/code", json={"code": code_at(secret, clock.t), "remember": True})
+    assert r.status_code == 200 and c.cookies.get(DEVICE)
+    c.post("/api/logout")
+    clock.move(seconds=30)
+    return c
+
+
+def test_trusted_device_skips_the_code(portal, clock):
+    portal_app, c = portal
+    secret = pyotp.random_base32()
+    make_user(portal_app, totp=secret)
+    c = trusted_client(portal_app, clock, secret)
+    assert login(c).json()["state"] == "full"
+    assert c.get("/api/devices").json() == {"count": 1, "this_device": True, "days": 30}
+    # the password is still needed
+    c.post("/api/logout")
+    assert login(c, password="wrong password!!").status_code == 401
+    # another device still asks
+    other = TestClient(portal_app.app, base_url=PORTAL_ORIGIN, headers={"Origin": PORTAL_ORIGIN})
+    assert login(other).json()["state"] == "pending_mfa"
+    # not asking is off unless chosen
+    other.post("/api/login/code", json={"code": code_at(secret, clock.t)})
+    assert not other.cookies.get(DEVICE)
+
+
+def test_trusted_for_30_days_fixed(portal, clock):
+    portal_app, c = portal
+    secret = pyotp.random_base32()
+    make_user(portal_app, totp=secret)
+    c = trusted_client(portal_app, clock, secret)
+    for _ in range(4):  # used every week: still runs out 30 days from the start
+        clock.move(days=7)
+        assert login(c).json()["state"] == "full"
+        c.post("/api/logout")
+    clock.move(days=2, seconds=1)
+    assert login(c).json()["state"] == "pending_mfa"
+
+
+def test_trusted_device_is_only_its_accounts(portal, clock):
+    portal_app, c = portal
+    secret = pyotp.random_base32()
+    make_user(portal_app, totp=secret)
+    make_user(portal_app, email="other@acme.example", totp=pyotp.random_base32())
+    c = trusted_client(portal_app, clock, secret)
+    assert login(c, "other@acme.example").json()["state"] == "pending_mfa"
+
+
+def test_admins_can_trust_a_device_but_still_set_up_codes(portal, clock):
+    portal_app, c = portal
+    secret = pyotp.random_base32()
+    make_user(portal_app, email="admin@acme.example", role="admin", totp=secret)
+    c = trusted_client(portal_app, clock, secret, "admin@acme.example")
+    assert login(c, "admin@acme.example").json()["state"] == "full"
+    make_user(portal_app, email="new@acme.example", role="admin")
+    c.post("/api/logout")
+    assert login(c, "new@acme.example").json()["state"] == "enrol"
+
+
+def _forgotten(portal_app, clock, secret, act):
+    c = trusted_client(portal_app, clock, secret)
+    act(c)
+    c.post("/api/logout")
+    clock.move(seconds=30)
+    return login(c).json()["state"]
+
+
+def test_forget_this_device_and_all(portal, clock):
+    portal_app, c = portal
+    secret = pyotp.random_base32()
+    make_user(portal_app, totp=secret)
+
+    def forget(everywhere):
+        def act(c):
+            login(c)
+            assert c.post("/api/devices/forget", json={"everywhere": everywhere}).status_code == 200
+        return act
+    assert _forgotten(portal_app, clock, secret, forget(False)) == "pending_mfa"
+    assert _forgotten(portal_app, clock, secret, forget(True)) == "pending_mfa"
+
+
+def test_password_change_forgets_devices(portal, clock):
+    portal_app, c = portal
+    secret = pyotp.random_base32()
+    make_user(portal_app, totp=secret)
+
+    def act(c):
+        login(c)
+        assert c.post("/api/password/change", json={"current": PW, "new": PW + "!"}).status_code == 200
+    c = trusted_client(portal_app, clock, secret)
+    act(c)
+    c.post("/api/logout")
+    assert login(c, password=PW + "!").json()["state"] == "pending_mfa"
+
+
+def test_reset_and_two_factor_changes_forget_devices(portal, clock):
+    portal_app, c = portal
+    from gwportal import auth, db
+    secret = pyotp.random_base32()
+    user = make_user(portal_app, totp=secret)
+    for change in (lambda conn: auth.turn_off_totp(conn, user),
+                   lambda conn: auth.forget_devices(conn, user["id"])):
+        c = trusted_client(portal_app, clock, secret)
+        with db.connect() as conn:
+            assert auth.trusted_devices(conn, user) == 1
+            change(conn)
+            assert auth.trusted_devices(conn, user) == 0
+            conn.execute("UPDATE users SET totp_secret = ? WHERE id = ?",
+                         (auth._fernet().encrypt(secret.encode()).decode(), user["id"]))
+            conn.commit()
+    # a reset by link
+    c = trusted_client(portal_app, clock, secret)
+    with db.connect() as conn:
+        token = auth.new_link(conn, conn.execute("SELECT * FROM users WHERE id = ?", (user["id"],)).fetchone(), "reset")
+        conn.commit()
+    assert c.post("/api/password/reset", json={"token": token, "password": PW + "?"}).status_code == 200
+    assert login(c, password=PW + "?").json()["state"] == "pending_mfa"
+
+
+def test_device_token_stored_hashed(portal, clock):
+    portal_app, c = portal
+    from gwportal import db
+    secret = pyotp.random_base32()
+    make_user(portal_app, totp=secret)
+    c = trusted_client(portal_app, clock, secret)
+    with db.connect() as conn:
+        stored = conn.execute("SELECT token_hash FROM trusted_devices").fetchone()[0]
+    assert stored != c.cookies.get(DEVICE) and len(stored) == 64

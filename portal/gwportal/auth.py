@@ -10,6 +10,12 @@ links, lockouts.
   who must set up two-factor codes first). Every state change issues a new
   token. Idle and absolute limits from config.
 - Links (invitations, resets): random, hashed, single-use, short-lived.
+- Trusted devices: after a right code, a user can choose not to be asked
+  for one on that device for DEVICE_DAYS (fixed, not renewed by use). A
+  random token in its own cookie, only its hash stored, and only ever for
+  the account it was made for; the password is still needed. Changing or
+  resetting the password, any change to the two-factor setup, the
+  operator's reset or disabling forgets every trusted device.
 - Lockouts: an account after MAX_FAILURES in a row, for LOCK_MINUTES (a
   completed reset clears it); an address after IP_MAX_FAILURES in
   IP_WINDOW_MINUTES, kept in the database.
@@ -38,6 +44,7 @@ INVITE_HOURS = 72
 RESET_MINUTES = 60
 MIN_PASSWORD = 12
 RECOVERY_CODES = 10
+DEVICE_DAYS = 30
 
 _hasher = PasswordHasher()  # argon2id, the library's recommended parameters
 _DUMMY = _hasher.hash(secrets.token_urlsafe(16))
@@ -146,11 +153,46 @@ def end_all_sessions(conn, user_id: int, keep_token: str = ""):
     conn.execute("DELETE FROM sessions WHERE user_id = ? AND token_hash != ?", (user_id, _h(keep_token)))
 
 
+# -- trusted devices -----------------------------------------------------------------
+
+def trust_device(conn, user) -> str:
+    token = secrets.token_urlsafe(32)
+    now = clock.now()
+    conn.execute("INSERT INTO trusted_devices (token_hash, user_id, created_at, expires_at) VALUES (?, ?, ?, ?)",
+                 (_h(token), user["id"], iso(now), iso(now + timedelta(days=DEVICE_DAYS))))
+    return token
+
+
+def device_trusted(conn, user, token: str) -> bool:
+    """This device cookie is live and this account's."""
+    if not token:
+        return False
+    conn.execute("DELETE FROM trusted_devices WHERE expires_at <= ?", (iso(),))
+    if conn.execute("UPDATE trusted_devices SET last_used = ? WHERE token_hash = ? AND user_id = ?",
+                    (iso(), _h(token), user["id"])).rowcount:
+        return True
+    return False
+
+
+def trusted_devices(conn, user) -> int:
+    return conn.execute("SELECT COUNT(*) FROM trusted_devices WHERE user_id = ? AND expires_at > ?",
+                        (user["id"], iso())).fetchone()[0]
+
+
+def forget_devices(conn, user_id: int, token: Optional[str] = None):
+    """Every trusted device of the account, or just this one."""
+    if token is None:
+        conn.execute("DELETE FROM trusted_devices WHERE user_id = ?", (user_id,))
+    else:
+        conn.execute("DELETE FROM trusted_devices WHERE user_id = ? AND token_hash = ?", (user_id, _h(token)))
+
+
 # -- signing in --------------------------------------------------------------------
 
-def sign_in(conn, email: str, password: str, ip: str):
-    """(token, state) for a right email and password, else Refused with
-    the same message whatever was wrong."""
+def sign_in(conn, email: str, password: str, ip: str, device: str = ""):
+    """(token, state, user, trusted) for a right email and password, else
+    Refused with the same message whatever was wrong. On a device this
+    account trusted, no code is asked for."""
     if ip_blocked(conn, ip):
         raise Refused("Too many attempts from here. Try again in a while.", 429)
     user = conn.execute("SELECT * FROM users WHERE email = ?", (normal_email(email),)).fetchone()
@@ -161,13 +203,15 @@ def sign_in(conn, email: str, password: str, ip: str):
             _note_account_failure(conn, user)
         raise Refused(SIGN_IN_FAILED)
     conn.execute("UPDATE users SET failed = 0, locked_until = NULL WHERE id = ?", (user["id"],))
+    trusted = False
     if user["totp_secret"]:
-        state = "pending_mfa"
+        trusted = device_trusted(conn, user, device)
+        state = "full" if trusted else "pending_mfa"
     elif user["role"] == "admin":
         state = "enrol"
     else:
         state = "full"
-    return new_session(conn, user, state, ip), state, user
+    return new_session(conn, user, state, ip), state, user, trusted
 
 
 def _fernet() -> Fernet:
@@ -247,6 +291,7 @@ def finish_totp(conn, user, code: str) -> list:
         raise Refused("That code isn't right. Check the time on your phone, and try the newest code.", 400)
     conn.execute("UPDATE users SET totp_secret = totp_pending, totp_pending = NULL, totp_last_step = ?, "
                  "updated_at = ? WHERE id = ?", (step, iso(), user["id"]))
+    forget_devices(conn, user["id"])
     return new_recovery_codes(conn, user)
 
 
@@ -254,6 +299,7 @@ def turn_off_totp(conn, user):
     conn.execute("UPDATE users SET totp_secret = NULL, totp_pending = NULL, totp_last_step = 0, updated_at = ? "
                  "WHERE id = ?", (iso(), user["id"]))
     conn.execute("DELETE FROM recovery_codes WHERE user_id = ?", (user["id"],))
+    forget_devices(conn, user["id"])
 
 
 def check_code(conn, user, code: str) -> bool:
@@ -319,4 +365,5 @@ def use_link(conn, token: str, kind: str, password: str, ip: str):
     conn.execute("UPDATE users SET pw_hash = ?, failed = 0, locked_until = NULL, updated_at = ? WHERE id = ?",
                  (hash_password(password), iso(), user["id"]))
     end_all_sessions(conn, user["id"])
+    forget_devices(conn, user["id"])
     return user

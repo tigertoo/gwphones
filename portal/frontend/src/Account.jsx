@@ -1,5 +1,5 @@
-import React, { useState } from "react";
-import { post } from "./api";
+import React, { useCallback, useEffect, useState } from "react";
+import { get, post } from "./api";
 import { RecoveryCodes, SetUpCodes } from "./SignIn";
 import { Button, Field, useAction } from "./ui";
 
@@ -20,6 +20,7 @@ export function Account({ me, onChanged }) {
         {me.two_factor ? (
           <>
             <p className="small">On: signing in asks for a code from your authenticator app.</p>
+            <TrustedDevices />
             <NewRecoveryCodes onCodes={setCodes} />
             {me.role !== "admin" && <TurnOff onDone={onChanged} />}
           </>
@@ -97,6 +98,36 @@ function TurnOff({ onDone }) {
         const r = await a.run(() => post("/2fa/off", { password, code }), "Two-factor codes turned off.");
         if (r) onDone();
       }}>Turn off two-factor codes</Button>
+    </div>
+  );
+}
+
+// Devices that don't ask for a code (chosen at the code step).
+function TrustedDevices() {
+  const [d, setD] = useState(null);
+  const a = useAction();
+  const load = useCallback(() => get("/devices").then(setD).catch(() => setD(null)), []);
+  useEffect(() => { load(); }, [load]);
+  if (!d) return null;
+  const forget = async (everywhere) => {
+    const r = await a.run(() => post("/devices/forget", { everywhere }),
+      everywhere ? "Every device will ask for a code again." : "This device will ask for a code again.");
+    if (r) load();
+  };
+  return (
+    <div className="block">
+      <p className="small">
+        {d.count === 0 ? "Every device asks for a code."
+          : `${d.count === 1 ? "1 device doesn't" : `${d.count} devices don't`} ask for a code (up to ${d.days} days from when you chose it)`
+            + (d.this_device ? ", this one included." : ".")}
+      </p>
+      {d.count > 0 && (
+        <div className="buttons">
+          {d.this_device && <Button kind="secondary" busy={a.busy} onClick={() => forget(false)}>Ask on this device again</Button>}
+          <Button kind="secondary" busy={a.busy} onClick={() => forget(true)}>Ask on every device again</Button>
+        </div>
+      )}
+      {a.show}
     </div>
   );
 }

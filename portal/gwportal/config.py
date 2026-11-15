@@ -17,3 +17,4 @@ BRAND = os.environ.get("PORTAL_BRAND", "gwphones")
 SESSION_IDLE_MINUTES = int(os.environ.get("PORTAL_SESSION_IDLE_MINUTES", "120"))
 SESSION_MAX_HOURS = int(os.environ.get("PORTAL_SESSION_MAX_HOURS", "12"))
 COOKIE = "__Host-gwportal"
+DEVICE_COOKIE = "__Host-gwportal-device"  # a device trusted to skip the code
