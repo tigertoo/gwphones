@@ -100,11 +100,23 @@ def test_checking_copy_hides_passwords(phones):
     assert pw[MAC] not in shown
 
 
-def test_not_for_the_portal(phones):
+def test_portal_sees_only_its_tenants_phones(phones):
     main, pbx, op, acme_op, acme, code, pw = phones
     portal = TestClient(main.app)
     portal.headers.update({"X-Portal-Secret": PORTAL, "X-Portal-Tenant": code})
-    assert portal.get("/api/pbx/desk-phones").status_code in (403, 404)
+    r = portal.get("/api/pbx/desk-phones")
+    assert r.status_code == 200 and [p["mac"] for p in r.json()["phones"]] == [MAC2]
+    assert portal.get(f"/api/pbx/desk-phones/{MAC}/config.cfg").status_code == 404  # the main tenant's
+    assert portal.delete(f"/api/pbx/desk-phones/{MAC}").status_code == 404
+
+
+def test_one_phone_per_extension(phones):
+    main, pbx, op, acme_op, acme, code, pw = phones
+    r = op.post("/api/pbx/desk-phones", json={"mac": "805ec0000001", "ext": "201", "model": "T46G"})
+    assert r.status_code == 409 and "already on extension 201" in r.json()["detail"]
+    assert op.post("/api/pbx/desk-phones", json={"mac": "805ec0000001", "ext": "202", "model": "T46G"}).status_code == 200
+    assert op.put("/api/pbx/desk-phones/805ec0000001", json={"ext": "201", "model": "T46G"}).status_code == 409
+    assert op.put(f"/api/pbx/desk-phones/{MAC}", json={"ext": "201", "model": "T41P"}).status_code == 200  # itself
 
 
 def test_server_url_for_desk_phones(phones, monkeypatch):
@@ -120,7 +132,7 @@ def test_another_tenants_mac_is_not_revealed(phones):
     main, pbx, op, acme_op, acme, code, pw = phones
     r = acme_op.post("/api/pbx/desk-phones", json={"mac": MAC, "ext": "201", "model": "T46G"})
     assert r.status_code == 409 and "already" not in r.json()["detail"] and "support" in r.json()["detail"]
-    r = op.post("/api/pbx/desk-phones", json={"mac": MAC, "ext": "202", "model": "T46G"})
+    r = op.post("/api/pbx/desk-phones", json={"mac": MAC, "ext": "203", "model": "T46G"})
     assert r.status_code == 409 and "already added" in r.json()["detail"]
 
 

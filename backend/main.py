@@ -99,6 +99,13 @@ PORTAL_ROUTES = {
     ("PUT", "/api/pbx/call-links/{link_id}"),
     ("POST", "/api/pbx/call-links/{link_id}/new-url"),
     ("DELETE", "/api/pbx/call-links/{link_id}"),
+    # Desk phones (deskphones.py): the tenant's own only; admins only in the portal.
+    ("GET", "/api/pbx/desk-phones"),
+    ("POST", "/api/pbx/desk-phones"),
+    ("PUT", "/api/pbx/desk-phones/{mac}"),
+    ("POST", "/api/pbx/desk-phones/{mac}/new-password"),
+    ("DELETE", "/api/pbx/desk-phones/{mac}"),
+    ("GET", "/api/pbx/desk-phones/{mac}/config.cfg"),
 }
 _portal_call = contextvars.ContextVar("gw_portal_call", default=False)
 

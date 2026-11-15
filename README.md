@@ -166,6 +166,17 @@ through this API as the portal caller above. Being built (phase 4).
   `web_max_total` over all tenants (default 30, Trunks & Outbound). Destinations come from gwphones as a labelled list
   (`/api/pbx/routing`), only ever the tenant's own. These routes sit on a
   router that refuses anyone but an admin.
+- **Desk phones (admins only, `gwportal/deskphones.py`):** add a Yealink
+  by its MAC on one of the tenant's extensions, move it, make a new
+  provisioning password, view its settings (passwords hidden) and remove
+  it, optionally giving its extension a new SIP password in the same step
+  (the phone keeps its settings until it's factory-reset). The page shows
+  the Server URL, user name and password to enter on the phone, the steps,
+  and its web-page login. gwphones keeps it to the tenant's own phones,
+  allows one phone per extension (`aor-ext` takes one device), and refuses
+  a MAC another tenant has without saying so. The passwords are shown to
+  the admin but never written to the audit log. Its own router, which
+  refuses anyone but an admin.
 - **Limits:** 20 saves a minute per tenant (each one reloads Asterisk for
   the whole server); Status and forwarding cached 5 seconds per tenant.
 

@@ -225,6 +225,17 @@ def _ext_exists(conn, ext: str) -> str:
     return ext
 
 
+def _ext_free(conn, ext: str, mac: str = ""):
+    """One phone per extension: an extension takes one device at a time
+    (aor-ext, max_contacts 1), so two phones on it would keep logging each
+    other out."""
+    r = conn.execute("SELECT mac FROM desk_phones WHERE ext = ? AND tenant_id = ? AND mac != ?",
+                     (ext, current_tenant(), mac)).fetchone()
+    if r:
+        raise HTTPException(409, f"Phone {_pretty(r['mac'])} is already on extension {ext}. "
+                                 "Give each desk phone its own extension.")
+
+
 def _row(r) -> dict:
     return {"mac": r["mac"], "mac_pretty": _pretty(r["mac"]), "ext": r["ext"], "model": r["model"],
             "username": r["mac"], "password": r["prov_pass"], "admin_password": r["admin_pass"],
@@ -247,6 +258,7 @@ def api_add_desk_phone(req: DeskPhoneRequest):
     mac = clean_mac(req.mac)
     with _lock, get_db() as conn:
         ext = _ext_exists(conn, req.ext.strip())
+        _ext_free(conn, ext)
         other = conn.execute("SELECT tenant_id FROM desk_phones WHERE mac = ?", (mac,)).fetchone()
         if other and other["tenant_id"] == current_tenant():
             raise HTTPException(409, f"Phone {_pretty(mac)} is already added.")
@@ -267,6 +279,7 @@ def api_update_desk_phone(mac: str, req: DeskPhoneRequest):
     mac = clean_mac(mac)
     with _lock, get_db() as conn:
         ext = _ext_exists(conn, req.ext.strip())
+        _ext_free(conn, ext, mac)
         if conn.execute("UPDATE desk_phones SET ext = ?, model = ? WHERE mac = ? AND tenant_id = ?",
                         (ext, req.model.strip()[:20], mac, current_tenant())).rowcount == 0:
             raise HTTPException(404, "Phone not found.")
