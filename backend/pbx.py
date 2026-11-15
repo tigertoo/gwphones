@@ -547,6 +547,23 @@ def get_db() -> sqlite3.Connection:
                last_fetch_at TEXT,
                last_fetch_ip TEXT,
                last_fetch_agent TEXT);
+           CREATE TABLE IF NOT EXISTS desk_firmware (      -- server-wide, the operator's (deskphones.py)
+               id INTEGER PRIMARY KEY,
+               model TEXT NOT NULL,
+               version TEXT NOT NULL,
+               name TEXT NOT NULL UNIQUE,
+               size INTEGER NOT NULL,
+               sha256 TEXT NOT NULL,
+               uploaded_at TEXT NOT NULL,
+               UNIQUE (model, version));
+           CREATE TABLE IF NOT EXISTS desk_firmware_attempts (  -- configs sent with a firmware line, per phone
+               mac TEXT NOT NULL,
+               firmware_id INTEGER NOT NULL,
+               count INTEGER NOT NULL DEFAULT 0,
+               PRIMARY KEY (mac, firmware_id));
+           CREATE TABLE IF NOT EXISTS desk_firmware_targets (
+               model TEXT PRIMARY KEY,
+               firmware_id INTEGER NOT NULL REFERENCES desk_firmware(id));
            CREATE TABLE IF NOT EXISTS tenants (
                id INTEGER PRIMARY KEY,
                code TEXT NOT NULL UNIQUE,

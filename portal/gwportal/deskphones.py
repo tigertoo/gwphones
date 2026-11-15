@@ -23,7 +23,7 @@ from .routing import admin
 router = APIRouter(prefix="/api", dependencies=[Depends(admin)])
 
 PHONE_KEYS = ("mac", "mac_pretty", "ext", "model", "username", "password", "admin_password", "created_at",
-              "last_fetch_at", "last_fetch_agent")
+              "last_fetch_at", "last_fetch_agent", "firmware", "upgrade_to", "upgrade_stuck")
 
 
 def _mac(value: str) -> str:

@@ -803,7 +803,8 @@ left out and counted. These are statements, not VAT invoices ("VAT not
 charged"); the totals keep a VAT line, zero for now.
 
 Rate sheets are large, so the Tailscale nginx site needs a bigger upload
-limit in its `/admin-api/` location:
+limit in its `/admin-api/` location (110m since desk-phone firmware, see
+Desk phones):
 
 ```nginx
         client_max_body_size 30m;
@@ -945,6 +946,32 @@ the admin password shown under RPS details (the config sets it), not
 `tail -f /var/log/nginx/pbx-prov.access.log /var/log/admin-dashboard/pbx-changes.log`:
 a 401 and "refused … wrong credentials" means the username or password is
 wrong; 10 wrong tries from one IP give a 429 for 10 minutes.
+
+**Firmware library** (console, Desk phones, Firmware; server-wide, never
+the portal). Upload a model's `.rom` with its version (as the phone's
+Status page shows it); files go to `/var/lib/admin-dashboard/firmware/`
+(`PBX_FIRMWARE_DIR`), up to 100 MB, checked not to be a zip or a web
+page. Choose a version as the model's target, and a phone of that model
+that reports anything else in its user agent (`Yealink SIP-T46G
+28.83.0.120 <mac>`) gets `static.firmware.url` in its config, with its own
+credentials in the address, and installs it at its next check (it
+restarts). A phone already on the target, of another model, or not saying
+what it runs gets no such line, so nothing is downloaded every hour. A
+phone still on another version after 3 configs with the line (usually the
+file isn't the version it was labelled) is left alone, logged once and
+shown as stuck in the console; choosing the target again tries again.
+Older versions stay in the library to go back to, but never below what a
+phone needs to reach this server: a T46G below 28.83 can't connect, so it
+would strand itself. The target can't be removed. The files are served under `/prov/yealink/firmware/` only to a
+phone with valid credentials. `pbx-changes.log` notes each "told to
+upgrade", each download, and each "firmware A -> B". A phone has to reach
+the server first: a T46G below 28.83 can't, so its first upgrade is by
+hand. Uploading needs the Tailscale site's `/admin-api/` location to take
+the size:
+
+```nginx
+        client_max_body_size 110m;
+```
 
 Give a desk phone its own extension. `aor-ext` allows one contact with
 `remove_existing`, so a phone and an app on the same extension (the app

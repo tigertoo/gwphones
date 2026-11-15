@@ -92,6 +92,8 @@ function PhoneItem({ p, data, exts, taken, name, onChange }) {
         <div className="editor">
           <p className="small muted">{fetched ? `Last fetched its settings ${fetched}${p.last_fetch_agent ? ` (${p.last_fetch_agent})` : ""}.`
             : "It hasn't fetched its settings yet."}</p>
+          {p.upgrade_to && !p.upgrade_stuck && <p className="small muted">Its firmware ({p.firmware}) is being updated to {p.upgrade_to}: it
+            restarts by itself, in a few minutes, when it next checks.</p>}
           <div className="block">
             <strong>On the phone's web page, Settings → Auto Provision:</strong>
             <Copy label="Server URL" value={data.server_url} />

@@ -877,8 +877,8 @@ function DeskPhonesSection({ config, send, busy, apiBase }) {
       <p className="pbx-hint">
         Add the phone here, then in Yealink RPS add its MAC with a server using the URL, username and password shown
         for it. Out of the box (or after a factory reset) the phone sets itself up, then checks for changes every{" "}
-        {data.repeat_minutes} minutes and whenever it restarts. Best on its own extension: check your aor-ext
-        template allows more than one phone before sharing one with an app. The first key is its own line; the next
+        {data.repeat_minutes} minutes and whenever it restarts. Each desk phone needs its own extension
+        (an extension takes one device at a time). The first key is its own line; the next
         ones are busy lamps for the other extensions (lit while on a call, flashing while ringing: press to call, or to
         answer it while it rings).
       </p>
@@ -919,7 +919,9 @@ function DeskPhonesSection({ config, send, busy, apiBase }) {
               const rows = [
                 <tr key={p.mac}>
                   <td><code>{p.mac_pretty}</code></td>
-                  <td>{p.model || "—"}</td>
+                  <td>{p.model || "—"}
+                    {p.firmware && <div className="pbx-hint">{p.firmware}{p.upgrade_to ? ` → ${p.upgrade_to}` : ""}
+                      {p.upgrade_stuck && " (stuck: left alone; check the file's version, then choose the target again)"}</div>}</td>
                   <td>
                     <select
                       className="idea-select pbx-select"
@@ -983,7 +985,153 @@ function DeskPhonesSection({ config, send, busy, apiBase }) {
           </tbody>
         </table>
       )}
+      <FirmwareSection apiBase={apiBase} />
     </section>
+  );
+}
+
+// Uploads a file as the request body; onProgress(percent), then
+// onProgress(null) once it's sent and the server is checking it.
+function sendRaw(url, file, onProgress) {
+  return new Promise((resolve, reject) => {
+    const xhr = new XMLHttpRequest();
+    xhr.open("POST", url);
+    xhr.setRequestHeader("Content-Type", "application/octet-stream");
+    Object.entries(tenantHeaders()).forEach(([k, v]) => xhr.setRequestHeader(k, v));
+    xhr.upload.onprogress = (e) => { if (e.lengthComputable) onProgress(Math.round((e.loaded / e.total) * 100)); };
+    xhr.upload.onload = () => onProgress(null);
+    xhr.onload = () => {
+      let data = {};
+      try { data = JSON.parse(xhr.responseText); } catch { /* not JSON */ }
+      if (xhr.status >= 200 && xhr.status < 300) resolve(data);
+      else if (xhr.status === 413 && !data.detail) reject(new Error("Too big for the web server: raise client_max_body_size (see the README)."));
+      else reject(new Error(data.detail || `Error ${xhr.status}`));
+    };
+    xhr.onerror = () => reject(new Error("The upload failed. Check your connection and try again."));
+    xhr.send(file);
+  });
+}
+
+// The firmware library: server-wide, for every tenant's phones.
+function FirmwareSection({ apiBase }) {
+  const [fw, setFw] = useState(null);
+  const [draft, setDraft] = useState({ model: "T46G", version: "" });
+  const [file, setFile] = useState(null);
+  const [progress, setProgress] = useState(undefined);
+  const [note, setNote] = useState(null);
+  const load = useCallback(async () => {
+    const res = await fetch(`${apiBase}/api/pbx/desk-firmware`, { headers: tenantHeaders() });
+    if (res.ok) setFw(await res.json());
+  }, [apiBase]);
+  useEffect(() => { load(); }, [load]);
+  const call = async (method, path, body) => {
+    setNote(null);
+    const res = await fetch(`${apiBase}/api/pbx${path}`, {
+      method, headers: { "Content-Type": "application/json", ...tenantHeaders() }, body: body ? JSON.stringify(body) : undefined });
+    const data = await res.json().catch(() => ({}));
+    setNote({ ok: res.ok, text: res.ok ? data.message : data.detail || "Something went wrong." });
+    await load();
+  };
+  const upload = async (e) => {
+    e.preventDefault();
+    setNote(null);
+    setProgress(0);
+    try {
+      const q = new URLSearchParams({ model: draft.model, version: draft.version.trim() });
+      const r = await sendRaw(`${apiBase}/api/pbx/desk-firmware?${q}`, file, setProgress);
+      setNote({ ok: true, text: r.message });
+      setDraft({ ...draft, version: "" });
+      setFile(null);
+      e.target.reset();
+    } catch (err) {
+      setNote({ ok: false, text: err.message });
+    }
+    setProgress(undefined);
+    await load();
+  };
+  if (!fw) return null;
+  const models = [...new Set(fw.files.map((f) => f.model))];
+  const mb = (n) => `${(n / 1024 / 1024).toFixed(1)} MB`;
+  const running = (model) => Object.entries(fw.fleet[model] || {}).map(([v, n]) => `${n} on ${v}`).join(", ");
+  return (
+    <>
+      <h3>Firmware</h3>
+      <p className="pbx-hint">
+        Server-wide, for every tenant's phones. Upload a model's .rom and choose it as that model's target: a phone of that
+        model on any other version is told to install it at its next check (it restarts by itself), and a phone already on
+        it is left alone. Older versions stay here, so you can go back, but never below what the phone needs to reach
+        this server (a T46G below 28.83 can't connect: it would strand itself and need upgrading by hand). For the same
+        reason a T46G's first upgrade to 28.83 is by hand. A phone still on another version after 3 tries is left alone
+        and shown as stuck: usually the file isn't the version it was labelled.
+      </p>
+      {models.length > 0 && (
+        <table className="users-table">
+          <thead><tr><th>Model</th><th>Target</th><th>Phones</th></tr></thead>
+          <tbody>
+            {models.map((m) => (
+              <tr key={m}>
+                <td>{m}</td>
+                <td>
+                  <select className="idea-select pbx-select" value={fw.targets[m] || ""}
+                    onChange={(e) => {
+                      const id = e.target.value ? Number(e.target.value) : null;
+                      const v = fw.files.find((f) => f.id === id)?.version;
+                      if (window.confirm(id ? `Send ${m} ${v} to every ${m} phone on another version? Each restarts to install it.`
+                        : `Leave ${m} phones on whatever they run?`)) call("PUT", `/desk-firmware/target/${m}`, { firmware_id: id });
+                    }}>
+                    <option value="">Leave as they are</option>
+                    {fw.files.filter((f) => f.model === m).map((f) => <option key={f.id} value={f.id}>{f.version}</option>)}
+                  </select>
+                </td>
+                <td>{running(m) || <span className="pbx-hint">None reporting yet</span>}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      )}
+      {fw.files.length > 0 && (
+        <table className="users-table">
+          <thead><tr><th>File</th><th>Size</th><th>SHA-256</th><th>Added</th><th>Actions</th></tr></thead>
+          <tbody>
+            {fw.files.map((f) => (
+              <tr key={f.id}>
+                <td><code>{f.name}</code></td>
+                <td>{mb(f.size)}</td>
+                <td><code title={f.sha256}>{f.sha256.slice(0, 12)}…</code></td>
+                <td>{new Date(f.uploaded_at).toLocaleString()}</td>
+                <td className="pbx-actions">
+                  <button className="ticket-action-btn idea-delete-btn" disabled={fw.targets[f.model] === f.id}
+                    title={fw.targets[f.model] === f.id ? "It's the target: choose another first" : ""}
+                    onClick={() => window.confirm(`Remove ${f.name} from the library?`) && call("DELETE", `/desk-firmware/${f.id}`)}>
+                    Remove</button>
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      )}
+      <form className="idea-form-row pbx-add-row" onSubmit={upload}>
+        <select className="idea-select pbx-select" value={draft.model} onChange={(e) => setDraft({ ...draft, model: e.target.value })}>
+          {fw.models.map((m) => <option key={m} value={m}>{m}</option>)}
+        </select>
+        <input className="idea-input pbx-num-input" placeholder="Version, e.g. 28.83.0.120" value={draft.version}
+          onChange={(e) => setDraft({ ...draft, version: e.target.value })} />
+        <input type="file" accept=".rom" onChange={(e) => setFile(e.target.files[0] || null)} />
+        <button className="ticket-action-btn ticket-action-btn-primary"
+          disabled={progress !== undefined || !file || !draft.version.trim()}>Upload</button>
+      </form>
+      {progress !== undefined && (
+        <div className="pbx-progress-wrap">
+          <div className="pbx-progress-label">{progress === null ? "Checking the file…" : `Uploading ${progress}%`}</div>
+          <div className="pbx-progress">
+            <div className={`pbx-progress-bar ${progress === null ? "pbx-progress-busy" : ""}`}
+              style={progress === null ? undefined : { width: `${progress}%` }} />
+          </div>
+        </div>
+      )}
+      {note && <p className={note.ok ? "pbx-hint" : "pbx-warning"}>{note.text}</p>}
+      <p className="pbx-hint">Up to {fw.max_mb} MB. The version is what the phone's Status page shows for it.</p>
+    </>
   );
 }
 
