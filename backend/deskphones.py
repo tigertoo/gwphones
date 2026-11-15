@@ -98,6 +98,10 @@ def build_config(conn, phone) -> str:
              # Only Accept Trusted Certificates: checked on the T46G (28.83), which
              # trusts Let's Encrypt's root, so a phone set up with it off turns it on.
              "static.security.trust_certificates = 1",
+             # Common Name Validation: the certificate must be for the server it
+             # reaches, not just any trusted one. Checked on the T46G against
+             # pbx.amapforyourmoney.com; a tenant hostname (*.sip wildcard) not yet.
+             "static.security.cn_validation = 1",
              "local_time.time_zone = 0",
              "local_time.time_zone_name = Ireland(Dublin)",
              "local_time.summer_time = 2",
@@ -143,9 +147,16 @@ def _line_keys(conn, own: str, tenant: int) -> list:
 
 
 def _too_many(ip: str) -> bool:
-    q = _failures[ip]
+    """Also forgets an IP once its failures have expired, so scanners
+    don't make the table grow for ever."""
+    q = _failures.get(ip)
+    if q is None:
+        return False
     while q and q[0] < time.monotonic() - FAILURE_WINDOW:
         q.popleft()
+    if not q:
+        _failures.pop(ip, None)
+        return False
     return len(q) >= MAX_FAILURES
 
 
@@ -236,8 +247,12 @@ def api_add_desk_phone(req: DeskPhoneRequest):
     mac = clean_mac(req.mac)
     with _lock, get_db() as conn:
         ext = _ext_exists(conn, req.ext.strip())
-        if conn.execute("SELECT 1 FROM desk_phones WHERE mac = ?", (mac,)).fetchone():
+        other = conn.execute("SELECT tenant_id FROM desk_phones WHERE mac = ?", (mac,)).fetchone()
+        if other and other["tenant_id"] == current_tenant():
             raise HTTPException(409, f"Phone {_pretty(mac)} is already added.")
+        if other:  # another tenant's: don't say so
+            changes_log.info(f"Desk phone {_pretty(mac)} not added for tenant {current_tenant()}: it's another tenant's")
+            raise HTTPException(409, f"Phone {_pretty(mac)} can't be added. Check the MAC, or contact support.")
         conn.execute("INSERT INTO desk_phones (mac, ext, model, prov_pass, admin_pass, created_at, tenant_id) "
                      "VALUES (?, ?, ?, ?, ?, ?, ?)",
                      (mac, ext, req.model.strip()[:20], secrets.token_urlsafe(18), secrets.token_urlsafe(9), _now(),

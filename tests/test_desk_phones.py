@@ -46,6 +46,7 @@ def test_challenge_then_config(phones):
     assert "linekey.2.value = 202" in cfg and "linekey.3.value = 203" in cfg and "linekey.4.type = 0" in cfg
     assert "linekey.2.pickup_value = **202" in cfg
     assert "static.security.trust_certificates = 1" in cfg
+    assert "static.security.cn_validation = 1" in cfg
 
 
 def test_tenant_phone(phones):
@@ -113,3 +114,24 @@ def test_server_url_for_desk_phones(phones, monkeypatch):
     monkeypatch.setattr(deskphones, "DESKPHONE_BASE_URL", "https://pbx.other.example")
     d = op.get("/api/pbx/desk-phones").json()
     assert d["server_url"] == "https://pbx.other.example/prov/yealink/" and d["ready"]
+
+
+def test_another_tenants_mac_is_not_revealed(phones):
+    main, pbx, op, acme_op, acme, code, pw = phones
+    r = acme_op.post("/api/pbx/desk-phones", json={"mac": MAC, "ext": "201", "model": "T46G"})
+    assert r.status_code == 409 and "already" not in r.json()["detail"] and "support" in r.json()["detail"]
+    r = op.post("/api/pbx/desk-phones", json={"mac": MAC, "ext": "202", "model": "T46G"})
+    assert r.status_code == 409 and "already added" in r.json()["detail"]
+
+
+def test_failure_table_forgets_expired_ips(phones, monkeypatch):
+    main, pbx, op, acme_op, acme, code, pw = phones
+    import deskphones
+    deskphones._failures.clear()
+    fetch(main, MAC, basic(MAC, "wrong"))
+    assert len(deskphones._failures) == 1
+    fetch(main, MAC, basic(MAC, pw[MAC]))  # a good fetch adds nothing
+    assert len(deskphones._failures) == 1
+    monkeypatch.setattr(deskphones, "FAILURE_WINDOW", -1)  # everything has expired
+    assert fetch(main, MAC, basic(MAC, pw[MAC])).status_code == 200
+    assert deskphones._failures == {}

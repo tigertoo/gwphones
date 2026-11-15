@@ -914,7 +914,13 @@ every factory reset, which clears them. A factory-reset phone may need
 Security, Trusted Certificates, "Only Accept Trusted Certificates" turned
 off for its first fetch; the config turns it back on
 (`static.security.trust_certificates = 1`). The T46G on 28.83.0.120
-trusts Let's Encrypt's root, so later fetches work with it on.
+trusts Let's Encrypt's root, so later fetches work with it on. The
+config also turns on Common Name Validation
+(`static.security.cn_validation = 1`), so the certificate must be for the
+server the phone reaches, not just any trusted one; checked on the T46G
+against `pbx.amapforyourmoney.com`. A tenant on its own SIP hostname (the
+`*.sip` wildcard) hasn't been tried with it yet: check its first phone
+registers.
 
 Once it has fetched its config the phone's web page login is `admin` with
 the admin password shown under RPS details (the config sets it), not
