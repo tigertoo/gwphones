@@ -194,10 +194,8 @@ Settings (its own `.env`): `PORTAL_DB`, `PORTAL_ORIGIN` (e.g.
 
 ## Branches
 
-- `main`: what runs.
-- `desk-phones`: Yealink desk phones (`backend/deskphones.py`, its
-  routers in `main.py`, `tests/test_desk_phones.py`), being tested on a
-  real T46G before it joins `main`.
+- `main`: what runs. Desk phones (`desk-phones`) joined it on 15
+  November 2026, after a T46G worked on it.
 
 ## Tests
 
@@ -856,3 +854,45 @@ restart takes about 20 seconds; phones re-register by themselves. To test
 the hook without a renewal:
 
 ```
+
+### Desk phones (Yealink, `backend/deskphones.py`)
+
+A phone fetches `<mac>.cfg` from `/prov/yealink/` with its own username
+(its MAC) and password, shown in the console under Desk phones, RPS
+details. The address it's given comes from `PBX_DESKPHONE_BASE_URL`, or
+`PBX_PROVISION_BASE_URL` when that isn't set:
+
+```
+PBX_DESKPHONE_BASE_URL=https://pbx.amapforyourmoney.com
+```
+
+**That site must have an RSA certificate.** A T46G on its last firmware
+(28.83.0.120) speaks TLS 1.2 but offers only RSA and DHE-RSA ciphers, no
+ECDHE. Against `amapforyourmoney.com`'s ECDSA certificate the handshake
+fails straight away (alert 40, `handshake_failure`) and nothing shows in
+the access log; `tcpdump -X` on port 443 shows it. The nginx site
+`pbx-prov` serves `pbx.amapforyourmoney.com` with the RSA certificate from
+the section above and passes `/prov/yealink/` to port 8010; keep its
+ciphers including `DHE-RSA-AES256-GCM-SHA384`. To check what the phone
+needs:
+
+```
+openssl s_client -connect pbx.amapforyourmoney.com:443 -servername pbx.amapforyourmoney.com \
+  -tls1_2 -cipher DHE-RSA-AES256-GCM-SHA384 </dev/null 2>&1 | grep -E 'Cipher is|alert'
+```
+
+Firmware older than 28.83 (e.g. 28.80) fails before that. The T46G's
+last official firmware is Yealink's
+`https://www.yealink.com/upfiles/products/201909/1568789449754.83.0.120.rom`
+(phone web page, Settings, Upgrade). The T46G is end of life, so RPS
+doesn't take it: enter the URL, username and password on the phone's web
+page (Settings, Auto Provision, then Autoprovision Now), and again after
+every factory reset, which clears them. Turn off Security, Trusted
+Certificates, "Only Accept Trusted Certificates" for now.
+
+Once it has fetched its config the phone's web page login is `admin` with
+the admin password shown under RPS details (the config sets it), not
+`admin`/`admin`. Watch a fetch with
+`tail -f /var/log/nginx/pbx-prov.access.log /var/log/admin-dashboard/pbx-changes.log`:
+a 401 and "refused … wrong credentials" means the username or password is
+wrong; 10 wrong tries from one IP give a 429 for 10 minutes.

@@ -872,7 +872,7 @@ function DeskPhonesSection({ config, send, busy, apiBase }) {
     <section className="panel">
       <h2>Desk phones (Yealink)</h2>
       {!data.ready && (
-        <p className="pbx-hint">Set PBX_PROVISION_BASE_URL and PBX_PUBLIC_HOST in the dashboard's .env first.</p>
+        <p className="pbx-hint">Set PBX_DESKPHONE_BASE_URL (or PBX_PROVISION_BASE_URL) and PBX_PUBLIC_HOST in the dashboard's .env first.</p>
       )}
       <p className="pbx-hint">
         Add the phone here, then in Yealink RPS add its MAC with a server using the URL, username and password shown
@@ -968,11 +968,12 @@ function DeskPhonesSection({ config, send, busy, apiBase }) {
                       <CopyField label="Server URL" value={data.server_url} />
                       <CopyField label="Username" value={p.username} />
                       <CopyField label="Password" value={p.password} />
-                      <div className="ticket-action-label">The phone's web page (Status/Settings) login, set by the config:</div>
+                      <div className="ticket-action-label">The phone's web page (Status/Settings) login once it has fetched its config (admin/admin before, and again after a factory reset):</div>
                       <CopyField label="User" value="admin" />
                       <CopyField label="Password" value={p.admin_password} />
                       <p className="pbx-hint">To try it without RPS: on the phone's web page, Settings → Auto Provision, enter the
-                        same URL, username and password, then Auto Provision Now.</p>
+                        same URL, username and password, then Auto Provision Now. A factory reset clears them, so enter them again
+                        after one.</p>
                     </td>
                   </tr>
                 );

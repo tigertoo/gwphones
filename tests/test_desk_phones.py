@@ -103,3 +103,12 @@ def test_not_for_the_portal(phones):
     portal = TestClient(main.app)
     portal.headers.update({"X-Portal-Secret": PORTAL, "X-Portal-Tenant": code})
     assert portal.get("/api/pbx/desk-phones").status_code in (403, 404)
+
+
+def test_server_url_for_desk_phones(phones, monkeypatch):
+    main, pbx, op, acme_op, acme, code, pw = phones
+    import deskphones
+    assert op.get("/api/pbx/desk-phones").json()["server_url"] == "https://pbx.example/prov/yealink/"  # falls back
+    monkeypatch.setattr(deskphones, "DESKPHONE_BASE_URL", "https://pbx.other.example")
+    d = op.get("/api/pbx/desk-phones").json()
+    assert d["server_url"] == "https://pbx.other.example/prov/yealink/" and d["ready"]

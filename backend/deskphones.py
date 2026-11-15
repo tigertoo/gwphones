@@ -3,7 +3,7 @@ Desk phones (Yealink), set up through Yealink's redirection service (RPS).
 
 Each phone added here gets its own provisioning username (its MAC) and
 password. In RPS the phone's MAC points at a server entry with
-https://<PBX_PROVISION_BASE_URL>/prov/yealink/ and those credentials, so a
+<DESKPHONE_BASE_URL>/prov/yealink/ and those credentials, so a
 phone out of the box asks RPS where to go, then fetches <mac>.cfg here.
 It keeps the URL and credentials and fetches again every
 REPEAT_MINUTES, so a renamed, disabled or re-passworded extension reaches
@@ -32,10 +32,17 @@ is that tenant's through and through: it logs in as the tenant's login
 the tenant's own extensions (its endpoint subscribes to the tenant's
 hints, which are bare extensions). The dashboard only lists and changes
 the phones of the tenant it's working on. A MAC is unique on the server.
+
+The address: PBX_DESKPHONE_BASE_URL (falls back to PBX_PROVISION_BASE_URL).
+It must be a site with an RSA certificate and DHE-RSA ciphers: a T46G on
+its last firmware (28.83) speaks TLS 1.2 but offers no ECDHE ciphers, so
+against an ECDSA certificate the handshake fails before any request
+(alert 40, handshake_failure, and nothing in the access log).
 """
 
 import base64
 import hmac
+import os
 import re
 import secrets
 import time
@@ -57,6 +64,7 @@ REPEAT_MINUTES = 60
 VOICEMAIL_NUMBER = "*97"
 MAX_LINE_KEYS = 27  # a T46G/T46U/T54W's 27 (3 pages of 9 or 10); more models have fewer
 PICKUP_PREFIX = "**"  # **2XX answers that extension's ringing call (pbx.py, feature codes)
+DESKPHONE_BASE_URL = os.environ.get("PBX_DESKPHONE_BASE_URL", "").rstrip("/") or PROVISION_BASE_URL
 
 MAX_FAILURES = 10  # per IP per FAILURE_WINDOW seconds, then 429
 FAILURE_WINDOW = 600
@@ -216,8 +224,8 @@ def api_desk_phones():
         phones = [_row(r) for r in conn.execute("SELECT * FROM desk_phones WHERE tenant_id = ? ORDER BY ext, mac",
                                                  (current_tenant(),))]
     return {"phones": phones, "models": MODELS, "repeat_minutes": REPEAT_MINUTES,
-            "server_url": f"{PROVISION_BASE_URL}/prov/yealink/" if PROVISION_BASE_URL else "",
-            "ready": bool(PROVISION_BASE_URL and PUBLIC_HOST)}
+            "server_url": f"{DESKPHONE_BASE_URL}/prov/yealink/" if DESKPHONE_BASE_URL else "",
+            "ready": bool(DESKPHONE_BASE_URL and PUBLIC_HOST)}
 
 
 @router.post("/desk-phones")
