@@ -847,6 +847,17 @@ current one too: marked DRAFT, unnumbered, nothing locked, unpriced calls
 left out and counted. These are statements, not VAT invoices ("VAT not
 charged"); the totals keep a VAT line, zero for now.
 
+**Add-ons** (so far video): a tenant with video on is charged its
+`video_price` (default €5.00 a month, set per tenant in the Tenants tab)
+for every month it was on at any point. Each billing pass, and each change
+to a tenant, marks the current month in `addon_months` at the price then;
+a month on a statement keeps its price, and cancelling the statement
+releases it. The charge goes to the customer marked "Bills its tenant's
+add-ons", else the tenant's first customer; a tenant with no customer
+shows it under "Not assigned" with a warning, and it isn't billed. The
+main tenant (the operator's own) is never charged. Statements show an
+Add-ons line and section; ones issued before add-ons still render.
+
 Rate sheets are large, so the Tailscale nginx site needs a bigger upload
 limit in its `/phone-api/` location (110m since desk-phone firmware, see
 Desk phones; `/admin-api/` is the VPS dashboard's since the split):

@@ -4,7 +4,7 @@ import React, { useCallback, useEffect, useState } from "react";
 // Customers are groups of extensions; they pay your cost plus a markup
 // (the default or their own), for calls and for their numbers.
 
-const EMPTY_CUSTOMER = { name: "", email: "", markup_pct: "", notes: "", exts: [] };
+const EMPTY_CUSTOMER = { name: "", email: "", markup_pct: "", notes: "", exts: [], bills_addons: false };
 
 function currentMonth() {
   const d = new Date();
@@ -37,7 +37,7 @@ export function MonthlySummary({ apiBase, api, month, version }) {
       </div>
       <table className="users-table">
         <thead>
-          <tr><th>Customer</th><th>Markup</th><th>Calls</th><th>Minutes</th><th>Calls €</th><th>Numbers €</th><th>Cost €</th><th>Price €</th><th>Margin €</th><th></th></tr>
+          <tr><th>Customer</th><th>Markup</th><th>Calls</th><th>Minutes</th><th>Calls €</th><th>Numbers €</th><th>Add-ons €</th><th>Cost €</th><th>Price €</th><th>Margin €</th><th></th></tr>
         </thead>
         <tbody>
           {summary.customers.flatMap((e) => {
@@ -46,12 +46,16 @@ export function MonthlySummary({ apiBase, api, month, version }) {
             const missing = e.counts.unrated + e.counts.provisional;
             const rows = [
               <tr key={id} className="pbx-call-row" onClick={() => show(id)}>
-                <td>{e.customer.name}</td>
+                <td>{e.customer.name}
+                  {e.customer.id == null && e.addons.length > 0 && (
+                    <div className="pbx-hint">Add-ons of a tenant with no customer: they won&rsquo;t be billed until it has one.</div>
+                  )}</td>
                 <td>{e.customer.id == null ? "—" : `${e.markup_pct}%${e.customer.markup_pct == null ? " (default)" : ""}`}</td>
                 <td>{t.calls}</td>
                 <td>{t.minutes}</td>
                 <td>{t.call_price}</td>
                 <td>{t.ddi_price}</td>
+                <td>{t.addon_price}</td>
                 <td>{t.cost}</td>
                 <td><b>{t.price}</b></td>
                 <td>{t.margin}</td>
@@ -62,7 +66,7 @@ export function MonthlySummary({ apiBase, api, month, version }) {
             ];
             if (open === id && detail) rows.push(
               <tr key={`${id}-detail`}>
-                <td colSpan={10} className="ticket-action-panel">
+                <td colSpan={11} className="ticket-action-panel">
                   <div className="idea-form-row">
                     <a className="ticket-action-btn" href={`${apiBase}/api/billing/customers/${id}/month.csv?month=${month}`}>Download itemised CSV</a>
                     {id !== 0 && (
@@ -79,6 +83,12 @@ export function MonthlySummary({ apiBase, api, month, version }) {
                           <td>{Number(d.cost_eur).toFixed(2)}</td><td>{Number(d.price_eur).toFixed(2)}</td>
                         </tr>
                       ))}
+                      {detail.addons.map((x) => (
+                        <tr key={`addon-${x.tenant_id}-${x.addon}`}>
+                          <td>Add-on</td><td>{month}</td><td></td><td></td><td>{x.label}</td><td></td>
+                          <td>0.00</td><td>{Number(x.price_eur).toFixed(2)}</td>
+                        </tr>
+                      ))}
                       {detail.calls.map((c) => (
                         <tr key={c.id}>
                           <td>Call</td><td>{c.start.slice(5, 16)}</td><td>{c.ext}</td><td>{c.number ? `+${c.number}` : c.dialled}</td>
@@ -88,7 +98,7 @@ export function MonthlySummary({ apiBase, api, month, version }) {
                           <td>{c.price_eur != null ? Number(c.price_eur).toFixed(4) : "—"}</td>
                         </tr>
                       ))}
-                      {!detail.ddis.length && !detail.calls.length && (
+                      {!detail.ddis.length && !detail.calls.length && !detail.addons.length && (
                         <tr><td colSpan={8} className="panel-empty">Nothing this month.</td></tr>
                       )}
                     </tbody>
@@ -122,7 +132,8 @@ export function CustomersAndNumbers({ api, run, busy, version }) {
   const ownerOf = (e) => data.customers.find((c) => c.exts.includes(e));
 
   const saveCustomer = async () => {
-    const body = { ...editing, markup_pct: editing.markup_pct === "" ? null : editing.markup_pct };
+    const body = { ...editing, markup_pct: editing.markup_pct === "" ? null : editing.markup_pct,
+      bills_addons: !!editing.bills_addons };
     const ok = editing.id
       ? await run("PUT", `/customers/${editing.id}`, body)
       : await run("POST", "/customers", body);
@@ -180,6 +191,10 @@ export function CustomersAndNumbers({ api, run, busy, version }) {
                 <input className="idea-input" value={editing.markup_pct} onChange={(e) => setEditing({ ...editing, markup_pct: e.target.value })} /></label>
               <label className="pbx-field"><span>Notes</span>
                 <input className="idea-input" maxLength={500} value={editing.notes} onChange={(e) => setEditing({ ...editing, notes: e.target.value })} /></label>
+              <label className="pbx-toggle">
+                <input type="checkbox" checked={!!editing.bills_addons}
+                  onChange={(e) => setEditing({ ...editing, bills_addons: e.target.checked })} />
+                Bills its tenant&rsquo;s add-ons (video). Otherwise the tenant&rsquo;s first customer does.</label>
             </div>
             <div className="ticket-action-label">Extensions</div>
             <div className="pbx-member-grid">

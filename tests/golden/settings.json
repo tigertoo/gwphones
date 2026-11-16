@@ -31,6 +31,7 @@
   "trunk_order": "irishvoip,voxbeam",
   "trunk_voxbeam_enabled": "1",
   "video": "1",
+  "video_price": "5.00",
   "voxbeam_prefix": "0011101",
   "web_max": "10",
   "web_max_total": "30",

@@ -91,7 +91,8 @@ def _money2(micro: int) -> str:
     return from_micro(micro, 2)
 
 
-def _snapshot(conn, entry: dict, month: str, settings: dict, number: str, calls: list, ddis: list) -> dict:
+def _snapshot(conn, entry: dict, month: str, settings: dict, number: str, calls: list, ddis: list,
+              addons: list = ()) -> dict:
     """What a statement shows for these calls and numbers (no changes made)."""
     call_lines = [{"id": c["id"], "start": c["start"], "ext": c["ext"] or "",
                    "number": f"+{c['number']}" if c["number"] else (c["dialled"] or ""),
@@ -107,8 +108,11 @@ def _snapshot(conn, entry: dict, month: str, settings: dict, number: str, calls:
     ddi_lines = [{"did": d["did"], "label": d["label"], "price_micro": to_micro(Decimal(d["price_eur"]))} for d in ddis]
     calls_total = sum(c["price_micro"] for c in call_lines)
     ddis_total = sum(d["price_micro"] for d in ddi_lines)
+    addon_lines = [{"addon": a["addon"], "label": a["label"], "price_micro": to_micro(Decimal(a["price_eur"]))}
+                   for a in addons]
+    addons_total = sum(a["price_micro"] for a in addon_lines)
     # Rounded to the cent once, on the total, so the lines add up as shown.
-    subtotal = to_micro(Decimal(_money2(calls_total + ddis_total)))
+    subtotal = to_micro(Decimal(_money2(calls_total + ddis_total + addons_total)))
     return {
         "number": number, "month": month, "issued": datetime.now(LOCAL_TZ).strftime("%d %b %Y"),
         "business": settings,
@@ -116,8 +120,10 @@ def _snapshot(conn, entry: dict, month: str, settings: dict, number: str, calls:
         "follow_up": bool(conn.execute(
             "SELECT 1 FROM statements WHERE customer_id IS ? AND month = ? AND cancelled_at IS NULL",
             (entry["customer"]["id"], month)).fetchone()),
-        "ddis": ddi_lines, "groups": sorted(groups.values(), key=lambda g: -g["price_micro"]), "calls": call_lines,
-        "totals": {"ddis": ddis_total, "calls": calls_total, "subtotal": subtotal, "vat": 0, "total": subtotal},
+        "ddis": ddi_lines, "addons": addon_lines,
+        "groups": sorted(groups.values(), key=lambda g: -g["price_micro"]), "calls": call_lines,
+        "totals": {"ddis": ddis_total, "calls": calls_total, "addons": addons_total, "subtotal": subtotal, "vat": 0,
+                   "total": subtotal},
     }
 
 
@@ -126,7 +132,8 @@ def _issue_one(conn, entry: dict, month: str, settings: dict) -> Optional[dict]:
     Returns the statement row's fields, or None if there's nothing to bill."""
     calls = [c for c in entry["calls"] if c["statement_id"] is None]
     ddis = [d for d in entry["ddis"] if d["statement_id"] is None]
-    if not calls and not ddis:
+    addons = [a for a in entry["addons"] if a["statement_id"] is None]
+    if not calls and not ddis and not addons:
         return None
     name = entry["customer"]["name"]
     if any(c["status"] in ("unrated", "provisional") for c in calls):
@@ -135,7 +142,7 @@ def _issue_one(conn, entry: dict, month: str, settings: dict) -> Optional[dict]:
     seq = int(_state(conn, "statement_seq", "0") or 0) + 1
     _set_state(conn, "statement_seq", seq)
     number = f"S{seq:05d}"
-    snapshot = _snapshot(conn, entry, month, settings, number, calls, ddis)
+    snapshot = _snapshot(conn, entry, month, settings, number, calls, ddis, addons)
     subtotal = snapshot["totals"]["total"]
     cur = conn.execute("INSERT INTO statements (number, customer_id, month, issued_at, total_micro, snapshot) "
                        "VALUES (?, ?, ?, ?, ?, ?)",
@@ -145,6 +152,9 @@ def _issue_one(conn, entry: dict, month: str, settings: dict) -> Optional[dict]:
         conn.execute("UPDATE calls SET statement_id = ?, price_micro = ? WHERE id = ?", (sid, c["price_micro"], c["id"]))
     conn.executemany("INSERT INTO statement_ddis (statement_id, did, month) VALUES (?, ?, ?)",
                      [(sid, d["did"], month) for d in snapshot["ddis"]])
+    for a in addons:
+        conn.execute("UPDATE addon_months SET statement_id = ? WHERE tenant_id = ? AND addon = ? AND month = ?",
+                     (sid, a["tenant_id"], a["addon"], month))
     return {"id": sid, "number": number, "customer": name, "total": _money2(subtotal)}
 
 
@@ -163,7 +173,8 @@ def api_draft_pdf(customer_id: int, month: str):
         e = entries[0]
         unbilled = [c for c in e["calls"] if c["statement_id"] is None]
         priced = [c for c in unbilled if c["status"] in ("rated", "provisional")]
-        snap = _snapshot(conn, e, month, settings, "DRAFT", priced, [d for d in e["ddis"] if d["statement_id"] is None])
+        snap = _snapshot(conn, e, month, settings, "DRAFT", priced, [d for d in e["ddis"] if d["statement_id"] is None],
+                         [a for a in e["addons"] if a["statement_id"] is None])
     snap["draft"] = {"left_out": len(unbilled) - len(priced),
                      "provisional": sum(c["status"] == "provisional" for c in priced),
                      "month_open": not _month_ended(month)}
@@ -245,6 +256,7 @@ def api_cancel(sid: int):
         conn.execute("UPDATE statements SET cancelled_at = ? WHERE id = ?", (billing._now(), sid))
         conn.execute("UPDATE calls SET statement_id = NULL, price_micro = NULL WHERE statement_id = ?", (sid,))
         conn.execute("DELETE FROM statement_ddis WHERE statement_id = ?", (sid,))
+        conn.execute("UPDATE addon_months SET statement_id = NULL WHERE statement_id = ?", (sid,))
         conn.commit()
     changes_log.info(f"Billing: cancelled statement {r['number']}")
     return {"ok": True, "messages": [f"{r['number']} cancelled. Its calls and numbers can be billed again."]}
@@ -322,6 +334,9 @@ def statement_pdf(snap: dict, cancelled: bool = False) -> bytes:
         summary.append(["Phone numbers", eur(t["ddis"])])
     if snap["calls"]:
         summary.append([f"Calls ({len(snap['calls'])})", eur(t["calls"])])
+    addons = snap.get("addons", [])  # statements issued before add-ons have none
+    if addons:
+        summary.append(["Add-ons", eur(t.get("addons", 0))])
     summary.append(["Total due", eur(t["total"])])
     story += [p("Summary", h2), table(summary, [140, 30], money_cols=(1,), total_row=True)]
     story.append(p("VAT not charged: the supplier is not VAT-registered.", small))
@@ -330,6 +345,10 @@ def statement_pdf(snap: dict, cancelled: bool = False) -> bytes:
         rows = [["Number", "Description", "Amount"]] + [[f"+{d['did']}", d["label"] or "Phone number, monthly",
                                                          eur(d["price_micro"])] for d in snap["ddis"]]
         story += [p("Phone numbers", h2), table(rows, [45, 95, 30], money_cols=(2,))]
+    if addons:
+        rows = [["Add-on", "Amount"]] + [[f"{a['label']}, {_month_name(snap['month'])}", eur(a["price_micro"])]
+                                         for a in addons]
+        story += [p("Add-ons", h2), table(rows, [140, 30], money_cols=(1,))]
     if snap["calls"]:
         rows = [["Destination", "Calls", "Time", "Amount"]] + [
             [g["destination"], str(g["calls"]), _duration(g["seconds"]), eur(g["price_micro"])] for g in snap["groups"]]

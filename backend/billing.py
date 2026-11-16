@@ -48,7 +48,7 @@ from fastapi.responses import Response
 from pydantic import BaseModel
 
 from pbx import (EMAIL_RE, MAIN_TENANT, MAIN_TENANT_CODE, TRUNKS, VOXBEAM_ROUTES, changes_log, channel_ext,
-                 current_tenant, normalize_did)
+                 current_tenant, get_settings, normalize_did)
 from pbx import get_db as get_pbx_db
 
 BILLING_DB = os.environ.get("PBX_BILLING_DB", "/var/lib/admin-dashboard/billing.db")
@@ -117,6 +117,10 @@ def get_db() -> sqlite3.Connection:
                emailed_at TEXT, emailed_to TEXT, cancelled_at TEXT);
            CREATE TABLE IF NOT EXISTS statement_ddis (
                statement_id INTEGER NOT NULL, did TEXT NOT NULL, month TEXT NOT NULL);
+           CREATE TABLE IF NOT EXISTS addon_months (  -- a tenant's paid add-on, each month it was on
+               tenant_id INTEGER NOT NULL, addon TEXT NOT NULL, month TEXT NOT NULL,
+               price_micro INTEGER NOT NULL, statement_id INTEGER,
+               PRIMARY KEY (tenant_id, addon, month));
            CREATE TABLE IF NOT EXISTS ddis (
                did TEXT PRIMARY KEY, customer_id INTEGER NOT NULL, label TEXT NOT NULL DEFAULT '',
                monthly_cost_micro INTEGER NOT NULL, monthly_price_micro INTEGER,
@@ -126,6 +130,7 @@ def get_db() -> sqlite3.Connection:
                    "rate_sheets ADD COLUMN rate_unit TEXT NOT NULL DEFAULT 'units'",
                    "rate_sheets ADD COLUMN vat_pct TEXT NOT NULL DEFAULT '0'",
                    "mappings ADD COLUMN defaults TEXT",
+                   "customers ADD COLUMN bills_addons INTEGER NOT NULL DEFAULT 0",  # its tenant's add-ons
                    # Multi-tenant groundwork: everything so far is the main tenant's (pbx.MAIN_TENANT).
                    *[f"{t} ADD COLUMN tenant_id INTEGER NOT NULL DEFAULT 1" for t in ("customers", "customer_exts", "calls")]):
         try:
@@ -501,10 +506,53 @@ def warm_fx():
 
 
 def billing_pass():
-    """Import new calls, price whatever isn't priced yet, keep FX fresh."""
+    """Import new calls, price whatever isn't priced yet, keep FX fresh,
+    and mark this month's add-ons."""
     import_cdr()
     rate_calls()
     warm_fx()
+    mark_addons()
+
+
+# ---------------------------------------------------------------------------
+# Add-ons: a tenant's paid extras (so far video), billed monthly
+#
+# Every billing pass (and every change to a tenant) marks the current
+# month for each tenant with the add-on on, at its price then, so a month
+# it was on at any point is billed even if it's turned off before the
+# statement. A month already on a statement keeps its price. The main
+# tenant (the operator's own) is never charged.
+# ---------------------------------------------------------------------------
+
+ADDONS = {"video": "Video add-on"}
+
+
+def mark_addons(month: Optional[str] = None):
+    month = month or datetime.now(LOCAL_TZ).strftime("%Y-%m")
+    on = {}
+    with get_pbx_db() as pconn:
+        for r in pconn.execute("SELECT id FROM tenants WHERE id != ?", (MAIN_TENANT,)):
+            s = get_settings(pconn, r["id"])
+            if s.get("video") == "1":
+                on[r["id"]] = to_micro(Decimal(s.get("video_price") or "5.00"))
+    if not on:
+        return
+    with _lock, get_db() as conn:
+        for tid, price in on.items():
+            conn.execute("INSERT INTO addon_months (tenant_id, addon, month, price_micro) VALUES (?, 'video', ?, ?) "
+                         "ON CONFLICT(tenant_id, addon, month) DO UPDATE SET price_micro = excluded.price_micro "
+                         "WHERE addon_months.statement_id IS NULL", (tid, month, price))
+        conn.commit()
+
+
+def addon_customers(customers: Dict[int, dict]) -> Dict[int, int]:
+    """Per tenant, the customer its add-ons go to: the one marked to bill
+    them, else its first customer. A tenant with no customer has none
+    (its add-ons show under "Not assigned", with a warning)."""
+    out = {}
+    for c in sorted(customers.values(), key=lambda c: (not c.get("bills_addons"), c["id"])):
+        out.setdefault(c["tenant_id"], c["id"])
+    return out
 
 
 async def billing_loop():
@@ -1033,6 +1081,7 @@ class CustomerRequest(BaseModel):
     markup_pct: Optional[str] = None  # empty = the default
     notes: str = ""
     exts: List[str] = []
+    bills_addons: bool = False  # its tenant's add-ons (video) go on its statement
 
 
 def _clean_customer(conn, req: CustomerRequest, customer_id: Optional[int] = None) -> dict:
@@ -1051,7 +1100,7 @@ def _clean_customer(conn, req: CustomerRequest, customer_id: Optional[int] = Non
         if taken:
             raise HTTPException(409, f"Extension {e} already belongs to {taken['name']}.")
     return {"name": name, "email": email, "markup_pct": _pct(req.markup_pct, "Markup"),
-            "notes": req.notes.strip()[:500], "exts": exts, "tenant_id": tenant}
+            "notes": req.notes.strip()[:500], "exts": exts, "tenant_id": tenant, "bills_addons": int(req.bills_addons)}
 
 
 def _customer_tenant(conn, customer_id: Optional[int]) -> int:
@@ -1093,9 +1142,11 @@ def api_customers():
 def api_create_customer(req: CustomerRequest):
     with _lock, get_db() as conn:
         c = _clean_customer(conn, req)
-        cur = conn.execute("INSERT INTO customers (name, email, markup_pct, notes, created_at, tenant_id) "
-                           "VALUES (?, ?, ?, ?, ?, ?)",
-                           (c["name"], c["email"], c["markup_pct"], c["notes"], _now(), c["tenant_id"]))
+        if c["bills_addons"]:  # one per tenant
+            conn.execute("UPDATE customers SET bills_addons = 0 WHERE tenant_id = ?", (c["tenant_id"],))
+        cur = conn.execute("INSERT INTO customers (name, email, markup_pct, notes, created_at, tenant_id, bills_addons) "
+                           "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                           (c["name"], c["email"], c["markup_pct"], c["notes"], _now(), c["tenant_id"], c["bills_addons"]))
         conn.executemany("INSERT INTO customer_exts (ext, customer_id, tenant_id) VALUES (?, ?, ?)",
                          [(e, cur.lastrowid, c["tenant_id"]) for e in c["exts"]])
         conn.commit()
@@ -1109,8 +1160,10 @@ def api_update_customer(customer_id: int, req: CustomerRequest):
         if not conn.execute("SELECT 1 FROM customers WHERE id = ?", (customer_id,)).fetchone():
             raise HTTPException(404, "Customer not found.")
         c = _clean_customer(conn, req, customer_id)
-        conn.execute("UPDATE customers SET name = ?, email = ?, markup_pct = ?, notes = ? WHERE id = ?",
-                     (c["name"], c["email"], c["markup_pct"], c["notes"], customer_id))
+        if c["bills_addons"]:  # one per tenant
+            conn.execute("UPDATE customers SET bills_addons = 0 WHERE tenant_id = ? AND id != ?", (c["tenant_id"], customer_id))
+        conn.execute("UPDATE customers SET name = ?, email = ?, markup_pct = ?, notes = ?, bills_addons = ? WHERE id = ?",
+                     (c["name"], c["email"], c["markup_pct"], c["notes"], c["bills_addons"], customer_id))
         conn.execute("DELETE FROM customer_exts WHERE customer_id = ?", (customer_id,))
         conn.executemany("INSERT INTO customer_exts (ext, customer_id, tenant_id) VALUES (?, ?, ?)",
                          [(e, customer_id, c["tenant_id"]) for e in c["exts"]])
@@ -1217,7 +1270,7 @@ def month_statement(conn, month: str, customer_id: Optional[int] = None, only: b
             c = customers.get(cid, UNASSIGNED)
             pct = Decimal(c["markup_pct"]) if c.get("markup_pct") is not None else markup0
             out[cid] = {"customer": {k: c.get(k) for k in ("id", "name", "email", "markup_pct")},
-                        "markup_pct": str(pct), "_pct": pct, "calls": [], "ddis": [],
+                        "markup_pct": str(pct), "_pct": pct, "calls": [], "ddis": [], "addons": [],
                         "counts": {"rated": 0, "provisional": 0, "unrated": 0}}
         return out[cid]
 
@@ -1245,6 +1298,12 @@ def month_statement(conn, month: str, customer_id: Optional[int] = None, only: b
                           "cost_eur": from_micro(d["monthly_cost_micro"], 6),
                           "price_eur": from_micro(price, 6), "fixed_price": d["monthly_price_micro"] is not None,
                           "_cost": d["monthly_cost_micro"], "_price": price})
+    payer = addon_customers(customers)
+    for a in conn.execute("SELECT * FROM addon_months WHERE month = ? ORDER BY tenant_id, addon", (month,)):
+        e = entry(payer.get(a["tenant_id"]))
+        e["addons"].append({"tenant_id": a["tenant_id"], "addon": a["addon"], "label": ADDONS.get(a["addon"], a["addon"]),
+                            "price_eur": from_micro(a["price_micro"], 6), "statement_id": a["statement_id"],
+                            "_price": a["price_micro"]})
     for cid in customers:
         entry(cid)  # every customer appears, even with nothing this month
     result = []
@@ -1256,13 +1315,15 @@ def month_statement(conn, month: str, customer_id: Optional[int] = None, only: b
         call_price = sum(to_micro(Decimal(c["price_eur"])) for c in priced)
         ddi_cost = sum(d.pop("_cost") for d in e["ddis"])
         ddi_price = sum(d.pop("_price") for d in e["ddis"])
+        addon_price = sum(x.pop("_price") for x in e["addons"])  # no cost: all margin
         e.pop("_pct")
         e["totals"] = {
             "calls": len(e["calls"]), "minutes": round(sum(c["billsec"] for c in e["calls"]) / 60, 1),
             "call_cost": from_micro(call_cost, 2), "call_price": from_micro(call_price, 2),
             "ddi_cost": from_micro(ddi_cost, 2), "ddi_price": from_micro(ddi_price, 2),
-            "cost": from_micro(call_cost + ddi_cost, 2), "price": from_micro(call_price + ddi_price, 2),
-            "margin": from_micro(call_price + ddi_price - call_cost - ddi_cost, 2),
+            "addon_price": from_micro(addon_price, 2),
+            "cost": from_micro(call_cost + ddi_cost, 2), "price": from_micro(call_price + ddi_price + addon_price, 2),
+            "margin": from_micro(call_price + ddi_price + addon_price - call_cost - ddi_cost, 2),
             "complete": not e["counts"]["unrated"] and not e["counts"]["provisional"],
         }
         result.append(e)
@@ -1297,11 +1358,11 @@ def api_summary_csv(month: str):
     buf = io.StringIO()
     w = csv.writer(buf)
     w.writerow(["customer", "markup_pct", "calls", "minutes", "call_cost", "call_price", "numbers", "number_cost",
-                "number_price", "cost", "price", "margin", "complete"])
+                "number_price", "addon_price", "cost", "price", "margin", "complete"])
     for e in rows:
         t = e["totals"]
         w.writerow([e["customer"]["name"], e["markup_pct"], t["calls"], t["minutes"], t["call_cost"], t["call_price"],
-                    len(e["ddis"]), t["ddi_cost"], t["ddi_price"], t["cost"], t["price"], t["margin"],
+                    len(e["ddis"]), t["ddi_cost"], t["ddi_price"], t["addon_price"], t["cost"], t["price"], t["margin"],
                     "yes" if t["complete"] else "no"])
     return Response(buf.getvalue(), media_type="text/csv",
                     headers={"Content-Disposition": f'attachment; filename="phone-billing-{month}.csv"'})
@@ -1315,6 +1376,8 @@ def api_customer_month_csv(customer_id: int, month: str):
     w.writerow(["item", "date", "ext", "number", "destination", "seconds", "cost_eur", "price_eur", "status"])
     for d in e["ddis"]:
         w.writerow(["number", month, "", f"+{d['did']}", d["label"], "", d["cost_eur"], d["price_eur"], "monthly"])
+    for x in e["addons"]:
+        w.writerow(["add-on", month, "", "", x["label"], "", "0", x["price_eur"], "monthly"])
     for c in e["calls"]:
         w.writerow(["call", c["start"], c["ext"], f"+{c['number']}" if c["number"] else c["dialled"], c["destination"],
                     c["billsec"], c["cost_eur"], c["price_eur"], c["status"]])

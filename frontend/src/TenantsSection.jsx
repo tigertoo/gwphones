@@ -4,7 +4,7 @@ import React, { useCallback, useEffect, useState } from "react";
 // main tenant is today's system; every other has its own extensions,
 // numbering, voicemail, recordings, park lot, caller ID and call limit.
 
-const EMPTY = { name: "", outbound_cid: "", max_calls: 4, sip_host: "", web_max: 10, video: false };
+const EMPTY = { name: "", outbound_cid: "", max_calls: 4, sip_host: "", web_max: 10, video: false, video_price: "5.00" };
 
 export default function TenantsSection({ config, send, busy, apiBase, switchTo }) {
   const [tenants, setTenants] = useState(null);
@@ -58,14 +58,17 @@ export default function TenantsSection({ config, send, busy, apiBase, switchTo }
               <td><input className="idea-input pbx-num-input" type="number" min={1} max={50} value={edit.web_max}
                 onChange={(e) => setEdit({ ...edit, web_max: e.target.value })} /></td>
               <td><input type="checkbox" checked={edit.video} aria-label="Video add-on"
-                onChange={(e) => setEdit({ ...edit, video: e.target.checked })} /></td>
+                onChange={(e) => setEdit({ ...edit, video: e.target.checked })} />
+                {!t.main && <input className="idea-input pbx-num-input" aria-label="Video add-on, € a month" value={edit.video_price}
+                  onChange={(e) => setEdit({ ...edit, video_price: e.target.value })} title="€ a month on its statement" />}</td>
               <td><input className="idea-input" placeholder={hostExample} value={edit.sip_host}
                 onChange={(e) => setEdit({ ...edit, sip_host: e.target.value })} /></td>
               <td>{t.status}</td>
               <td className="pbx-actions">
                 <button className="ticket-action-btn" onClick={() => setEdit(null)}>Cancel</button>
                 <button className="ticket-action-btn ticket-action-btn-primary" disabled={busy || !edit.name.trim()}
-                  onClick={() => save(t, { name: edit.name, sip_host: edit.sip_host, web_max: Number(edit.web_max), video: edit.video }, "Tenant saved.")}>Save</button>
+                  onClick={() => save(t, { name: edit.name, sip_host: edit.sip_host, web_max: Number(edit.web_max), video: edit.video,
+                    ...(t.main ? {} : { video_price: edit.video_price }) }, "Tenant saved.")}>Save</button>
               </td>
             </tr>
           ) : (
@@ -77,7 +80,7 @@ export default function TenantsSection({ config, send, busy, apiBase, switchTo }
               <td>{t.settings.outbound_cid || <span className="pbx-hint">none</span>}</td>
               <td>{t.settings.max_outbound}{t.main && <span className="pbx-hint"> out</span>}</td>
               <td>{t.settings.web_max}</td>
-              <td>{t.settings.video === "1" ? "Yes" : "—"}</td>
+              <td>{t.settings.video === "1" ? (t.main ? "Yes" : `Yes, €${t.settings.video_price}/month`) : "—"}</td>
               <td>{t.sip_host || <span className="pbx-hint">—</span>}</td>
               <td>{t.status === "active" ? "Active" : <span className="pbx-tenant-flag">Suspended</span>}</td>
               <td className="pbx-actions">
@@ -85,7 +88,7 @@ export default function TenantsSection({ config, send, busy, apiBase, switchTo }
                   <button className="ticket-action-btn" onClick={() => switchTo(t.id)}>Work on it</button>
                 )}
                 <button className="ticket-action-btn" onClick={() => setEdit({ id: t.id, name: t.name, sip_host: t.sip_host, web_max: t.settings.web_max,
-                  video: t.settings.video === "1" })}>Edit</button>
+                  video: t.settings.video === "1", video_price: t.settings.video_price })}>Edit</button>
                 {!t.main && (t.status === "active" ? (
                   <button className="ticket-action-btn idea-delete-btn" disabled={busy}
                     onClick={() => window.confirm(`Suspend ${t.name}? Its calls out stop (112 and 999 still work) and calls in go to its main mailbox.`)
@@ -121,6 +124,13 @@ export default function TenantsSection({ config, send, busy, apiBase, switchTo }
               <input type="checkbox" checked={form.video} onChange={(e) => setForm({ ...form, video: e.target.checked })} />
               Video add-on
             </label>
+            {form.video && (
+              <label className="idea-field">
+                € a month
+                <input className="idea-input pbx-num-input" value={form.video_price}
+                  onChange={(e) => setForm({ ...form, video_price: e.target.value })} />
+              </label>
+            )}
             <input className="idea-input" placeholder={`SIP hostname, e.g. ${hostExample}`} value={form.sip_host}
               onChange={(e) => setForm({ ...form, sip_host: e.target.value })} />
           </div>

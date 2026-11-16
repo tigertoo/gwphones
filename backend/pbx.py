@@ -218,8 +218,9 @@ TENANT_TABLES = ("extensions", "ring_groups", "inbound_routes", "provision_token
 # settings (trunks, routes, video, the default inbound route) is the server's.
 TENANT_SETTINGS = ("outbound_cid", "max_outbound", "rec_days", "cap_default", *[f"cap_{t}" for t in NUMBER_TYPES],
                    "main_mailbox", "web_max",
-                   # video calls (extensions and call links): a paid add-on, so each tenant's own
-                   "video")
+                   # video calls (extensions and call links): a paid add-on, so each tenant's own,
+                   # and its monthly price on statements (billing.py; never the main tenant's)
+                   "video", "video_price")
 
 
 C2C_RING = "portal-c2c-ring"
@@ -383,6 +384,7 @@ DEFAULT_SETTINGS = {
     # Video between extensions: Asterisk passes it through untouched (no
     # transcoding), so both phones must share a codec. Off until tested.
     "video": "0",
+    "video_price": "5.00",  # € a month, on the tenant's statement while video is on (billing.mark_addons)
     **{f"lcr_allow_{t}{r}": "1" for t, r in ALL_ROUTES},  # usable for "cheapest"
 }
 
@@ -2188,6 +2190,7 @@ class TenantCreate(BaseModel):
     sip_host: str = ""
     web_max: int = 10  # browser calls at once (call links): protection, not its plan
     video: bool = False  # the video add-on
+    video_price: Optional[str] = None  # € a month; None = the default
 
 
 class TenantUpdate(BaseModel):
@@ -2196,6 +2199,27 @@ class TenantUpdate(BaseModel):
     sip_host: str = ""
     web_max: Optional[int] = None  # None = unchanged
     video: Optional[bool] = None  # the video add-on; None = unchanged
+    video_price: Optional[str] = None  # € a month; None = unchanged
+
+
+def _video_price(value: str) -> str:
+    try:
+        price = Decimal(str(value).strip().replace("€", ""))
+    except (InvalidOperation, ValueError):
+        raise HTTPException(400, "The video add-on's price must be in euro, e.g. 5.00.")
+    if not Decimal(0) <= price <= Decimal(1000) or price != price.quantize(Decimal("0.01")):
+        raise HTTPException(400, "The video add-on's price must be €0-1000, to the cent.")
+    return f"{price:.2f}"
+
+
+def _mark_addons():
+    """The add-on months for statements (billing.py), right away rather than
+    at the next billing pass."""
+    try:
+        from billing import mark_addons
+        mark_addons()
+    except Exception as e:
+        changes_log.info(f"Couldn't mark add-on months: {type(e).__name__}: {e}")
 
 
 def _web_max(value: int) -> int:
@@ -2226,7 +2250,7 @@ def api_tenants():
         counts = {r["tenant_id"]: r["n"] for r in conn.execute(
             "SELECT tenant_id, COUNT(*) AS n FROM extensions GROUP BY tenant_id")}
         return {"host_suffix": TENANT_HOST_SUFFIX, "tenants": [{**_tenant_json(r), "extensions": counts.get(r["id"], 0),
-                             "settings": {k: get_settings(conn, r["id"])[k] for k in ("outbound_cid", "max_outbound", "web_max", "video")}}
+                             "settings": {k: get_settings(conn, r["id"])[k] for k in ("outbound_cid", "max_outbound", "web_max", "video", "video_price")}}
                             for r in conn.execute("SELECT * FROM tenants ORDER BY id")]}
 
 
@@ -2256,9 +2280,12 @@ def api_create_tenant(req: TenantCreate):
         _set_setting(conn, "max_outbound", str(req.max_calls), tenant=tid)
         _set_setting(conn, "web_max", str(web_max), tenant=tid)
         _set_setting(conn, "video", "1" if req.video else "0", tenant=tid)
+        if req.video_price is not None:
+            _set_setting(conn, "video_price", _video_price(req.video_price), tenant=tid)
         conn.commit()
         result = apply_config(conn, f"Created tenant {code} ({name}): caller ID {cid}, {req.max_calls} calls at once"
                                     + (", video" if req.video else ""))
+    _mark_addons()
     return {"id": tid, "code": str(code), **result}
 
 
@@ -2280,10 +2307,16 @@ def api_update_tenant(tenant_id: int, req: TenantUpdate):
             _set_setting(conn, "web_max", str(web_max), tenant=tenant_id)
         if req.video is not None:
             _set_setting(conn, "video", "1" if req.video else "0", tenant=tenant_id)
+        price = None if req.video_price is None else _video_price(req.video_price)
+        if price is not None:
+            _set_setting(conn, "video_price", price, tenant=tenant_id)
         conn.commit()
-        return apply_config(conn, f"Tenant {tenant_id}: {name}, {req.status}, host {host or 'none'}"
-                                  + (f", {web_max} browser calls at once" if web_max is not None else "")
-                                  + ("" if req.video is None else f", video {'on' if req.video else 'off'}"))
+        result = apply_config(conn, f"Tenant {tenant_id}: {name}, {req.status}, host {host or 'none'}"
+                                    + (f", {web_max} browser calls at once" if web_max is not None else "")
+                                    + ("" if req.video is None else f", video {'on' if req.video else 'off'}")
+                                    + ("" if price is None else f", video €{price}/month"))
+    _mark_addons()
+    return result
 
 
 @router.get("/config")
