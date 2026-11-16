@@ -293,3 +293,12 @@ input[type="checkbox"] { width: 22px; min-height: 22px; height: 22px; margin: 0;
   .day { flex-direction: column; gap: 4px; }
   .day-name { width: auto; padding-top: 0; }
 }
+
+/* Billing tables */
+.table-wrap { overflow-x: auto; margin-bottom: 12px; }
+.table { width: 100%; border-collapse: collapse; font-variant-numeric: tabular-nums; }
+.table th, .table td { text-align: left; padding: 6px 8px; border-bottom: 1px solid var(--line); vertical-align: top; }
+.table th { font-weight: 600; }
+.table .num { text-align: right; white-space: nowrap; }
+.table tr.total td { font-weight: 600; border-bottom: none; border-top: 2px solid var(--line); }
+section > .tabs { margin-bottom: 12px; }

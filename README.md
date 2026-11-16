@@ -198,6 +198,19 @@ through this API as the portal caller above. Being built (phase 4).
   a MAC another tenant has without saying so. The passwords are shown to
   the admin but never written to the audit log. Its own router, which
   refuses anyone but an admin.
+- **Billing (admins only, `gwportal/billing.py`, gwphones'
+  `tenant_billing.py` under `/api/pbx/billing/`):** the tenant's issued
+  statements (cancelled ones hidden) with their PDFs (each download
+  audited); this month so far, per customer, built the way a draft
+  statement is (same rounding), as of the last billing pass, with calls
+  not priced yet counted, not priced; and its calls out that connected,
+  by month and extension (up to 2000), each at its statement price, else
+  an estimate with its customer's markup, else "—" (not priced yet, or an
+  extension no customer has). Prices only: both sides build every answer
+  from an allowlist, so no cost, markup, margin, rate, trunk, route or
+  rate sheet ever reaches it, nor anything of another tenant or "Not
+  assigned"; a test looks for a distinctive cost and markup in every
+  answer. A tenant's statements are its customers'.
 - **Limits:** 20 saves a minute per tenant (each one reloads Asterisk for
   the whole server); Status and forwarding cached 5 seconds per tenant.
 

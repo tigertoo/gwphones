@@ -106,6 +106,11 @@ PORTAL_ROUTES = {
     ("POST", "/api/pbx/desk-phones/{mac}/new-password"),
     ("DELETE", "/api/pbx/desk-phones/{mac}"),
     ("GET", "/api/pbx/desk-phones/{mac}/config.cfg"),
+    # Billing (tenant_billing.py): the tenant's own statements, month and calls, prices only.
+    ("GET", "/api/pbx/billing/statements"),
+    ("GET", "/api/pbx/billing/statements/{sid}/pdf"),
+    ("GET", "/api/pbx/billing/month"),
+    ("GET", "/api/pbx/billing/calls"),
 }
 _portal_call = contextvars.ContextVar("gw_portal_call", default=False)
 
@@ -307,7 +312,10 @@ from billing import router as billing_router  # noqa: E402
 from statements import router as statements_router  # noqa: E402
 from lcr import public_router as lcr_public_router, router as lcr_router  # noqa: E402
 
+from tenant_billing import router as tenant_billing_router  # noqa: E402
+
 app.include_router(billing_router)
 app.include_router(statements_router)
+app.include_router(tenant_billing_router)  # a tenant's own, for its portal: /api/pbx/billing/*
 app.include_router(lcr_router)
 app.include_router(lcr_public_router)

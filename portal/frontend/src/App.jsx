@@ -1,6 +1,7 @@
 import React, { useCallback, useEffect, useState } from "react";
 import { get, post } from "./api";
 import { Account } from "./Account";
+import { Billing } from "./Billing";
 import { DeskPhones } from "./DeskPhones";
 import { Extensions, Recordings, Status } from "./Phones";
 import { Routing } from "./Routing";
@@ -14,7 +15,7 @@ import { Message } from "./ui";
 
 const TABS = {
   admin: [["extensions", "Extensions"], ["routing", "Call routing"], ["desk", "Desk phones"], ["status", "Status"],
-    ["recordings", "Recordings"],
+    ["recordings", "Recordings"], ["billing", "Billing"],
     ["staff", "Staff"], ["account", "Account"]],
   user: [["extensions", "My phone"], ["status", "Status"], ["recordings", "Recordings"], ["account", "Account"]],
 };
@@ -85,6 +86,7 @@ function Portal() {
       {tab === "extensions" && <Extensions me={me} />}
       {tab === "routing" && me.role === "admin" && <Routing />}
       {tab === "desk" && me.role === "admin" && <DeskPhones />}
+      {tab === "billing" && me.role === "admin" && <Billing />}
       {tab === "status" && <Status />}
       {tab === "recordings" && <Recordings me={me} />}
       {tab === "staff" && me.role === "admin" && <Staff me={me} />}

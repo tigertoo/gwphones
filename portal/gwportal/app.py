@@ -352,4 +352,5 @@ def mail_like(email: str) -> bool:
 from . import phone  # noqa: E402,F401
 from . import routing  # noqa: E402,F401
 from . import passkeys  # noqa: E402,F401
+from . import billing  # noqa: E402,F401
 from . import deskphones  # noqa: E402,F401
