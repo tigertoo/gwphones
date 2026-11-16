@@ -6,7 +6,7 @@ error messages are only passed on when they're plain answers about the
 request (e.g. "That doesn't look like an email address."); anything that
 could mention its own setup becomes a message of ours. A save gwphones
 couldn't apply to Asterisk yet comes back as saved-but-pending, and is
-logged for the operator.
+logged; gwphones keeps it, retries it and alerts the operator.
 """
 import logging
 import re

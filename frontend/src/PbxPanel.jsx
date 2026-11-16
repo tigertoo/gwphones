@@ -220,6 +220,8 @@ function StatusSection({ config, status, send, busy }) {
       <section className="panel">
         <div className="admin-dash-error pbx-flush">
           Asterisk isn't responding. On the VPS, check it with <code>sudo systemctl status asterisk</code>
+          {status.unapplied?.count > 0 && ` ${status.unapplied.count} saved change${status.unapplied.count === 1 ? " is" : "s are"} waiting: `
+            + "they're applied by themselves once it's back."}
         </div>
       </section>
     );
@@ -244,7 +246,23 @@ function StatusSection({ config, status, send, busy }) {
 
   return (
     <>
-      {status.last_apply?.ok === false && (
+      {status.unapplied?.count > 0 ? (
+        <div className="admin-dash-error">
+          <strong>{status.unapplied.count} change{status.unapplied.count === 1 ? "" : "s"} saved but not live in Asterisk
+            {" "}since {new Date(status.unapplied.since).toLocaleString()}.</strong>{" "}
+          Retrying by itself{status.unapplied.next_retry ? ` (next at ${new Date(status.unapplied.next_retry).toLocaleTimeString()})` : ""}
+          {status.unapplied.alerted ? "; the operator alert has gone out." : "."}
+          <ul className="pbx-unapplied">
+            {status.unapplied.changes.map((c, i) => (
+              <li key={i}>{new Date(c.at).toLocaleString()}: {c.reason}
+                {c.tenant ? ` (${c.tenant}${c.by !== "console" ? `, by ${c.by}` : ""})` : ""}</li>
+            ))}
+          </ul>
+          Last error: {status.unapplied.changes[status.unapplied.changes.length - 1]?.messages}{" "}
+          <button className="ticket-action-btn" disabled={busy}
+            onClick={() => send("POST", "/apply", null, "Applied: everything saved is live.")}>Apply now</button>
+        </div>
+      ) : status.last_apply?.ok === false && (
         <div className="admin-dash-error">Last change wasn't applied: {status.last_apply.messages.join(" ")}</div>
       )}
 

@@ -166,8 +166,8 @@ through this API as the portal caller above. Being built (phase 4).
 - **What gwphones says** is never passed on whole: the portal picks
   fields, keeps gwphones' messages only when they're plain answers about
   the request, and shows a save gwphones couldn't apply to Asterisk yet as
-  "Saved. It takes effect in a moment." (logged as a warning: an alert to
-  the operator is still to come).
+  "Saved. It takes effect in a moment." (logged as a warning; gwphones
+  retries it and alerts the operator, see "Saves not applied").
 - **Call routing (admins only):** ring groups, IVR menus with their
   greetings (recorded in the page or from an audio file, converted to
   8 kHz there; up to 2 minutes, checked before reading), and business
@@ -367,6 +367,26 @@ config, the service refuses to create a new, empty one (and says so in
 `pbx-changes.log`): applying from it would rewrite the live config with no
 extensions. That catches a wrong `PBX_DB` path after a move. Set
 `PBX_ALLOW_NEW_DB=1` only when starting afresh is really meant.
+
+### Saves not applied
+
+A save (from the console or the portal) that's in the database but
+couldn't be applied to Asterisk, for example while Asterisk restarts, is
+kept in `apply_pending` with when, what, its tenant and who made it. Any
+apply that works clears them all, since every apply writes everything.
+gwphones retries by itself, at once and then after 1, 2, 4, 8 and every
+15 minutes; retries add no rows. If changes are still not live after
+`PBX_ALERT_AFTER_MINUTES` (default 5), the operator is emailed once
+through Microsoft Graph, and again when they're applied. In `.env`:
+
+```
+PBX_ALERT_EMAIL=you@example.ie
+```
+
+Without it the alert is only logged in `pbx-changes.log`. The console's
+Status shows them (when, what, tenant, who, the last error, the next try)
+with **Apply now**; the portal never sees them. The retry and alert state
+is in memory, so a restart may send one more alert.
 
 ### Voicemail
 

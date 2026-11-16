@@ -81,6 +81,12 @@ EMAIL_LINK_TTL = timedelta(hours=int(os.environ.get("PBX_EMAIL_LINK_HOURS", "72"
 
 # Setup emails go out through Microsoft Graph (an app registration allowed
 # to send as EMAIL_FROM_ADDRESS).
+# Saves that couldn't be applied to Asterisk are retried automatically;
+# if they're still not live after PBX_ALERT_AFTER_MINUTES, PBX_ALERT_EMAIL
+# is told once (through Microsoft Graph), and again when they are.
+ALERT_EMAIL = os.environ.get("PBX_ALERT_EMAIL", "").strip()
+ALERT_AFTER_MINUTES = int(os.environ.get("PBX_ALERT_AFTER_MINUTES", "5"))
+RETRY_MINUTES = (1, 2, 4, 8, 15)  # between retries, then every 15
 MS_GRAPH_TENANT_ID = os.environ.get("MS_GRAPH_TENANT_ID", "")
 MS_GRAPH_CLIENT_ID = os.environ.get("MS_GRAPH_CLIENT_ID", "")
 MS_GRAPH_CLIENT_SECRET = os.environ.get("MS_GRAPH_CLIENT_SECRET", "")
@@ -547,6 +553,13 @@ def get_db() -> sqlite3.Connection:
                last_fetch_at TEXT,
                last_fetch_ip TEXT,
                last_fetch_agent TEXT);
+           CREATE TABLE IF NOT EXISTS apply_pending (      -- saves not live in Asterisk yet (apply_config)
+               id INTEGER PRIMARY KEY,
+               at TEXT NOT NULL,
+               reason TEXT NOT NULL,
+               tenant_id INTEGER,
+               actor TEXT NOT NULL DEFAULT '',        -- the portal user, or '' for the console
+               messages TEXT NOT NULL DEFAULT '');
            CREATE TABLE IF NOT EXISTS desk_firmware (      -- server-wide, the operator's (deskphones.py)
                id INTEGER PRIMARY KEY,
                model TEXT NOT NULL,
@@ -1870,8 +1883,11 @@ def _tenant_folders(conn) -> List[str]:
     return old
 
 
-def apply_config(conn, reason: str) -> dict:
-    """Regenerate the config and apply it to this server's Asterisk."""
+def apply_config(conn, reason: str, record: bool = True) -> dict:
+    """Regenerate the config and apply it to this server's Asterisk. A
+    save that isn't applied is kept in apply_pending (with its tenant and
+    who made it) until an apply works, which clears them all: every apply
+    writes everything. record=False: a retry, which adds nothing."""
     old_greetings = _tenant_folders(conn)
     ok, messages = apply_to_node("", generate_config(conn))
     if ok:
@@ -1882,7 +1898,103 @@ def apply_config(conn, reason: str) -> dict:
                 pass
     _last_apply.update({"at": _now(), "ok": ok, "messages": messages})
     changes_log.info(f"{reason} -> {'applied' if ok else 'NOT applied: ' + '; '.join(messages)}")
+    if ok:
+        waiting = conn.execute("SELECT COUNT(*) FROM apply_pending").fetchone()[0]
+        if waiting:
+            conn.execute("DELETE FROM apply_pending")
+            changes_log.info(f"Applied {waiting} change(s) that hadn't been")
+    elif record:
+        conn.execute("INSERT INTO apply_pending (at, reason, tenant_id, actor, messages) VALUES (?, ?, ?, ?, ?)",
+                     (_now(), reason[:200], current_tenant(), _acting_user.get(), "; ".join(messages)[:500]))
     return {"ok": ok, "messages": messages}
+
+
+def unapplied(conn) -> dict:
+    """What hasn't been applied yet, for the console."""
+    rows = conn.execute("SELECT p.*, t.name AS tenant_name, t.code AS tenant_code FROM apply_pending p "
+                        "LEFT JOIN tenants t ON t.id = p.tenant_id ORDER BY p.id").fetchall()
+    return {"count": len(rows), "since": rows[0]["at"] if rows else None,
+            "next_retry": _retry["next"].isoformat() if rows and _retry["next"] else None,
+            "alerted": bool(_alert["sent"]),
+            "changes": [{"at": r["at"], "reason": r["reason"], "tenant": r["tenant_name"] or "", "code": r["tenant_code"] or "",
+                         "by": r["actor"] or "console", "messages": r["messages"]} for r in rows[-20:]]}
+
+
+_retry: dict = {"next": None, "step": 0}
+_alert: dict = {"sent": None}
+
+
+def _utcnow() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+def retry_unapplied() -> Optional[str]:
+    """One pass of the retry loop: retries when it's time (backing off),
+    and says which email is due: "alert" (still not applied after
+    ALERT_AFTER_MINUTES, once), "resolved" (applied after an alert) or
+    None. The email is sent outside the lock."""
+    now = _utcnow()
+    with _lock, get_db() as conn:
+        rows = conn.execute("SELECT at FROM apply_pending ORDER BY id").fetchall()
+        if rows and (_retry["next"] is None or now >= _retry["next"]):
+            result = apply_config(conn, f"Retry: {len(rows)} change(s) not applied since {rows[0]['at'][:19]}", record=False)
+            conn.commit()
+            if not result["ok"]:
+                _retry["step"] += 1
+                _retry["next"] = now + timedelta(minutes=RETRY_MINUTES[min(_retry["step"] - 1, len(RETRY_MINUTES) - 1)])
+            rows = conn.execute("SELECT at FROM apply_pending ORDER BY id").fetchall()
+        if not rows:
+            _retry.update(next=None, step=0)
+            if _alert["sent"]:
+                _alert["sent"] = None
+                return "resolved"
+            return None
+        oldest = datetime.fromisoformat(rows[0]["at"])
+        if not _alert["sent"] and now - oldest >= timedelta(minutes=ALERT_AFTER_MINUTES):
+            _alert["sent"] = now
+            return "alert"
+    return None
+
+
+def send_apply_alert(kind: str):
+    """The operator's email (or, without PBX_ALERT_EMAIL, the log only)."""
+    with get_db() as conn:
+        u = unapplied(conn)
+    esc = html.escape
+    if kind == "alert":
+        subject = f"Phone system: {u['count']} change(s) not applied for {ALERT_AFTER_MINUTES}+ minutes"
+        items = "".join(f"<li>{esc(c['at'][:19].replace('T', ' '))} UTC: {esc(c['reason'])} "
+                        f"({esc(c['tenant'] or 'main')}{', by ' + esc(c['by']) if c['by'] != 'console' else ''})</li>"
+                        for c in u["changes"])
+        last = esc(u["changes"][-1]["messages"]) if u["changes"] else ""
+        body = (f"<p>These saves are in the database but not live in Asterisk yet. gwphones keeps retrying "
+                f"(every {RETRY_MINUTES[-1]} minutes at most) and will email again when they're applied.</p>"
+                f"<ul>{items}</ul><p>Last error: {last}</p>"
+                f"<p>Check Asterisk (<code>systemctl status asterisk</code>, <code>asterisk -rx \"core show version\"</code>), "
+                f"then the console's Phone system tab: Re-apply to Asterisk.</p>")
+    else:
+        subject = "Phone system: changes applied again"
+        body = "<p>Everything saved is live in Asterisk again.</p>"
+    if not ALERT_EMAIL or not _graph_ready():
+        changes_log.info(f"Operator alert ({kind}) not emailed: set PBX_ALERT_EMAIL and Microsoft Graph. {subject}")
+        return
+    try:
+        _graph_send(ALERT_EMAIL, subject, body, {})
+        changes_log.info(f"Operator alert ({kind}) emailed: {subject}")
+    except HTTPException as e:
+        changes_log.info(f"Operator alert ({kind}) not emailed: {e.detail}")
+
+
+async def apply_retry_loop():
+    import asyncio
+    while True:
+        await asyncio.sleep(60)
+        try:
+            due = await asyncio.to_thread(retry_unapplied)
+            if due:
+                await asyncio.to_thread(send_apply_alert, due)
+        except Exception:
+            pass
 
 
 # ---------------------------------------------------------------------------
@@ -1962,7 +2074,7 @@ def get_status(t: TenantNames = MAIN_NAMES) -> dict:
     version = asterisk_cli("core show version", timeout=4)
     if version is None:
         return {"asterisk_running": False, "checked_at": _now(), "extensions": {}, "trunks": {},
-                "channels": [], "last_apply": _last_apply}
+                "channels": [], "last_apply": _last_apply, "unapplied": _unapplied_now()}
     contacts = parse_contacts(asterisk_cli("pjsip show contacts") or "")
     return {
         "asterisk_running": True,
@@ -1972,7 +2084,13 @@ def get_status(t: TenantNames = MAIN_NAMES) -> dict:
         "trunks": {k: contacts.get(k, {"status": "Unknown", "rtt_ms": None, "address": None}) for k in TRUNKS},
         "channels": _mark_recording(parse_channels(asterisk_cli("core show channels concise") or ""), t),
         "last_apply": _last_apply,
+        "unapplied": _unapplied_now(),
     }
+
+
+def _unapplied_now() -> dict:
+    with get_db() as conn:
+        return unapplied(conn)
 
 
 # ---------------------------------------------------------------------------
