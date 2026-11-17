@@ -2213,11 +2213,14 @@ def _video_price(value: str) -> str:
 
 
 def _mark_addons():
-    """The add-on months for statements (billing.py), right away rather than
-    at the next billing pass."""
+    """A new tenant's billing account, and the add-on months for statements
+    (billing.py), right away rather than at the next billing pass."""
     try:
-        from billing import mark_addons
-        mark_addons()
+        import billing
+        with billing._lock, billing.get_db() as bconn:
+            billing.ensure_tenant_customers(bconn)
+            bconn.commit()
+        billing.mark_addons()
     except Exception as e:
         changes_log.info(f"Couldn't mark add-on months: {type(e).__name__}: {e}")
 

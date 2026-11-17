@@ -18,13 +18,12 @@ PAST = "2026-10"
 def bill(world):
     import billing
     op, acme = world["op"], world["acme"]
-    op.headers["X-PBX-Tenant"] = str(acme["id"])
-    op.cookies.set("pbx_tenant", str(acme["id"]))
-    r = op.post("/api/billing/customers", json={"name": "Acme Ltd", "exts": ["201"], "markup_pct": MARKUP})
+    assert op.post("/api/pbx/tenants", json={"name": "Beta", "outbound_cid": "015558888"}).status_code == 200
+    beta = world["pbx"].get_db().execute("SELECT id FROM tenants WHERE name = 'Beta'").fetchone()["id"]
+    accounts = {c["tenant_id"]: c["id"] for c in op.get("/api/billing/customers").json()["customers"]}
+    r = op.put(f"/api/billing/customers/{accounts[acme['id']]}", json={"name": "Acme Ltd", "markup_pct": MARKUP})
     assert r.status_code == 200, r.text
-    op.headers["X-PBX-Tenant"] = "1"
-    op.cookies.set("pbx_tenant", "1")
-    op.post("/api/billing/customers", json={"name": "Main Co", "exts": ["201"]})
+    op.put(f"/api/billing/customers/{accounts[beta]}", json={"name": "Beta Co"})
     assert op.put("/api/billing/statement-settings", json={"business_name": "GW Phones"}).status_code == 200
     now = billing.datetime.now(billing.LOCAL_TZ).strftime("%Y-%m")
     conn = billing.get_db()
@@ -41,8 +40,9 @@ def bill(world):
                      (f"u{n}", start, ext, number, status, COST, COST if status != "unrated" else None, tenant))
     for month in (now, PAST):
         call(acme["id"], "201", month)
-        call(acme["id"], "202", month)  # no customer: "not priced"
-        call(1, "201", month, number="35319999999")  # the main tenant's
+        call(acme["id"], "202", month)
+        call(1, "201", month, number="35319999999")  # the main tenant's: never billed
+        call(beta, "201", month, number="35318888888")  # another tenant's
     call(acme["id"], "201", now, status="unrated")
     conn.commit()
     return now, conn
@@ -73,7 +73,8 @@ def test_month_so_far_prices_only(world, bill):
     assert m["month"] == now and m["month_open"] and [c["customer"] for c in m["customers"]] == ["Acme Ltd"]
     c = m["customers"][0]
     price = round(COST * 1.375 / 1_000_000, 2)
-    assert c["calls"]["count"] == 1 and c["total"] == f"{price:.2f}" and c["not_priced"] == 1
+    price = round(2 * COST * 1.375 / 1_000_000, 2)
+    assert c["calls"]["count"] == 2 and c["total"] == f"{price:.2f}" and c["not_priced"] == 1
     assert c["by_destination"][0]["destination"] == "Ireland Mobile"
 
 
@@ -83,10 +84,11 @@ def test_calls_are_the_tenants_with_its_price(world, bill):
     calls = a.get("/api/billing/calls").json()["calls"]
     assert {c["ext"] for c in calls} == {"201", "202"}  # not the main tenant's
     assert all("35319999999" not in c["number"] for c in calls)
-    by_ext = {c["ext"]: c for c in calls if c["state"] != "not priced" or c["ext"] == "202"}
-    assert sum(c["ext"] == "201" and c["state"] == "not priced" for c in calls) == 1  # the unrated one
-    assert by_ext["201"]["amount"] == f"{COST * 1.375 / 1_000_000:.3f}" and by_ext["201"]["state"] == "estimate"
-    assert by_ext["202"]["amount"] is None and by_ext["202"]["state"] == "not priced"
+    priced = [c for c in calls if c["state"] == "estimate"]
+    assert {c["ext"] for c in priced} == {"201", "202"}  # every extension of the tenant is its account's
+    assert all(c["amount"] == f"{COST * 1.375 / 1_000_000:.3f}" for c in priced)
+    assert sum(c["state"] == "not priced" and c["amount"] is None for c in calls) == 1  # the unrated one
+    assert all("35318888888" not in c["number"] for c in calls)
     only = a.get("/api/billing/calls?ext=202").json()["calls"]
     assert {c["ext"] for c in only} == {"202"}
     assert a.get("/api/billing/calls?month=nope").status_code == 400
@@ -103,7 +105,8 @@ def test_statements_and_pdf_only_its_own(world, bill):
     assert [s["customer"] for s in listed] == ["Acme Ltd"] and listed[0]["month"] == PAST
     pdf = a.get(f"/api/billing/statements/{issued['Acme Ltd']}/pdf")
     assert pdf.status_code == 200 and pdf.content.startswith(b"%PDF") and pdf.headers["cache-control"] == "no-store"
-    assert a.get(f"/api/billing/statements/{issued['Main Co']}/pdf").status_code == 404  # another tenant's
+    assert "Main" not in " ".join(issued)  # the main tenant is never billed
+    assert a.get(f"/api/billing/statements/{issued['Beta Co']}/pdf").status_code == 404  # another tenant's
     # cancelled: gone
     op.post(f"/api/billing/statements/{issued['Acme Ltd']}/cancel")
     assert a.get("/api/billing/statements").json()["statements"] == []
@@ -134,7 +137,8 @@ def test_no_cost_markup_rate_or_trunk_anywhere(world, bill):
         assert r.status_code == 200, path
         assert keys(r.json()) <= allowed, (path, keys(r.json()) - allowed)
         text = r.text
-        for leak in ("0.123457", "123457", "98765", "0.098765", MARKUP, "voxbeam", "secret-trunk", "USD", "35319999999"):
+        for leak in ("0.123457", "123457", "98765", "0.098765", MARKUP, "voxbeam", "secret-trunk", "USD", "35319999999",
+                     "35318888888", "Beta"):
             assert leak not in text, (path, leak)
 
 

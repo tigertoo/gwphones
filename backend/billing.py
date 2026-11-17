@@ -24,10 +24,15 @@ never floats. A call is one of:
                failed, congestion): not billable either
 Calls on an issued statement (statement_id, stage 2) are never re-priced.
 
-Customers are groups of extensions. A customer pays your cost plus a
-markup (the default, or their own), for calls and for the phone numbers
-(DDIs) assigned to them, which have a monthly cost (or a fixed price).
-Calls from extensions no customer has are shown as "Not assigned".
+A tenant is a customer: each tenant (but the main one, the operator's
+own, which is never billed) has exactly one billing account, a row in
+customers made with the tenant (ensure_tenant_customers), whose name,
+statement email, markup and notes are edited in the console. All the
+tenant's calls, the phone numbers (DDIs) given to it and its add-ons go
+on its one monthly statement. A customer pays your cost plus a markup
+(the default, or their own), for calls and numbers, which have a monthly
+cost (or a fixed price). The main tenant's calls are shown as "Not billed
+(main tenant)".
 """
 
 import csv
@@ -138,6 +143,8 @@ def get_db() -> sqlite3.Connection:
         except sqlite3.OperationalError:
             pass  # already there
     _key_customer_exts(conn)
+    _one_customer_per_tenant(conn)
+    _one_per_tenant_index(conn)
     if fresh:
         os.chmod(BILLING_DB, 0o600)
     if not _state(conn, "failed_status"):
@@ -180,6 +187,53 @@ def _key_customer_exts(conn):
     except Exception:
         conn.rollback()
         raise
+
+
+def _one_customer_per_tenant(conn):
+    """One-off (2026-11-17): billing customers were groups of extensions,
+    made before tenants. Now a tenant is the customer: the main tenant's
+    customers (test data) go, with their extension lists and numbers; a
+    tenant with more than one keeps its first, which takes the others'
+    numbers. Issued statements stay (they keep their own copy)."""
+    if _state(conn, "one_customer_per_tenant"):
+        return
+    gone = [r["id"] for r in conn.execute("SELECT id FROM customers WHERE tenant_id = ?", (MAIN_TENANT,))]
+    for tid in [r["tenant_id"] for r in conn.execute(
+            "SELECT tenant_id FROM customers WHERE tenant_id != ? GROUP BY tenant_id HAVING COUNT(*) > 1", (MAIN_TENANT,))]:
+        ids = [r["id"] for r in conn.execute("SELECT id FROM customers WHERE tenant_id = ? ORDER BY id", (tid,))]
+        conn.execute(f"UPDATE ddis SET customer_id = ? WHERE customer_id IN ({','.join('?' * (len(ids) - 1))})",
+                     (ids[0], *ids[1:]))
+        gone += ids[1:]
+    if gone:
+        marks = ",".join("?" * len(gone))
+        conn.execute(f"DELETE FROM ddis WHERE customer_id IN ({marks})", gone)
+        conn.execute(f"DELETE FROM customers WHERE id IN ({marks})", gone)
+    conn.execute("DELETE FROM customer_exts")  # no longer used: a tenant's calls are all its customer's
+    _set_state(conn, "one_customer_per_tenant", "1")
+    conn.commit()
+    if gone:
+        changes_log.info(f"Billing: one customer per tenant: removed customers {gone} (the main tenant's, or extras)")
+
+
+def _one_per_tenant_index(conn):
+    conn.execute(f"CREATE UNIQUE INDEX IF NOT EXISTS customers_one_per_tenant ON customers (tenant_id) "
+                 f"WHERE tenant_id != {int(MAIN_TENANT)}")
+
+
+def ensure_tenant_customers(conn) -> Dict[int, int]:
+    """Every tenant but the main one has its billing account (named after
+    it, to start with). Returns tenant id -> customer id."""
+    have = {r["tenant_id"]: r["id"] for r in conn.execute(
+        "SELECT tenant_id, MIN(id) AS id FROM customers WHERE tenant_id != ? GROUP BY tenant_id", (MAIN_TENANT,))}
+    with get_pbx_db() as pconn:
+        tenants = pconn.execute("SELECT id, name FROM tenants WHERE id != ?", (MAIN_TENANT,)).fetchall()
+    for t in tenants:
+        if t["id"] not in have:
+            if conn.execute("INSERT OR IGNORE INTO customers (name, created_at, tenant_id) VALUES (?, ?, ?)",
+                            (t["name"], _now(), t["id"])).rowcount:
+                changes_log.info(f"Billing: account made for tenant {t['id']} ({t['name']})")
+            have[t["id"]] = conn.execute("SELECT id FROM customers WHERE tenant_id = ?", (t["id"],)).fetchone()["id"]
+    return have
 
 
 def _state(conn, key, default=""):
@@ -511,6 +565,9 @@ def billing_pass():
     import_cdr()
     rate_calls()
     warm_fx()
+    with _lock, get_db() as conn:
+        ensure_tenant_customers(conn)
+        conn.commit()
     mark_addons()
 
 
@@ -545,13 +602,12 @@ def mark_addons(month: Optional[str] = None):
         conn.commit()
 
 
-def addon_customers(customers: Dict[int, dict]) -> Dict[int, int]:
-    """Per tenant, the customer its add-ons go to: the one marked to bill
-    them, else its first customer. A tenant with no customer has none
-    (its add-ons show under "Not assigned", with a warning)."""
+def tenant_customers(customers: Dict[int, dict]) -> Dict[int, int]:
+    """Per tenant, its billing account (the main tenant has none)."""
     out = {}
-    for c in sorted(customers.values(), key=lambda c: (not c.get("bills_addons"), c["id"])):
-        out.setdefault(c["tenant_id"], c["id"])
+    for c in sorted(customers.values(), key=lambda c: c["id"]):
+        if c["tenant_id"] != MAIN_TENANT:
+            out.setdefault(c["tenant_id"], c["id"])
     return out
 
 
@@ -1080,8 +1136,8 @@ class CustomerRequest(BaseModel):
     email: str = ""
     markup_pct: Optional[str] = None  # empty = the default
     notes: str = ""
-    exts: List[str] = []
-    bills_addons: bool = False  # its tenant's add-ons (video) go on its statement
+    exts: List[str] = []  # no longer used: a tenant's calls are all its account's
+    bills_addons: bool = False  # no longer used
 
 
 def _clean_customer(conn, req: CustomerRequest, customer_id: Optional[int] = None) -> dict:
@@ -1091,101 +1147,56 @@ def _clean_customer(conn, req: CustomerRequest, customer_id: Optional[int] = Non
     email = req.email.strip()
     if email and not EMAIL_RE.match(email):
         raise HTTPException(400, "That doesn't look like an email address.")
-    exts = sorted(set(e.strip() for e in req.exts if e.strip()))
-    tenant = _customer_tenant(conn, customer_id)
-    for e in exts:
-        taken = conn.execute("SELECT c.name FROM customer_exts x JOIN customers c ON c.id = x.customer_id "
-                             "WHERE x.ext = ? AND x.tenant_id = ? AND x.customer_id != ?",
-                             (e, tenant, customer_id or 0)).fetchone()
-        if taken:
-            raise HTTPException(409, f"Extension {e} already belongs to {taken['name']}.")
     return {"name": name, "email": email, "markup_pct": _pct(req.markup_pct, "Markup"),
-            "notes": req.notes.strip()[:500], "exts": exts, "tenant_id": tenant, "bills_addons": int(req.bills_addons)}
-
-
-def _customer_tenant(conn, customer_id: Optional[int]) -> int:
-    """A customer's tenant: an existing one keeps its own, a new one is the
-    current tenant's (one bill per tenant)."""
-    if customer_id:
-        r = conn.execute("SELECT tenant_id FROM customers WHERE id = ?", (customer_id,)).fetchone()
-        if r:
-            return r["tenant_id"]
-    return current_tenant()
+            "notes": req.notes.strip()[:500]}
 
 
 @router.get("/customers")
 def api_customers():
-    with get_db() as conn:
-        exts = {}
-        for r in conn.execute("SELECT * FROM customer_exts ORDER BY ext"):
-            exts.setdefault(r["customer_id"], []).append(r["ext"])
+    """Every tenant's billing account (the main tenant has none)."""
+    with _lock, get_db() as conn:
+        ensure_tenant_customers(conn)
+        conn.commit()
         ddis = {}
         for r in conn.execute("SELECT * FROM ddis ORDER BY did"):
             ddis.setdefault(r["customer_id"], []).append(r["did"])
-        customers = [{**dict(c), "exts": exts.get(c["id"], []), "ddis": ddis.get(c["id"], [])}
-                     for c in conn.execute("SELECT * FROM customers ORDER BY name COLLATE NOCASE")]
+        rows = conn.execute("SELECT * FROM customers WHERE tenant_id != ? ORDER BY name COLLATE NOCASE", (MAIN_TENANT,)).fetchall()
         ddi_rows = [{**dict(d), "monthly_cost": from_micro(d["monthly_cost_micro"], 2),
                      "monthly_price": from_micro(d["monthly_price_micro"], 2)}
                     for d in conn.execute("SELECT * FROM ddis ORDER BY did")]
         markup = str(default_markup(conn))
-    tid = current_tenant()
     with get_pbx_db() as pconn:
-        extensions = [{"ext": r["ext"], "name": r["name"]} for r in pconn.execute(
-            "SELECT ext, name FROM extensions WHERE tenant_id = ? ORDER BY ext", (tid,))]
-        inbound = [{"did": r["did"], "label": r["label"]} for r in pconn.execute(
-            "SELECT did, label FROM inbound_routes WHERE tenant_id = ? ORDER BY did", (tid,))]
-    return {"customers": customers, "ddis": ddi_rows, "default_markup_pct": markup,
-            "extensions": extensions, "inbound_numbers": inbound}
+        tenants = {r["id"]: {"code": r["code"], "name": r["name"]} for r in pconn.execute("SELECT id, code, name FROM tenants")}
+        inbound = [{"did": r["did"], "label": r["label"], "tenant_id": r["tenant_id"]}
+                   for r in pconn.execute("SELECT did, label, tenant_id FROM inbound_routes ORDER BY did")]
+    customers = [{**{k: c[k] for k in ("id", "name", "email", "markup_pct", "notes", "created_at", "tenant_id")},
+                  "tenant": tenants.get(c["tenant_id"], {"code": "?", "name": "(removed tenant)"}),
+                  "ddis": ddis.get(c["id"], [])} for c in rows]
+    return {"customers": customers, "ddis": ddi_rows, "default_markup_pct": markup, "inbound_numbers": inbound}
 
 
 @router.post("/customers")
 def api_create_customer(req: CustomerRequest):
-    with _lock, get_db() as conn:
-        c = _clean_customer(conn, req)
-        if c["bills_addons"]:  # one per tenant
-            conn.execute("UPDATE customers SET bills_addons = 0 WHERE tenant_id = ?", (c["tenant_id"],))
-        cur = conn.execute("INSERT INTO customers (name, email, markup_pct, notes, created_at, tenant_id, bills_addons) "
-                           "VALUES (?, ?, ?, ?, ?, ?, ?)",
-                           (c["name"], c["email"], c["markup_pct"], c["notes"], _now(), c["tenant_id"], c["bills_addons"]))
-        conn.executemany("INSERT INTO customer_exts (ext, customer_id, tenant_id) VALUES (?, ?, ?)",
-                         [(e, cur.lastrowid, c["tenant_id"]) for e in c["exts"]])
-        conn.commit()
-    changes_log.info(f"Billing: added customer {c['name']} with extensions {c['exts']}, markup {c['markup_pct'] or 'default'}")
-    return {"ok": True, "id": cur.lastrowid, "messages": [f"{c['name']} added."]}
+    raise HTTPException(400, "A tenant's billing account is made with the tenant: add a tenant instead.")
 
 
 @router.put("/customers/{customer_id}")
 def api_update_customer(customer_id: int, req: CustomerRequest):
+    """A tenant's billing details: name on statements, email, markup, notes."""
     with _lock, get_db() as conn:
         if not conn.execute("SELECT 1 FROM customers WHERE id = ?", (customer_id,)).fetchone():
             raise HTTPException(404, "Customer not found.")
         c = _clean_customer(conn, req, customer_id)
-        if c["bills_addons"]:  # one per tenant
-            conn.execute("UPDATE customers SET bills_addons = 0 WHERE tenant_id = ? AND id != ?", (c["tenant_id"], customer_id))
-        conn.execute("UPDATE customers SET name = ?, email = ?, markup_pct = ?, notes = ?, bills_addons = ? WHERE id = ?",
-                     (c["name"], c["email"], c["markup_pct"], c["notes"], c["bills_addons"], customer_id))
-        conn.execute("DELETE FROM customer_exts WHERE customer_id = ?", (customer_id,))
-        conn.executemany("INSERT INTO customer_exts (ext, customer_id, tenant_id) VALUES (?, ?, ?)",
-                         [(e, customer_id, c["tenant_id"]) for e in c["exts"]])
+        conn.execute("UPDATE customers SET name = ?, email = ?, markup_pct = ?, notes = ? WHERE id = ?",
+                     (c["name"], c["email"], c["markup_pct"], c["notes"], customer_id))
         conn.commit()
-    changes_log.info(f"Billing: updated customer {customer_id} ({c['name']}): extensions {c['exts']}, "
-                     f"markup {c['markup_pct'] or 'default'}")
+    changes_log.info(f"Billing: updated account {customer_id} ({c['name']}): markup {c['markup_pct'] or 'default'}")
     return {"ok": True, "messages": [f"{c['name']} saved."]}
 
 
 @router.delete("/customers/{customer_id}")
 def api_delete_customer(customer_id: int):
-    with _lock, get_db() as conn:
-        c = conn.execute("SELECT * FROM customers WHERE id = ?", (customer_id,)).fetchone()
-        if not c:
-            raise HTTPException(404, "Customer not found.")
-        if conn.execute("SELECT 1 FROM ddis WHERE customer_id = ?", (customer_id,)).fetchone():
-            raise HTTPException(409, f"{c['name']} still has phone numbers. Remove or move them first.")
-        conn.execute("DELETE FROM customer_exts WHERE customer_id = ?", (customer_id,))
-        conn.execute("DELETE FROM customers WHERE id = ?", (customer_id,))
-        conn.commit()
-    changes_log.info(f"Billing: deleted customer {customer_id} ({c['name']})")
-    return {"ok": True, "messages": [f"{c['name']} deleted. Their extensions' calls now show as not assigned."]}
+    raise HTTPException(400, "A tenant's billing account goes with the tenant.")
 
 
 class MarkupRequest(BaseModel):
@@ -1250,19 +1261,21 @@ def api_delete_ddi(did: str):
 # What each customer owes for a month
 # ---------------------------------------------------------------------------
 
-UNASSIGNED = {"id": None, "name": "Not assigned", "email": "", "markup_pct": None}
+UNASSIGNED = {"id": None, "name": "Not billed (main tenant)", "email": "", "markup_pct": None}
 
 
 def month_statement(conn, month: str, customer_id: Optional[int] = None, only: bool = False) -> List[dict]:
-    """Per customer (and "Not assigned"): their priced outbound calls and
-    their numbers for the month, with cost, price and margin. With `only`,
-    just `customer_id` (None for "Not assigned")."""
+    """Per customer (each tenant's account, and the main tenant's calls,
+    never billed): their priced outbound calls, numbers and add-ons for the
+    month, with cost, price and margin. With `only`, just `customer_id`
+    (None for the main tenant's)."""
     if not MONTH_RE.match(month):
         raise HTTPException(400, "Month must look like 2026-10.")
     start, end = _month_range(month)
     markup0 = default_markup(conn)
+    ensure_tenant_customers(conn)
     customers = {c["id"]: dict(c) for c in conn.execute("SELECT * FROM customers")}
-    owner = {(r["tenant_id"], r["ext"]): r["customer_id"] for r in conn.execute("SELECT * FROM customer_exts")}
+    payer = tenant_customers(customers)
     out = {}
 
     def entry(cid):
@@ -1276,7 +1289,7 @@ def month_statement(conn, month: str, customer_id: Optional[int] = None, only: b
 
     for c in conn.execute("SELECT * FROM calls WHERE direction = 'out' AND start_utc >= ? AND start_utc < ? "
                           "AND status NOT IN ('free', 'failed') ORDER BY start_utc", (start, end)):
-        e = entry(owner.get((c["tenant_id"], c["ext"])))
+        e = entry(payer.get(c["tenant_id"]))
         e["counts"][c["status"]] += 1
         line = _call_json(c)
         if c["statement_id"] is not None and c["price_micro"] is not None:
@@ -1298,7 +1311,6 @@ def month_statement(conn, month: str, customer_id: Optional[int] = None, only: b
                           "cost_eur": from_micro(d["monthly_cost_micro"], 6),
                           "price_eur": from_micro(price, 6), "fixed_price": d["monthly_price_micro"] is not None,
                           "_cost": d["monthly_cost_micro"], "_price": price})
-    payer = addon_customers(customers)
     for a in conn.execute("SELECT * FROM addon_months WHERE month = ? ORDER BY tenant_id, addon", (month,)):
         e = entry(payer.get(a["tenant_id"]))
         e["addons"].append({"tenant_id": a["tenant_id"], "addon": a["addon"], "label": ADDONS.get(a["addon"], a["addon"]),

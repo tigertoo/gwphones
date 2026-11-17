@@ -3,9 +3,9 @@ statements and their PDFs, this month so far, and its call history.
 
 Prices only, ever. Every answer is built from an allowlist: no cost,
 markup, margin, rate, trunk, route, rate sheet or Asterisk detail, and
-nothing from "Not assigned" (it mixes every tenant's calls). A tenant's
-statements are those of its customers (customers.tenant_id, which never
-changes once made); cancelled ones aren't shown.
+nothing of another tenant's or the main tenant's. A tenant is a customer:
+its statements are its billing account's (customers.tenant_id, made with
+the tenant and never moved); cancelled ones aren't shown.
 
 "This month so far" is the draft a statement would be (statements._snapshot,
 the same rounding), per customer, as of the last billing pass (every
@@ -88,7 +88,7 @@ def _estimate(tenant: int, month: str) -> dict:
         out = []
         for e in billing.month_statement(conn, month):
             cid = e["customer"]["id"]
-            if cid not in mine:  # another tenant's, or "Not assigned"
+            if cid not in mine:  # another tenant's, or the main tenant's
                 continue
             unbilled = [c for c in e["calls"] if c["statement_id"] is None]
             priced = [c for c in unbilled if c["status"] in ("rated", "provisional") and c["price_eur"] is not None]

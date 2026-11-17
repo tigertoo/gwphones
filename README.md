@@ -201,16 +201,16 @@ through this API as the portal caller above. Being built (phase 4).
 - **Billing (admins only, `gwportal/billing.py`, gwphones'
   `tenant_billing.py` under `/api/pbx/billing/`):** the tenant's issued
   statements (cancelled ones hidden) with their PDFs (each download
-  audited); this month so far, per customer, built the way a draft
+  audited); this month so far, built the way a draft
   statement is (same rounding), as of the last billing pass, with calls
   not priced yet counted, not priced; and its calls out that connected,
   by month and extension (up to 2000), each at its statement price, else
-  an estimate with its customer's markup, else "—" (not priced yet, or an
-  extension no customer has). Prices only: both sides build every answer
+  an estimate with its markup, else "—" (not priced yet). Prices only:
+  both sides build every answer
   from an allowlist, so no cost, markup, margin, rate, trunk, route or
-  rate sheet ever reaches it, nor anything of another tenant or "Not
-  assigned"; a test looks for a distinctive cost and markup in every
-  answer. A tenant's statements are its customers'.
+  rate sheet ever reaches it, nor anything of another tenant or the main
+  tenant; a test looks for a distinctive cost and markup in every
+  answer. A tenant's statements are its billing account's.
 - **Limits:** 20 saves a minute per tenant (each one reloads Asterisk for
   the whole server); Status and forwarding cached 5 seconds per tenant.
 
@@ -832,15 +832,22 @@ prices each answered outbound call:
   writes them here) and shown and grouped into months in `PBX_TIMEZONE`
   (default Europe/Dublin).
 
-**Customers** group extensions; each pays your cost plus a markup (the
-default, or their own) for their priced calls and for the **phone
-numbers** (DDIs) assigned to them, which have a monthly cost ex VAT (or a
-fixed monthly price) and the months they're active. **What each customer
-owes** shows, per month, calls, minutes, cost, price and margin, flags a
-customer with calls not priced yet (left out of the totals until they
-are), and downloads as CSV, overall or itemised per customer. Calls from
-extensions no customer has are under "Not assigned". Calls follow an
-extension's current customer until they're on an issued statement.
+**A tenant is a customer.** Each tenant but the main one (the
+operator's own, never billed) has exactly one billing account, made with
+the tenant (Billing, Customers (tenants): name on its statements, email,
+markup, notes); there's no adding or deleting one by hand. It pays your
+cost plus a markup (the default, or its own) for every priced call of
+the tenant's, for the **phone numbers** (DDIs) given to it, which have a
+monthly cost ex VAT (or a fixed monthly price) and the months they're
+active, and for its add-ons. **What each customer owes** shows, per
+month, calls, minutes, cost, price and margin, flags a tenant with calls
+not priced yet (left out of the totals until they are), and downloads as
+CSV, overall or itemised. The main tenant's calls show as "Not billed
+(main tenant)", for information. Until 17 November 2026 customers were
+groups of extensions, made before tenants; that one-off change removed
+the main tenant's (test data) with their numbers, and kept each other
+tenant's first. Issued statements keep their own copy, so they still
+open.
 
 **Statements** (`backend/statements.py`): once a month has ended, issue a
 statement for one customer or all of them. Issuing locks it: its calls
@@ -865,10 +872,8 @@ charged"); the totals keep a VAT line, zero for now.
 for every month it was on at any point. Each billing pass, and each change
 to a tenant, marks the current month in `addon_months` at the price then;
 a month on a statement keeps its price, and cancelling the statement
-releases it. The charge goes to the customer marked "Bills its tenant's
-add-ons", else the tenant's first customer; a tenant with no customer
-shows it under "Not assigned" with a warning, and it isn't billed. The
-main tenant (the operator's own) is never charged. Statements show an
+releases it. It goes on the tenant's own statement. The main tenant (the
+operator's own) is never charged. Statements show an
 Add-ons line and section; ones issued before add-ons still render.
 
 Rate sheets are large, so the Tailscale nginx site needs a bigger upload
