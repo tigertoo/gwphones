@@ -214,10 +214,13 @@ systemctl daemon-reload && nginx -t && systemctl reload nginx && systemctl start
 That checkout is detached: before the next normal pull,
 `git -C /opt/admin-dashboard checkout main`.
 
-## A week later (step 6)
+## A week later (step 6): done 17 November 2026
 
-Remove `/root/split-rollback`, `/root/gwcheck`, the old
-`/var/lib/admin-dashboard/ideas.db`, and the `PBX_*`, `MS_GRAPH_*` and
-`EMAIL_FROM_ADDRESS` lines from `/opt/admin-dashboard/backend/.env`;
-delete the `desk-phones` branch from admin-dashboard (it lives on in
-gwphones); update the notes.
+Removed `/root/split-rollback`, `/root/gwcheck`, the old
+`/var/lib/admin-dashboard/ideas.db` (the dashboard's 8 ideas are in
+`/var/lib/vps-dashboard`), and the `PBX_*`, `MS_GRAPH_*` and
+`EMAIL_FROM_ADDRESS` lines from `/opt/admin-dashboard/backend/.env` (the
+dashboard answered 200 after); deleted admin-dashboard's `desk-phones`
+(829199b, its work is in gwphones) and `phone-split` (e7b52aa, merged)
+branches. The rollback above no longer works: the nightly backups are the
+way back now.
