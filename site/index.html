@@ -1,0 +1,109 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>GW Phones</title>
+<meta name="description" content="GW Phones: a hosted business phone system with Irish numbers, desk phones and apps that set themselves up.">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%230b5cad'/%3E%3Cpath d='M11 8c1 0 1.6.5 2 1.4l1.2 2.8c.3.8.1 1.6-.5 2.1l-1.1.9c.9 1.9 2.3 3.3 4.2 4.2l.9-1.1c.5-.6 1.3-.8 2.1-.5l2.8 1.2c.9.4 1.4 1 1.4 2v2.4c0 1.4-1.2 2.6-2.6 2.5C13.6 25.4 6.6 18.4 6.1 10.6 6 9.2 7.2 8 8.6 8z' fill='%23fff'/%3E%3C/svg%3E">
+<style>
+  :root {
+    --bg: #f6f8fb; --surface: #ffffff; --text: #16202c; --muted: #566273; --line: #dde3ea;
+    --accent: #0b5cad; --accent-soft: #e6f0fa; --ok: #1f7a4d;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --bg: #0f141a; --surface: #161d25; --text: #e6ebf1; --muted: #9aa7b6; --line: #27313c;
+      --accent: #5aa2ec; --accent-soft: #15283c; --ok: #5fc792;
+    }
+  }
+  :root[data-theme="dark"] {
+    --bg: #0f141a; --surface: #161d25; --text: #e6ebf1; --muted: #9aa7b6; --line: #27313c;
+    --accent: #5aa2ec; --accent-soft: #15283c; --ok: #5fc792;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--text);
+    font: 16px/1.55 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+  }
+  .wrap { max-width: 980px; margin: 0 auto; padding: 0 16px; }
+  header { border-bottom: 1px solid var(--line); background: var(--surface); }
+  header .wrap { display: flex; align-items: center; justify-content: space-between; gap: 12px; min-height: 64px; }
+  .brand { display: flex; align-items: center; gap: 10px; font-weight: 700; font-size: 1.15rem; letter-spacing: -0.01em; }
+  .brand svg { flex: none; }
+  .signin { color: var(--accent); text-decoration: none; font-weight: 600; white-space: nowrap; }
+  .signin:hover { text-decoration: underline; }
+  .hero { padding: 56px 0 40px; }
+  .hero h1 { font-size: clamp(1.9rem, 4.5vw, 2.8rem); line-height: 1.15; margin: 0 0 14px; letter-spacing: -0.02em; max-width: 18ch; }
+  .hero p { font-size: 1.12rem; color: var(--muted); margin: 0 0 24px; max-width: 60ch; }
+  .status { display: inline-flex; align-items: center; gap: 8px; padding: 6px 12px; border-radius: 999px;
+    background: var(--accent-soft); color: var(--text); font-size: .92rem; }
+  .status::before { content: ""; width: 8px; height: 8px; border-radius: 50%; background: var(--ok); }
+  .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 14px; margin: 8px 0 44px; }
+  .card { background: var(--surface); border: 1px solid var(--line); border-radius: 12px; padding: 18px 18px 16px; }
+  .card h2 { font-size: 1.02rem; margin: 0 0 6px; }
+  .card p { margin: 0; color: var(--muted); font-size: .96rem; }
+  h3.section { font-size: 1.2rem; margin: 0 0 12px; }
+  .contact { background: var(--surface); border: 1px solid var(--line); border-radius: 12px; padding: 22px; margin-bottom: 48px; }
+  .contact p { margin: 0 0 6px; color: var(--muted); }
+  .contact a { color: var(--accent); font-weight: 600; font-size: 1.08rem; text-decoration: none; }
+  .contact a:hover { text-decoration: underline; }
+  footer { border-top: 1px solid var(--line); color: var(--muted); font-size: .88rem; }
+  footer .wrap { padding: 18px 16px 28px; display: flex; flex-wrap: wrap; gap: 6px 18px; justify-content: space-between; }
+</style>
+</head>
+<body>
+<header>
+  <div class="wrap">
+    <div class="brand">
+      <svg width="28" height="28" viewBox="0 0 32 32" aria-hidden="true"><rect width="32" height="32" rx="7" fill="#0b5cad"/><path d="M11 8c1 0 1.6.5 2 1.4l1.2 2.8c.3.8.1 1.6-.5 2.1l-1.1.9c.9 1.9 2.3 3.3 4.2 4.2l.9-1.1c.5-.6 1.3-.8 2.1-.5l2.8 1.2c.9.4 1.4 1 1.4 2v2.4c0 1.4-1.2 2.6-2.6 2.5C13.6 25.4 6.6 18.4 6.1 10.6 6 9.2 7.2 8 8.6 8z" fill="#fff"/></svg>
+      GW Phones
+    </div>
+    <a class="signin" href="https://portal.amapforyourmoney.com/">Customer sign-in</a>
+  </div>
+</header>
+
+<main class="wrap">
+  <section class="hero">
+    <h1>A hosted business phone system</h1>
+    <p>For businesses in Ireland, with Irish numbers. Each business gets its own phone system: extensions, desk
+      phones and mobile apps that set themselves up, call routing it manages itself, and one clear monthly statement.</p>
+    <span class="status">The platform is live</span>
+  </section>
+
+  <h3 class="section">What it does</h3>
+  <div class="grid">
+    <div class="card"><h2>Desk phones that set themselves up</h2>
+      <p>Yealink phones fetch their settings from the platform over HTTPS, each with its own credentials: line keys,
+        busy lamps for colleagues, voicemail and firmware updates included.</p></div>
+    <div class="card"><h2>Phone apps</h2>
+      <p>Extensions on iPhone and iPad apps, set up by scanning a one-time QR code or tapping an emailed link, with
+        push notifications for incoming calls.</p></div>
+    <div class="card"><h2>Calls routed your way</h2>
+      <p>Ring groups, voice menus with your own greetings, business hours and holidays, call park, pickup and
+        forwarding, managed by each business from its own portal.</p></div>
+    <div class="card"><h2>Voicemail and recording</h2>
+      <p>Voicemail to email with the recording attached, and call recording with the notice callers hear.</p></div>
+    <div class="card"><h2>Calls from the browser</h2>
+      <p>Call links for websites and email signatures: visitors call the business from their browser, with no app or
+        account, and with video as an option.</p></div>
+    <div class="card"><h2>Secure by design</h2>
+      <p>Encrypted calls and signalling (TLS and SRTP), each business walled off from the others, and a portal
+        protected by two-factor codes or passkeys.</p></div>
+  </div>
+
+  <section class="contact">
+    <h3 class="section">Get in touch</h3>
+    <p>For a phone system for your business, or about provisioning and partnerships:</p>
+    <a href="mailto:info@amapforyourmoney.com">info@amapforyourmoney.com</a>
+  </section>
+</main>
+
+<footer>
+  <div class="wrap">
+    <span>&copy; 2026 GW Phones</span>
+    <span>pbx.amapforyourmoney.com</span>
+  </div>
+</footer>
+</body>
+</html>

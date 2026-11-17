@@ -1021,6 +1021,26 @@ the admin password shown under RPS details (the config sets it), not
 a 401 and "refused … wrong credentials" means the username or password is
 wrong; 10 wrong tries from one IP give a 429 for 10 minutes.
 
+**Front page** (`site/index.html`): https://pbx.amapforyourmoney.com/
+shows a static GW Phones page (what the platform does, a link to the
+customer portal, info@amapforyourmoney.com), public proof of the service,
+e.g. for Yealink's RPS application. Self-contained: no scripts, fonts or
+images from elsewhere. The `pbx-prov` site serves it at `/` only, before
+its `location /` that returns 404:
+
+```nginx
+    location = / {
+        root /opt/gwphones/site;
+        try_files /index.html =404;
+        add_header Content-Security-Policy "default-src 'none'; style-src 'unsafe-inline'; img-src data:; base-uri 'none'; form-action 'none'; frame-ancestors 'none'" always;
+        add_header X-Content-Type-Options nosniff always;
+        add_header Referrer-Policy no-referrer always;
+    }
+```
+
+A `git pull` updates it; no build. The tenants' `*.sip` names share the
+site, so they show it too.
+
 **Yealink RPS** (`backend/rps.py`): with an RPS Enterprise account's
 access key in `.env`,
 
