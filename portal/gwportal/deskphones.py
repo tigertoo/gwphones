@@ -23,7 +23,7 @@ from .routing import admin
 router = APIRouter(prefix="/api", dependencies=[Depends(admin)])
 
 PHONE_KEYS = ("mac", "mac_pretty", "ext", "model", "username", "password", "admin_password", "created_at",
-              "last_fetch_at", "last_fetch_agent", "firmware", "upgrade_to", "upgrade_stuck")
+              "last_fetch_at", "last_fetch_agent", "firmware", "upgrade_to", "upgrade_stuck", "rps_status", "rps_detail")
 
 
 def _mac(value: str) -> str:
@@ -50,11 +50,19 @@ class PhoneChange(BaseModel):
     model: str = ""
 
 
+def _phone(p: dict) -> dict:
+    out = {k: p.get(k) for k in PHONE_KEYS}
+    if out["rps_status"] == "failed":  # its detail can name our settings: a plain message instead
+        out["rps_detail"] = "it couldn't be registered just now. Try again later."
+    return out
+
+
 @router.get("/desk-phones")
 def api_desk_phones(me: Signed = Depends(admin)):
     r = _phones(me)
-    return {"phones": [{k: p.get(k) for k in PHONE_KEYS} for p in r["phones"]], "models": r["models"],
-            "server_url": r["server_url"], "ready": r["ready"], "repeat_minutes": r["repeat_minutes"]}
+    return {"phones": [_phone(p) for p in r["phones"]], "models": r["models"],
+            "server_url": r["server_url"], "ready": r["ready"], "repeat_minutes": r["repeat_minutes"],
+            "rps": bool(r.get("rps"))}
 
 
 @router.post("/desk-phones")
@@ -63,7 +71,8 @@ def api_new_desk_phone(req: NewPhone, request: Request, me: Signed = Depends(adm
     _saving(me.user)
     r = gw.call(me.user, "POST", "/desk-phones", json={"mac": mac, "ext": req.ext.strip(), "model": req.model})
     _audit(me, request, "desk phone added", f"{mac} on {req.ext.strip()}")
-    return _done(r)
+    data = r.data if isinstance(r, gw.Pending) else r
+    return _done(r, {"rps": (data.get("rps") or {}).get("status", "")})
 
 
 @router.put("/desk-phones/{mac}")
@@ -82,6 +91,15 @@ def api_desk_phone_new_password(mac: str, request: Request, me: Signed = Depends
     r = gw.call(me.user, "POST", f"/desk-phones/{mac}/new-password")
     _audit(me, request, "desk phone: new provisioning password", mac)
     return _done(r)
+
+
+@router.post("/desk-phones/{mac}/rps")
+def api_desk_phone_rps(mac: str, request: Request, me: Signed = Depends(admin)):
+    mac = _mac(mac)
+    _saving(me.user)
+    r = gw.call(me.user, "POST", f"/desk-phones/{mac}/rps")
+    _audit(me, request, "desk phone: Yealink RPS sync", mac)
+    return {"ok": True, "registered": (r.get("rps") or {}).get("status") == "registered"}
 
 
 @router.delete("/desk-phones/{mac}")

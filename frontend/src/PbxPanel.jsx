@@ -853,7 +853,7 @@ function ExtensionsSection({ config, status, send, busy, apiBase, reload }) {
 }
 
 // ---------------------------------------------------------------------------
-// Desk phones (Yealink, via RPS)
+// Desk phones (Yealink; registered in RPS automatically when it's set up)
 // ---------------------------------------------------------------------------
 
 function DeskPhonesSection({ config, send, busy, apiBase }) {
@@ -878,7 +878,7 @@ function DeskPhonesSection({ config, send, busy, apiBase }) {
     e.preventDefault();
     const mac = draft.mac.replace(/[\s:.-]/g, "").toLowerCase();
     if (await act("POST", "/desk-phones", { ...draft, ext: draft.ext || config.extensions[0]?.ext || "" },
-      "Phone added. Now add it in Yealink RPS with the details below.")) {
+      data.rps ? "Phone added (see its RPS status in the list)." : "Phone added. Set it up with the details below.")) {
       setDraft({ mac: "", ext: "", model: "" });
       setOpen(mac);
     }
@@ -893,8 +893,9 @@ function DeskPhonesSection({ config, send, busy, apiBase }) {
         <p className="pbx-hint">Set PBX_DESKPHONE_BASE_URL (or PBX_PROVISION_BASE_URL) and PBX_PUBLIC_HOST in the dashboard's .env first.</p>
       )}
       <p className="pbx-hint">
-        Add the phone here, then in Yealink RPS add its MAC with a server using the URL, username and password shown
-        for it. Out of the box (or after a factory reset) the phone sets itself up, then checks for changes every{" "}
+        {data.rps ? "Add the phone here: it's registered in Yealink RPS by itself, so out of the box (or after a factory reset) it sets itself up. "
+          : "Add the phone here, then set it up on its web page (Auto Provision) with the details shown for it, or add it in Yealink RPS (set PBX_RPS_ACCESS_KEY and PBX_RPS_ACCESS_SECRET to do that automatically). "}
+        Older models (T41P, T46G) may not be served by RPS: set those up by hand. It then checks for changes every{" "}
         {data.repeat_minutes} minutes and whenever it restarts. Each desk phone needs its own extension
         (an extension takes one device at a time). The first key is its own line; the next
         ones are busy lamps for the other extensions (lit while on a call, flashing while ringing: press to call, or to
@@ -936,7 +937,10 @@ function DeskPhonesSection({ config, send, busy, apiBase }) {
             {data.phones.flatMap((p) => {
               const rows = [
                 <tr key={p.mac}>
-                  <td><code>{p.mac_pretty}</code></td>
+                  <td><code>{p.mac_pretty}</code>
+                    {data.rps && p.rps_status === "registered" && <div className="pbx-hint">In RPS</div>}
+                    {data.rps && p.rps_status && p.rps_status !== "registered" && (
+                      <div className="pbx-warning" title={p.rps_detail}>Not in RPS: {p.rps_detail}</div>)}</td>
                   <td>{p.model || "—"}
                     {p.firmware && <div className="pbx-hint">{p.firmware}{p.upgrade_to ? ` → ${p.upgrade_to}` : ""}
                       {p.upgrade_stuck && " (stuck: left alone; check the file's version, then choose the target again)"}</div>}</td>
@@ -961,21 +965,25 @@ function DeskPhonesSection({ config, send, busy, apiBase }) {
                   </td>
                   <td className="pbx-actions">
                     <button className="ticket-action-btn" onClick={() => setOpen(open === p.mac ? null : p.mac)}>
-                      {open === p.mac ? "Hide details" : "RPS details"}
+                      {open === p.mac ? "Hide details" : "Setup details"}
                     </button>
                     <a className="ticket-action-btn" href={`${apiBase}/api/pbx/desk-phones/${p.mac}/config.cfg`}
                       target="_blank" rel="noreferrer">View config</a>
                     <button
                       className="ticket-action-btn"
                       disabled={busy}
-                      onClick={() => window.confirm(`Make a new provisioning password for ${p.mac_pretty}? The phone can't fetch changes until RPS has the new one and the phone is factory-reset.`) &&
-                        act("POST", `/desk-phones/${p.mac}/new-password`, null, "New password made. Update it in RPS, then factory-reset the phone.")}
+                      onClick={() => window.confirm(`Make a new provisioning password for ${p.mac_pretty}? The phone can't fetch changes until it has the new one${data.rps ? " (RPS is updated: factory-reset the phone)" : " (enter it on the phone)"}.`) &&
+                        act("POST", `/desk-phones/${p.mac}/new-password`, null, data.rps ? "New password made and sent to RPS: factory-reset the phone." : "New password made: enter it on the phone.")}
                     >New password</button>
+                    {data.rps && p.rps_status !== "registered" && (
+                      <button className="ticket-action-btn" disabled={busy}
+                        onClick={() => act("POST", `/desk-phones/${p.mac}/rps`, null, "Synced with RPS (see its status in the list).")}>Sync with RPS</button>
+                    )}
                     <button
                       className="ticket-action-btn idea-delete-btn"
                       disabled={busy}
                       onClick={() => window.confirm(`Remove phone ${p.mac_pretty} (extension ${p.ext} ${extName(p.ext)})? It keeps its last settings until it's reset.`) &&
-                        act("DELETE", `/desk-phones/${p.mac}`, null, `Phone ${p.mac_pretty} removed. Remove it in RPS too, and give extension ${p.ext} a new password if the phone has left your hands.`)}
+                        act("DELETE", `/desk-phones/${p.mac}`, null, `Phone ${p.mac_pretty} removed${data.rps ? " (and from RPS)" : ""}. Give extension ${p.ext} a new password if the phone has left your hands.`)}
                     >Remove</button>
                   </td>
                 </tr>,
@@ -984,15 +992,14 @@ function DeskPhonesSection({ config, send, busy, apiBase }) {
                 rows.push(
                   <tr key={`${p.mac}-rps`}>
                     <td colSpan={5} className="ticket-action-panel">
-                      <div className="ticket-action-label">In Yealink RPS, add a server with these, then add MAC {p.mac_pretty} to it:</div>
+                      <div className="ticket-action-label">On the phone's web page (Settings → Auto Provision){data.rps ? "" : ", or in Yealink RPS for MAC " + p.mac_pretty}:</div>
                       <CopyField label="Server URL" value={data.server_url} />
                       <CopyField label="Username" value={p.username} />
                       <CopyField label="Password" value={p.password} />
                       <div className="ticket-action-label">The phone's web page (Status/Settings) login once it has fetched its config (admin/admin before, and again after a factory reset):</div>
                       <CopyField label="User" value="admin" />
                       <CopyField label="Password" value={p.admin_password} />
-                      <p className="pbx-hint">To try it without RPS: on the phone's web page, Settings → Auto Provision, enter the
-                        same URL, username and password, then Auto Provision Now. A factory reset clears them, so enter them again
+                      <p className="pbx-hint">On the phone: enter the URL, username and password, Confirm, then Autoprovision Now. A factory reset clears them, so enter them again
                         after one.</p>
                     </td>
                   </tr>
@@ -1003,8 +1010,45 @@ function DeskPhonesSection({ config, send, busy, apiBase }) {
           </tbody>
         </table>
       )}
+      {data.rps && <RpsCheck apiBase={apiBase} phones={data.phones} />}
       <FirmwareSection apiBase={apiBase} />
     </section>
+  );
+}
+
+// Read-only calls to Yealink RPS: is the connection (keys, signing, host)
+// right, and what does RPS know about a MAC.
+function RpsCheck({ apiBase, phones }) {
+  const [mac, setMac] = useState(phones[0]?.mac_pretty || "");
+  const [result, setResult] = useState(null);
+  const [busy, setBusy] = useState(false);
+  const test = async () => {
+    setBusy(true);
+    const res = await fetch(`${apiBase}/api/pbx/rps/check?mac=${encodeURIComponent(mac)}`, { headers: tenantHeaders() });
+    const data = await res.json().catch(() => ({}));
+    setResult(res.ok ? data : { error: data.detail || `Error ${res.status}` });
+    setBusy(false);
+  };
+  const line = (label, r) => r && (
+    <li>{label}: {r.ok ? <code>{JSON.stringify(r.data)}</code> : <span className="pbx-warning">{r.message} ({r.error})</span>}</li>
+  );
+  return (
+    <>
+      <h3>Yealink RPS</h3>
+      <div className="idea-form-row">
+        <input className="idea-input" placeholder="MAC, e.g. 00:15:65:B0:41:47" value={mac} onChange={(e) => setMac(e.target.value)} />
+        <button className="ticket-action-btn" disabled={busy || !mac.trim()} onClick={test}>{busy ? "Testing…" : "Test RPS connection"}</button>
+        <span className="pbx-hint">Read-only: changes nothing in RPS.</span>
+      </div>
+      {result?.error && <p className="pbx-warning">{result.error}</p>}
+      {result && !result.error && (
+        <ul className="pbx-hint">
+          {line(`Is ${result.mac} in RPS (existed, and ours)`, result.mac)}
+          {line("Its registration", result.device)}
+          {line("Our server entries (tests the signing of requests with a body)", result.servers)}
+        </ul>
+      )}
+    </>
   );
 }
 

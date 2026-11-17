@@ -94,8 +94,16 @@ function PhoneItem({ p, data, exts, taken, name, onChange }) {
             : "It hasn't fetched its settings yet."}</p>
           {p.upgrade_to && !p.upgrade_stuck && <p className="small muted">Its firmware ({p.firmware}) is being updated to {p.upgrade_to}: it
             restarts by itself, in a few minutes, when it next checks.</p>}
+          {p.rps_status === "registered" && (
+            <Message kind="ok">Registered for automatic setup: plug the phone in (a new one, or after a factory reset) and
+              it sets itself up. Older models (T41P, T46G) may not support this: if it doesn&rsquo;t, set it up by hand, below.</Message>
+          )}
+          {data.rps && p.rps_status && p.rps_status !== "registered" && (
+            <Message kind="info">Automatic setup isn&rsquo;t on for this phone: {p.rps_detail} Set it up by hand, below.</Message>
+          )}
           <div className="block">
-            <strong>On the phone's web page, Settings → Auto Provision:</strong>
+            <strong>{p.rps_status === "registered" ? "To set it up by hand instead, on" : "On"} the phone's web page,
+              Settings → Auto Provision:</strong>
             <Copy label="Server URL" value={data.server_url} />
             <Copy label="User name" value={p.username} />
             <Copy label="Password" value={p.password} />
@@ -125,6 +133,13 @@ function PhoneItem({ p, data, exts, taken, name, onChange }) {
             <Button kind="secondary" onClick={() => setMode(mode === "change" ? null : "change")}>Change</Button>
             <Button kind="secondary" busy={a.busy} onClick={showConfig}>{mode === "config" ? "Hide settings" : "View settings"}</Button>
             <Button kind="secondary" busy={a.busy} onClick={newPassword}>New password</Button>
+            {data.rps && p.rps_status !== "registered" && (
+              <Button kind="secondary" busy={a.busy} onClick={async () => {
+                const r = await a.run(() => post(`/desk-phones/${p.mac}/rps`),
+                  (x) => x.registered ? "Registered for automatic setup." : "Still not registered: see the note above.");
+                if (r) onChange();
+              }}>Try automatic setup again</Button>
+            )}
             <Button kind="danger" onClick={() => setMode(mode === "remove" ? null : "remove")}>Remove</Button>
           </div>
           {mode === "config" && config !== null && <pre className="config small">{config}</pre>}
@@ -156,7 +171,9 @@ function PhoneEditor({ data, exts, taken, p, onDone, onCancel }) {
   const free = exts.filter((e) => e.enabled && (!taken.has(e.ext) || e.ext === p?.ext));
   const save = async () => {
     const r = await a.run(() => (p ? put(`/desk-phones/${p.mac}`, { ext, model })
-      : post("/desk-phones", { mac, ext, model })), p ? "Saved: the phone picks it up within the hour, or when it restarts." : "Added.");
+      : post("/desk-phones", { mac, ext, model })), p ? "Saved: the phone picks it up within the hour, or when it restarts."
+      : (x) => x.rps === "registered" ? "Added, and registered for automatic setup: plug it in and it sets itself up."
+        : "Added: open it to see how to set it up.");
     if (r) onDone();
   };
   return (

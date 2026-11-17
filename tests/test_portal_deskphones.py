@@ -1,5 +1,6 @@
 """The portal's desk phones: a tenant's admins only, its own phones only,
 one per extension, and no passwords in the audit log."""
+import json
 import re
 
 from test_portal_phone import PW, ext_row, world  # noqa: F401  (the two-tenant world)
@@ -17,7 +18,7 @@ def test_staff_refused_everywhere_here(world):
             r = ann.request(method, path, json={"mac": MAC, "ext": "201"})
             assert r.status_code == 403, (method, route.path, r.status_code)
             tried += 1
-    assert tried == 6
+    assert tried == 7
 
 
 def test_add_move_and_view(world):
@@ -99,3 +100,26 @@ def test_suspended_tenant_can_only_look(world):
                          ("POST", f"/api/desk-phones/{MAC}/new-password"), ("DELETE", f"/api/desk-phones/{MAC}")):
         r = admin.request(method, path, json={"mac": "805ec0000001", "ext": "202"})
         assert r.status_code == 403 and "suspended" in r.json()["detail"], (method, path)
+
+
+def test_rps_failure_details_stay_with_the_operator(world, monkeypatch):
+    import httpx
+    import rps
+
+    def down(*a):
+        raise httpx.ConnectError("no route")
+    monkeypatch.setattr(rps, "ACCESS_KEY", "k")
+    monkeypatch.setattr(rps, "ACCESS_SECRET", "s")
+    monkeypatch.setattr(rps, "_send", down)
+    monkeypatch.setattr(rps, "MESSAGES", {**rps.MESSAGES})
+    admin = world["client"]("admin")
+    r = admin.post("/api/desk-phones", json={"mac": MAC, "ext": "201", "model": "T54W"})
+    assert r.status_code == 200 and r.json()["rps"] == "failed"
+    d = admin.get("/api/desk-phones").json()
+    assert d["rps"] and d["phones"][0]["rps_status"] == "failed"
+    assert d["phones"][0]["rps_detail"] == "it couldn't be registered just now. Try again later."
+    assert "unreachable" not in json.dumps(d) and "PBX_" not in json.dumps(d)
+    assert admin.post(f"/api/desk-phones/{MAC}/rps").json() == {"ok": True, "registered": False}
+    from gwportal import db
+    with db.connect() as conn:
+        assert conn.execute("SELECT COUNT(*) FROM audit WHERE action = 'desk phone: Yealink RPS sync'").fetchone()[0] == 1

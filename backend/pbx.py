@@ -603,6 +603,11 @@ def get_db() -> sqlite3.Connection:
                    "extensions ADD COLUMN record INTEGER NOT NULL DEFAULT 0",
                    # *97 from the extension's own phones without the PIN
                    "extensions ADD COLUMN vm_nopin INTEGER NOT NULL DEFAULT 0",
+                   # Yealink RPS (rps.py): the phone's entry there, and how its last sync went
+                   "desk_phones ADD COLUMN rps_id TEXT",
+                   "desk_phones ADD COLUMN rps_status TEXT NOT NULL DEFAULT ''",
+                   "desk_phones ADD COLUMN rps_detail TEXT NOT NULL DEFAULT ''",
+                   "desk_phones ADD COLUMN rps_at TEXT",
                    *[f"{t} ADD COLUMN tenant_id INTEGER NOT NULL DEFAULT {MAIN_TENANT}" for t in TENANT_TABLES]):
         try:
             conn.execute(f"ALTER TABLE {column}")

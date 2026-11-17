@@ -104,6 +104,7 @@ PORTAL_ROUTES = {
     ("POST", "/api/pbx/desk-phones"),
     ("PUT", "/api/pbx/desk-phones/{mac}"),
     ("POST", "/api/pbx/desk-phones/{mac}/new-password"),
+    ("POST", "/api/pbx/desk-phones/{mac}/rps"),
     ("DELETE", "/api/pbx/desk-phones/{mac}"),
     ("GET", "/api/pbx/desk-phones/{mac}/config.cfg"),
     # Billing (tenant_billing.py): the tenant's own statements, month and calls, prices only.

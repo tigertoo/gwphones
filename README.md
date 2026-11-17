@@ -1021,6 +1021,36 @@ the admin password shown under RPS details (the config sets it), not
 a 401 and "refused … wrong credentials" means the username or password is
 wrong; 10 wrong tries from one IP give a 429 for 10 minutes.
 
+**Yealink RPS** (`backend/rps.py`): with an RPS Enterprise account's
+access key in `.env`,
+
+```
+PBX_RPS_ACCESS_KEY=...
+PBX_RPS_ACCESS_SECRET=...
+# PBX_RPS_API_URL=https://api-dm.yealink.com:8443  (the default)
+```
+
+adding a phone (console or portal) also registers its MAC in Yealink's
+redirection service with its own provisioning URL (the tenant's, as
+above), username (the MAC) and password, so a new or factory-reset phone
+that supports RPS sets itself up when plugged in: no server entries, no
+typing on the phone. A new provisioning password updates it there;
+removing the phone removes it there. A failure (Yealink unreachable, or
+the MAC "registered to another company", which needs that company or a
+Yealink ticket to release it) never stops the save: the phone shows it
+(the console the reason, the portal a plain message) with **Sync with
+RPS** to try again, and can always be set up by hand. The signing
+follows Yealink's "Json API for RPS Management Platform" V3.6.0.20
+(HMAC-SHA256 over the method, the X-Ca-* headers, Content-MD5 and the
+path; tested against its worked examples). The provisioning password
+goes to Yealink, which is how RPS hands it to the phone; nothing secret
+is logged. Older, end-of-life models (T41P, T46G) may not be served by
+RPS (a third-party guide says so; Yealink's API document doesn't say):
+**Test RPS connection** in the console (read-only: Yealink's answer for a
+MAC, and our server entries) settles it and tests the keys and signing
+before any phone is registered. Each call waits at most 4 s, so a phone's
+sync (up to three calls) stays inside the portal's 15 s.
+
 **Firmware library** (console, Desk phones, Firmware; server-wide, never
 the portal). Upload a model's `.rom` with its version (as the phone's
 Status page shows it); files go to `/var/lib/admin-dashboard/firmware/`

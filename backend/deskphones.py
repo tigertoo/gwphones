@@ -33,6 +33,15 @@ the tenant's own extensions (its endpoint subscribes to the tenant's
 hints, which are bare extensions). The dashboard only lists and changes
 the phones of the tenant it's working on. A MAC is unique on the server.
 
+RPS: with PBX_RPS_ACCESS_KEY/SECRET set (rps.py), adding a phone also
+registers it in Yealink RPS with its own provisioning URL and
+credentials, so a new or factory-reset phone sets itself up when plugged
+in; a new password updates it there and removing the phone removes it.
+A failure there never stops the save: it's shown on the phone (Sync with
+RPS tries again), and the phone can always be set up by hand. Older,
+end-of-life models (T41P, T46G) may not be served by RPS: the console's
+Test RPS connection shows what Yealink says about a MAC.
+
 The address: a tenant with its own SIP hostname gets
 https://<that hostname>/prov/yealink/, the same name its phones register
 to (so it can move with that tenant by DNS); others get
@@ -73,6 +82,7 @@ from typing import Optional
 
 from pydantic import BaseModel
 
+import rps
 from pbx import (PBX_DB_PATH, PROVISION_BASE_URL, PUBLIC_HOST, PUBLIC_PORT, _client_ip, _lock, _now,
                  changes_log, current_tenant, get_db, sip_host_for, tenant_names)
 
@@ -340,10 +350,49 @@ def _host_refused(conn, request: Request, tenant: int) -> bool:
     return bool(r and r["id"] != tenant)
 
 
+def rps_sync(mac: str) -> dict:
+    """Registers (or updates) the phone in Yealink RPS, outside the lock,
+    and records how it went. {"status": registered|elsewhere|failed|"" (RPS
+    not set up), "detail": message}."""
+    if not rps.ready():
+        return {"status": "", "detail": ""}
+    with get_db() as conn:
+        phone = conn.execute("SELECT * FROM desk_phones WHERE mac = ?", (mac,)).fetchone()
+        if not phone:
+            return {"status": "", "detail": ""}
+        code = tenant_names(conn, phone["tenant_id"]).code
+    rps_id, status, detail = None, "registered", ""
+    try:
+        url = server_url(phone["tenant_id"])
+        if not url:
+            raise rps.RpsError("url.invalid")
+        rps_id = rps.register(mac, url, phone["prov_pass"], f"gwphones tenant {code}", phone["rps_id"])
+    except rps.RpsError as e:
+        status = "elsewhere" if e.code == "device.mac.added.by.other" else "failed"
+        detail = e.message
+        changes_log.info(f"Desk phone {_pretty(mac)}: RPS {status} ({e.code})")
+    else:
+        changes_log.info(f"Desk phone {_pretty(mac)}: registered in Yealink RPS")
+    with _lock, get_db() as conn:
+        conn.execute("UPDATE desk_phones SET rps_id = COALESCE(?, rps_id), rps_status = ?, rps_detail = ?, rps_at = ? "
+                     "WHERE mac = ?", (rps_id, status, detail, _now(), mac))
+        conn.commit()
+    return {"status": status, "detail": detail}
+
+
+def _rps_note(result: dict) -> str:
+    if result["status"] == "registered":
+        return " It's registered in Yealink RPS: plug it in (or factory-reset it) and it sets itself up."
+    if result["status"]:
+        return f" Not registered in Yealink RPS: {result['detail']}"
+    return ""
+
+
 def _row(r, conn=None) -> dict:
     model, version = agent_firmware(r["last_fetch_agent"])
     fw, stuck = firmware_due(conn, r, r["last_fetch_agent"]) if conn is not None else (None, False)
     return {"firmware": version, "upgrade_to": fw["version"] if fw else None, "upgrade_stuck": stuck,
+            "rps_status": r["rps_status"], "rps_detail": r["rps_detail"], "rps_at": r["rps_at"],
             "mac": r["mac"], "mac_pretty": _pretty(r["mac"]), "ext": r["ext"], "model": r["model"],
             "username": r["mac"], "password": r["prov_pass"], "admin_password": r["admin_pass"],
             "created_at": r["created_at"], "last_fetch_at": r["last_fetch_at"], "last_fetch_ip": r["last_fetch_ip"],
@@ -356,7 +405,7 @@ def api_desk_phones():
         phones = [_row(r, conn) for r in conn.execute("SELECT * FROM desk_phones WHERE tenant_id = ? ORDER BY ext, mac",
                                                  (current_tenant(),))]
     return {"phones": phones, "models": MODELS, "repeat_minutes": REPEAT_MINUTES,
-            "server_url": server_url(current_tenant()),
+            "server_url": server_url(current_tenant()), "rps": rps.ready(),
             "ready": bool(DESKPHONE_BASE_URL and PUBLIC_HOST)}
 
 
@@ -378,7 +427,9 @@ def api_add_desk_phone(req: DeskPhoneRequest):
                       current_tenant()))
         conn.commit()
     changes_log.info(f"Added desk phone {_pretty(mac)} for extension {ext}")
-    return {"ok": True, "message": f"Phone {_pretty(mac)} added. Now add it in Yealink RPS."}
+    result = rps_sync(mac)
+    return {"ok": True, "rps": result,
+            "message": f"Phone {_pretty(mac)} added." + (_rps_note(result) or " Set it up on its web page (Auto Provision).")}
 
 
 @router.put("/desk-phones/{mac}")
@@ -404,20 +455,62 @@ def api_desk_phone_password(mac: str):
             raise HTTPException(404, "Phone not found.")
         conn.commit()
     changes_log.info(f"New provisioning password for desk phone {_pretty(mac)}")
-    return {"ok": True, "message": "New password made. Put it in RPS, then factory-reset the phone so it fetches again."}
+    result = rps_sync(mac)
+    if result["status"] == "registered":
+        return {"ok": True, "rps": result, "message": "New password made, and Yealink RPS has it: factory-reset the "
+                                                      "phone so it fetches again."}
+    return {"ok": True, "rps": result, "message": "New password made: enter it on the phone (Auto Provision), then "
+                                                  "Autoprovision Now." + _rps_note(result)}
+
+
+@router.post("/desk-phones/{mac}/rps")
+def api_desk_phone_rps(mac: str):
+    """Registers the phone in Yealink RPS again (after a failure, or a new
+    provisioning address)."""
+    mac = clean_mac(mac)
+    with get_db() as conn:
+        if not conn.execute("SELECT 1 FROM desk_phones WHERE mac = ? AND tenant_id = ?", (mac, current_tenant())).fetchone():
+            raise HTTPException(404, "Phone not found.")
+    if not rps.ready():
+        raise HTTPException(400, "Automatic setup (Yealink RPS) isn't switched on for this system.")
+    result = rps_sync(mac)
+    return {"ok": True, "registered": result["status"] == "registered", "rps": result,
+            "message": "Registered in Yealink RPS." if result["status"] == "registered" else result["detail"]}
 
 
 @router.delete("/desk-phones/{mac}")
 def api_delete_desk_phone(mac: str):
     mac = clean_mac(mac)
     with _lock, get_db() as conn:
-        if conn.execute("DELETE FROM desk_phones WHERE mac = ? AND tenant_id = ?", (mac, current_tenant())).rowcount == 0:
+        phone = conn.execute("SELECT rps_id FROM desk_phones WHERE mac = ? AND tenant_id = ?", (mac, current_tenant())).fetchone()
+        if not phone:
             raise HTTPException(404, "Phone not found.")
+        conn.execute("DELETE FROM desk_phones WHERE mac = ?", (mac,))
         conn.execute("DELETE FROM desk_firmware_attempts WHERE mac = ?", (mac,))
         conn.commit()
     changes_log.info(f"Removed desk phone {_pretty(mac)}")
+    note = ""
+    if phone["rps_id"] and rps.ready():
+        try:
+            rps.unregister(phone["rps_id"])
+            changes_log.info(f"Desk phone {_pretty(mac)}: removed from Yealink RPS")
+        except rps.RpsError as e:
+            changes_log.info(f"Desk phone {_pretty(mac)}: couldn't remove it from Yealink RPS ({e.code})")
+            note = " It's still in Yealink RPS (that failed): remove it there by hand."
     return {"ok": True, "message": f"Phone {_pretty(mac)} removed. It keeps its last settings until it's reset: "
-                               "give its extension a new password if the phone has left your hands."}
+                               "give its extension a new password if the phone has left your hands." + note}
+
+
+@router.get("/rps/check")
+def api_rps_check(mac: str):
+    """The console's Test RPS connection: read-only calls to Yealink."""
+    mac = clean_mac(mac)
+    if not rps.ready():
+        raise HTTPException(400, "Set PBX_RPS_ACCESS_KEY and PBX_RPS_ACCESS_SECRET in .env first.")
+    result = rps.check(mac)
+    changes_log.info(f"RPS connection test for {_pretty(mac)}: "
+                     + ", ".join(f"{k} {'ok' if v['ok'] else v['error']}" for k, v in result.items()))
+    return {"mac": _pretty(mac), "api": rps.API_URL, **result}
 
 
 @router.get("/desk-phones/{mac}/config.cfg")
