@@ -290,6 +290,9 @@ _current_tenant = contextvars.ContextVar("pbx_tenant", default=MAIN_TENANT)
 # Who made a change through the tenant portal (main.py, X-Portal-User):
 # only ever written into the change log, never trusted for anything.
 _acting_user = contextvars.ContextVar("pbx_acting_user", default="")
+# True for a request from the tenant portal (main.py sets it with the
+# tenant): what a tenant may choose is narrower than the operator's.
+_via_portal = contextvars.ContextVar("pbx_via_portal", default=False)
 
 
 def current_tenant() -> int:
@@ -2468,6 +2471,14 @@ def api_extension_outbound_cid(ext: str, req: OutboundCidRequest):
     cid = req.outbound_cid.strip().replace(" ", "")
     if cid and not CID_RE.match(cid):
         raise HTTPException(400, "Caller ID must be a phone number, e.g. +35312345678.")
+    if cid and _via_portal.get():
+        # A tenant shows only a number of its own: one of its numbers here,
+        # or its main caller ID. Any other is the operator's to set.
+        with get_db() as conn:
+            own = tenant_caller_ids(conn, current_tenant())
+        if "+" + e164(cid) not in own["numbers"] + [own["default"]]:
+            raise HTTPException(400, "Choose one of your organisation's own numbers.")
+        cid = "+" + e164(cid)
     with _lock, get_db() as conn:
         if conn.execute("UPDATE extensions SET outbound_cid = ?, updated_at = ? WHERE ext = ? AND tenant_id = ?",
                         (cid, _now(), ext, current_tenant())).rowcount == 0:
@@ -2547,13 +2558,26 @@ def api_own_tenant():
 def api_list_extensions():
     """The tenant's extensions, without passwords or PINs: for the tenant
     portal, which gets nothing else of /config. created_at tells one
-    extension from a later one with the same number."""
+    extension from a later one with the same number. caller_ids: the
+    numbers its extensions may show on calls out (tenant_caller_ids)."""
     with get_db() as conn:
-        rows = conn.execute("SELECT ext, name, enabled, created_at, vm_email, record, vm_nopin FROM extensions "
-                            "WHERE tenant_id = ? ORDER BY ext", (current_tenant(),)).fetchall()
+        rows = conn.execute("SELECT ext, name, enabled, created_at, vm_email, record, vm_nopin, outbound_cid "
+                            "FROM extensions WHERE tenant_id = ? ORDER BY ext", (current_tenant(),)).fetchall()
+        caller_ids = tenant_caller_ids(conn, current_tenant())
     return {"extensions": [{"ext": r["ext"], "name": r["name"], "enabled": bool(r["enabled"]),
                             "created_at": r["created_at"], "vm_email": r["vm_email"], "record": bool(r["record"]),
-                            "vm_nopin": bool(r["vm_nopin"])} for r in rows]}
+                            "vm_nopin": bool(r["vm_nopin"]), "outbound_cid": r["outbound_cid"]} for r in rows],
+            "caller_ids": caller_ids}
+
+
+def tenant_caller_ids(conn, tenant: int) -> dict:
+    """What a tenant's extensions may show on calls out, as +353...: its
+    main caller ID (default: an extension without its own shows it) and
+    its own numbers (those routed to it here)."""
+    main = e164(get_settings(conn, tenant)["outbound_cid"])
+    numbers = sorted({"+" + d for d in (e164(r["did"]) for r in conn.execute(
+        "SELECT did FROM inbound_routes WHERE tenant_id = ?", (tenant,))) if d} - {"+" + main})
+    return {"default": "+" + main if main else "", "numbers": numbers}
 
 
 @router.get("/status/tenant")

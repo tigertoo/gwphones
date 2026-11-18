@@ -10,12 +10,14 @@ import { Button, Field, Message, useAction } from "./ui";
 export function Extensions({ me }) {
   const [list, setList] = useState(null);
   const [forwarding, setForwarding] = useState({});
+  const [callerIds, setCallerIds] = useState({ default: "", numbers: [] });
   const [error, setError] = useState(null);
   const [open, setOpen] = useState(null);
   const load = useCallback(async () => {
     try {
       const [e, f] = await Promise.all([get("/extensions"), get("/forwarding").catch(() => ({ extensions: {} }))]);
       setList(e.extensions);
+      setCallerIds(e.caller_ids || { default: "", numbers: [] });
       setForwarding(f.extensions || {});
       if (me.role !== "admin" && e.extensions[0]) setOpen(e.extensions[0].ext);
     } catch (err) {
@@ -42,7 +44,7 @@ export function Extensions({ me }) {
               {forwarding[e.ext]?.dnd && <span className="tag">Do not disturb</span>}
               {forwarding[e.ext]?.always && <span className="tag">Forwarded</span>}
             </button>
-            {open === e.ext && <ExtensionEditor ext={e} me={me} fwd={forwarding[e.ext]} onChange={load} />}
+            {open === e.ext && <ExtensionEditor ext={e} me={me} fwd={forwarding[e.ext]} callerIds={callerIds} onChange={load} />}
           </li>
         ))}
       </ul>
@@ -71,11 +73,12 @@ function NewExtension({ onMade }) {
   );
 }
 
-function ExtensionEditor({ ext, me, fwd, onChange }) {
+function ExtensionEditor({ ext, me, fwd, callerIds, onChange }) {
   const admin = me.role === "admin";
   return (
     <div className="editor">
       <NameAndSwitch ext={ext} admin={admin} onChange={onChange} />
+      <CallerId ext={ext} callerIds={callerIds} onChange={onChange} />
       <Forwarding ext={ext.ext} fwd={fwd} onChange={onChange} />
       <VoicemailEmail ext={ext} me={me} onChange={onChange} />
       <VoicemailAccess ext={ext} me={me} onChange={onChange} />
@@ -105,6 +108,35 @@ function NameAndSwitch({ ext, admin, onChange }) {
           Switched on
         </label>
       )}
+      {a.show}
+    </div>
+  );
+}
+
+// The number this extension shows when it calls out: the organisation's
+// main number, or another of its own numbers (gwphones refuses any other).
+function CallerId({ ext, callerIds, onChange }) {
+  // its own set to the main number is the same as none
+  const current = ext.outbound_cid && ext.outbound_cid !== callerIds.default ? ext.outbound_cid : "";
+  const [value, setValue] = useState(current);
+  useEffect(() => { setValue(current); }, [current]);
+  const a = useAction();
+  const save = () => a.run(() => put(`/extensions/${ext.ext}/caller-id`, { outbound_cid: value }), "Saved.")
+    .then((r) => r && onChange());
+  const known = [callerIds.default, ...callerIds.numbers].filter(Boolean);
+  const choices = current && !known.includes(current) ? [...callerIds.numbers, current] : callerIds.numbers;
+  return (
+    <div className="block">
+      <h3>Caller ID</h3>
+      <Field label="Calls out show" hint="Which of your organisation's numbers people see when this extension calls them.">
+        <div className="inline-form">
+          <select value={value} onChange={(e) => setValue(e.target.value)} aria-label="Caller ID">
+            <option value="">{callerIds.default ? `Main number (${callerIds.default})` : "Main number"}</option>
+            {choices.map((n) => <option key={n} value={n}>{n}{known.includes(n) ? "" : " (set by your provider)"}</option>)}
+          </select>
+          <Button busy={a.busy} kind="secondary" onClick={save} disabled={value === current}>Save</Button>
+        </div>
+      </Field>
       {a.show}
     </div>
   );

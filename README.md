@@ -333,6 +333,14 @@ It's written as `set_var=EXT_CID=...` on the extension's endpoint, and
 `[sub-outbound]` plus 112/999 in `extensions.conf` use it, falling back to
 the default `OUTBOUND_CID` when it's blank.
 
+In the tenant portal (an extension's **Caller ID**), a tenant's admins set
+it for any of its extensions and a user for their own, choosing only from
+the tenant's own numbers: its main caller ID and the numbers routed to it
+(`pbx.tenant_caller_ids`, stored as `+353...`). gwphones refuses any other
+number from the portal, so a tenant can't show someone else's. The console
+still sets any number; the portal shows one of those as "set by your
+provider".
+
 How it works: the service keeps its own `pbx.db` (SQLite, mode 600,
 holds the SIP passwords) and on every save regenerates two files and
 reloads Asterisk. Both live in `/etc/asterisk/portal`

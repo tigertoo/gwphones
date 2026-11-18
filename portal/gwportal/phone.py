@@ -120,10 +120,13 @@ def api_tenant(me: Signed = Depends(signed_in())):
 
 @app.get("/api/extensions")
 def api_extensions(request: Request, me: Signed = Depends(signed_in())):
-    exts = _extensions(me.user)
+    data = gw.call(me.user, "GET", "/extensions")
+    exts = data["extensions"]
     mine = _bound(me, request, exts)
-    keep = ("ext", "name", "enabled", "vm_email", "record", "vm_nopin")
-    return {"extensions": [{k: e[k] for k in keep} for e in exts if mine is None or e["ext"] == mine]}
+    keep = ("ext", "name", "enabled", "vm_email", "record", "vm_nopin", "outbound_cid")
+    return {"extensions": [{k: e.get(k) for k in keep} for e in exts if mine is None or e["ext"] == mine],
+            # what an extension may show on calls out: the organisation's own numbers
+            "caller_ids": data.get("caller_ids") or {"default": "", "numbers": []}}
 
 
 class NewExtension(BaseModel):
@@ -249,6 +252,23 @@ def api_voicemail_email(ext: str, req: VoicemailEmail, request: Request, me: Sig
     _saving(me.user)
     r = gw.call(me.user, "PUT", f"/extensions/{ext}/voicemail-email", json={"email": email})
     _audit(me, request, "voicemail email changed", f"{ext} to {email or 'nobody'}")
+    return _done(r)
+
+
+class CallerId(BaseModel):
+    outbound_cid: str = ""  # empty: the organisation's main number
+
+
+@app.put("/api/extensions/{ext}/caller-id")
+def api_caller_id(ext: str, req: CallerId, request: Request, me: Signed = Depends(signed_in())):
+    """The number an extension shows on calls out: one of the
+    organisation's own (gwphones checks), or its main number. An admin
+    for any extension, a user for their own."""
+    _may(me, request, ext)
+    cid = req.outbound_cid.strip()
+    _saving(me.user)
+    r = gw.call(me.user, "PUT", f"/extensions/{ext}/outbound-cid", json={"outbound_cid": cid})
+    _audit(me, request, "caller ID changed", f"{ext} shows {cid or 'the main number'}")
     return _done(r)
 
 

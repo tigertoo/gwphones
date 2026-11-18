@@ -83,7 +83,7 @@ def test_admin_sees_the_tenant_only(world):
     a = world["client"]("admin")
     exts = a.get("/api/extensions").json()["extensions"]
     assert [e["ext"] for e in exts] == ["201", "202"] and all(e["name"].startswith(f"T{world['acme']['id']} ") for e in exts)
-    assert set(exts[0]) == {"ext", "name", "enabled", "vm_email", "record", "vm_nopin"}
+    assert set(exts[0]) == {"ext", "name", "enabled", "vm_email", "record", "vm_nopin", "outbound_cid"}
     assert a.get("/api/tenant").json() == {"code": world["acme"]["code"], "name": "Acme", "status": "active"}
 
 

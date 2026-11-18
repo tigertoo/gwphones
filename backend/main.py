@@ -68,6 +68,8 @@ PORTAL_ROUTES = {
     ("POST", "/api/pbx/extensions/{ext}/setup-link"),
     ("POST", "/api/pbx/extensions/{ext}/email-setup"),
     ("PUT", "/api/pbx/extensions/{ext}/voicemail-email"),
+    # An extension's caller ID: the portal may choose only the tenant's own numbers (pbx.tenant_caller_ids).
+    ("PUT", "/api/pbx/extensions/{ext}/outbound-cid"),
     ("GET", "/api/pbx/forwarding"),
     ("PUT", "/api/pbx/extensions/{ext}/forwarding"),
     ("GET", "/api/pbx/status/tenant"),
@@ -239,10 +241,12 @@ async def _as_portal(request: Request, call_next):
         return JSONResponse({"detail": "This account is suspended: you can still see and download, not change."},
                             status_code=403)
     tokens = (_portal_call.set(True), pbx._current_tenant.set(row["id"]),
-              pbx._acting_user.set(_portal_user(request.headers.get("x-portal-user", "")) or "unnamed"))
+              pbx._acting_user.set(_portal_user(request.headers.get("x-portal-user", "")) or "unnamed"),
+              pbx._via_portal.set(True))
     try:
         return await call_next(request)
     finally:
+        pbx._via_portal.reset(tokens[3])
         pbx._acting_user.reset(tokens[2])
         pbx._current_tenant.reset(tokens[1])
         _portal_call.reset(tokens[0])
