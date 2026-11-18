@@ -9,7 +9,7 @@ import pytest
 
 BACKEND = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "backend")
 PORTAL = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "portal")
-MODULES = ("main", "pbx", "lcr", "billing", "statements", "recordings", "ivr", "hours", "calllinks", "deskphones", "tenant_billing", "rps")
+MODULES = ("main", "pbx", "lcr", "billing", "statements", "recordings", "ivr", "hours", "calllinks", "deskphones", "tenant_billing", "rps", "whatsapp")
 PORTAL_ORIGIN = "https://testserver"
 
 

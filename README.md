@@ -903,6 +903,76 @@ generated while no route has a list. If the route check doesn't answer
 as they always did then. Caller IDs outside Ireland must be written in
 full (+61...): one starting with 0 is taken as Irish.
 
+### WhatsApp calls (`backend/whatsapp.py`)
+
+Customers tap the call button in the business's WhatsApp chat, and Meta's
+SIP gateway hands the call to our Asterisk. From there it's routed like
+any trunk call, by the WhatsApp number's inbound route (ring group, menu,
+hours, voicemail, recording). Phones show "WhatsApp" as the caller's name.
+Calls out to WhatsApp users (which need the user's permission) aren't
+set up. For now this is for the main tenant's number only.
+
+How it fits together:
+- **Meta → us:** TLS to `pbx.amapforyourmoney.com` (the RSA certificate)
+  on our TLS port 15061, SDES-SRTP, Opus or G.711 a-law. Meta's calls
+  are matched to the `[whatsapp]` endpoint by Meta's source addresses only;
+  the `X-FB-External-Domain` header in Meta's own example is never
+  trusted (anyone can send it). Inbound calls aren't challenged (Meta
+  answers a 407, Asterisk asks with a 401), like the other trunks.
+- **The endpoint** lives in `/etc/asterisk/pjsip_whatsapp.conf`, written
+  by `whatsapp.py write-conf` (root:asterisk, 0640: it holds Meta's SIP
+  password, used when Meta challenges our requests in a call). Its context
+  `[from-whatsapp]` (static `asterisk/extensions.conf`) only goes to
+  `[from-trunk]`, so it reaches inbound routes and never a trunk.
+- `rewrite_contact=no` is required: with it on, our 200 OK loses Meta's
+  Record-Route, there's no ACK and the audio stops after about 30 s.
+- **Billing:** `whatsapp` is an inbound-only trunk (`billing.INBOUND_TRUNKS`),
+  shown as "WhatsApp" in call history, never a choice for calls out.
+  Incoming calls are free here; check Meta's current pricing for user-started calls.
+- With SIP on, Meta's own calling API and webhooks stop for that number
+  (Meta's choice): everything happens in Asterisk.
+
+**On Meta's side first** (business.facebook.com, developers.facebook.com):
+1. A Meta Business account, with **business verification**. Calling needs
+   the number's messaging limit at 2,000 or more.
+2. An app (Business type) with the WhatsApp product, in **Live** mode
+   (that needs a privacy policy URL).
+3. The number: one of the main tenant's Irish numbers, verified by a
+   **voice call** (route it to a phone or voicemail first). A number in
+   the ordinary WhatsApp or WhatsApp Business app normally has to leave it
+   first (Meta has a "coexistence" option for keeping both, not checked).
+4. A **system user** with `whatsapp_business_management` and
+   `whatsapp_business_messaging` on the app and WhatsApp account, and a
+   permanent token for it. Keep the token in a password manager: the
+   tool asks for it each time (never on the command line, never saved).
+5. The number's **phone number id** (WhatsApp Manager or the app's API
+   setup page) and the app's **Graph API version** (App settings →
+   Advanced), e.g. `v24.0`.
+
+**On the server** (as root, from `/opt/gwphones/backend`):
+```
+asterisk -rx "core show version"
+asterisk -rx "core show translation" | grep -i opus     # an Opus translator?
+grep -A15 '^\[transport-tls\]' /etc/asterisk/pjsip.conf  # no require_client_cert (Meta's client cert is from its own CA)
+grep -A6 '^\[global\]' /etc/asterisk/pjsip.conf          # endpoint_identifier_order, if set, must include ip
+W="venv/bin/python whatsapp.py --phone-id <id> --graph-version <vNN.0>"
+$W check
+$W prepare                       # calling on, SDES keys, a-law as well as Opus (before SIP)
+$W enable-sip --host pbx.amapforyourmoney.com --port 15061
+$W write-conf                    # add --codecs alaw if there's no Opus translator
+```
+Then once, in `/etc/asterisk/pjsip.conf` (at the end): `#include pjsip_whatsapp.conf`,
+and `asterisk -rx "module reload res_pjsip.so"`. Check with
+`asterisk -rx "pjsip show endpoint whatsapp"`. Copy the new
+`[from-whatsapp]` context from `asterisk/extensions.conf` into
+`/etc/asterisk/extensions.conf` and `asterisk -rx "dialplan reload"`. The
+firewall must let Meta's addresses reach 15061/tcp and the RTP ports.
+`$W disable-sip` stops the calls coming to us; `write-conf` again after
+Meta's SIP password is reset. (`enable-sip` sends the port as a number,
+as in Meta's example; Meta's table calls it a string: if Meta refuses it,
+that's a one-line change.) Meta's address list (from its integration
+examples page) can be replaced with `--ranges-file`.
+
 ### PBX certificate
 
 **It must be an RSA certificate, not ECDSA.** Desk phones' firmware (a

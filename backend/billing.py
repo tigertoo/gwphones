@@ -273,6 +273,10 @@ def from_micro(micro: Optional[int], places: int = 4) -> Optional[str]:
 CDR_FIELDS = ["accountcode", "src", "dst", "dcontext", "clid", "channel", "dstchannel", "lastapp", "lastdata",
               "start", "answer", "end", "duration", "billsec", "disposition", "amaflags", "uniqueid", "userfield"]
 TRUNK_CHANNEL = re.compile(r"^PJSIP/(%s)-" % "|".join(map(re.escape, TRUNKS)))
+# Trunks that only bring calls in (never a choice for calls out): WhatsApp
+# calls from Meta's SIP gateway (whatsapp.py writes its endpoint).
+INBOUND_TRUNKS = {"whatsapp": "WhatsApp"}
+TRUNK_IN_CHANNEL = re.compile(r"^PJSIP/(%s)-" % "|".join(map(re.escape, [*TRUNKS, *INBOUND_TRUNKS])))
 DIAL_TARGET = re.compile(r"^PJSIP/([^@,&]+)@([A-Za-z0-9_-]+)")
 
 
@@ -327,7 +331,7 @@ def classify(row: dict, tenants: Optional[Dict[str, int]] = None) -> dict:
     code = (row.get("accountcode") or "").strip() or MAIN_TENANT_CODE
     tenant = (tenants or {MAIN_TENANT_CODE: MAIN_TENANT}).get(code, UNKNOWN_TENANT)
     trunk_out = TRUNK_CHANNEL.match(dstchannel or "")
-    trunk_in = TRUNK_CHANNEL.match(channel or "")
+    trunk_in = TRUNK_IN_CHANNEL.match(channel or "")
     call = {
         "uniqueid": row["uniqueid"], "dstchannel": dstchannel or "", "start_utc": _cdr_time(row["start"]),
         "answer_utc": _cdr_time(row["answer"]), "end_utc": _cdr_time(row["end"]),
@@ -469,7 +473,7 @@ def _sheet_for(conn, trunk: str, route: str, at: str):
 
 
 def route_label(trunk: str, route: str) -> str:
-    label = TRUNKS.get(trunk, {}).get("label", trunk)
+    label = TRUNKS.get(trunk, {}).get("label") or INBOUND_TRUNKS.get(trunk, trunk)
     return f"{label} {VOXBEAM_ROUTES[route]}" if route in VOXBEAM_ROUTES else label
 
 
