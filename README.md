@@ -1106,9 +1106,19 @@ its `location /` that returns 404:
         add_header X-Content-Type-Options nosniff always;
         add_header Referrer-Policy no-referrer always;
     }
+    # The privacy policy (site/privacy.html), e.g. for the Meta app (WhatsApp calls).
+    location = /privacy {
+        root /opt/gwphones/site;
+        try_files /privacy.html =404;
+        default_type text/html;
+        add_header Content-Security-Policy "default-src 'none'; style-src 'unsafe-inline'; img-src data:; base-uri 'none'; form-action 'none'; frame-ancestors 'none'" always;
+        add_header X-Content-Type-Options nosniff always;
+        add_header Referrer-Policy no-referrer always;
+    }
 ```
 
-A `git pull` updates it; no build. The tenants' `*.sip` names share the
+A `git pull` updates them; no build. The privacy policy is
+https://pbx.amapforyourmoney.com/privacy. The tenants' `*.sip` names share the
 site, so they show it too.
 
 **Yealink RPS** (`backend/rps.py`): with an RPS Enterprise account's
