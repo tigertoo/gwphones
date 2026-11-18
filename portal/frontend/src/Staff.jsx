@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useState } from "react";
-import { get, post, put } from "./api";
+import { del, get, post, put } from "./api";
 import { Button, Field, Message, useAction } from "./ui";
 
 // Tenant admins: their organisation's people. An admin manages
@@ -116,6 +116,10 @@ function Person({ u, me, exts, onChange }) {
               : <Button kind="danger" busy={a.busy} onClick={() => window.confirm(
                 `${self ? "Disable your own account? You'll be signed out." : `Disable ${u.email}? They're signed out at once.`}`)
                 && save({ disabled: true }, "Disabled.")}>Disable</Button>}
+            {!self && <Button kind="danger" busy={a.busy} onClick={() => window.confirm(
+              `Remove ${u.email}? They can't sign in any more, and their passkeys and sessions are deleted. `
+              + `${u.role === "user" && u.ext ? `Extension ${u.ext} stays as it is. ` : ""}They can be invited again later.`)
+              && a.run(() => del(`/users/${u.id}`), "Removed.").then((r) => r && onChange())}>Remove</Button>}
           </div>
           {a.show}
         </div>

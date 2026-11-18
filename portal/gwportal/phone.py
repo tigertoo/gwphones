@@ -501,3 +501,24 @@ def api_change_user(user_id: int, req: UserChange, request: Request, me: Signed 
         db.audit(conn, "staff changed", me.user, client_ip(request),
                  f"{u['email']}: role={role}, ext={ext}, disabled={bool(disabled)}")
     return {"ok": True}
+
+
+@app.delete("/api/users/{user_id}")
+def api_remove_user(user_id: int, request: Request, me: Signed = Depends(signed_in())):
+    """Removes someone from the organisation: their sign-in, sessions,
+    passkeys, trusted devices and links go, and their email is free to be
+    invited again (here or elsewhere). Their extension stays: it's the
+    tenant's. Not yourself (another admin can), and never the last admin.
+    The audit log keeps what they did."""
+    _admin(me)
+    if user_id == me.user["id"]:
+        raise auth.Refused("You can't remove yourself. Another admin can, or disable your account.", 400)
+    with db.connect() as conn:
+        u = _staff(conn, me, user_id)
+        if u["role"] == "admin" and not u["disabled"] and _active_admins(conn, u["tenant_code"], u["id"]) == 0:
+            raise auth.Refused("Your organisation needs at least one admin.", 400)
+        for table in ("sessions", "links", "recovery_codes", "trusted_devices", "passkeys", "webauthn_challenges"):
+            conn.execute(f"DELETE FROM {table} WHERE user_id = ?", (u["id"],))
+        conn.execute("DELETE FROM users WHERE id = ?", (u["id"],))
+        db.audit(conn, "staff removed", me.user, client_ip(request), f"{u['email']} ({u['role']})")
+    return {"ok": True}
