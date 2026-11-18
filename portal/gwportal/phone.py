@@ -388,7 +388,9 @@ def api_delete_recording(name: str, request: Request, confirm: bool = False, me:
 
 def _user_json(u) -> dict:
     return {"id": u["id"], "email": u["email"], "name": u["name"], "role": u["role"], "ext": u["ext"],
-            "two_factor": bool(u["totp_secret"]), "disabled": bool(u["disabled"]), "invited": not u["pw_hash"]}
+            "two_factor": bool(u["totp_secret"]), "disabled": bool(u["disabled"]),
+            "microsoft": u["source"] == "microsoft",  # managed by Microsoft 365 sync
+            "invited": not u["pw_hash"] and u["source"] != "microsoft" and not u["ms_oid"]}
 
 
 def _staff(conn, me: Signed, user_id: int):
@@ -464,6 +466,8 @@ def api_invite_again(user_id: int, request: Request, me: Signed = Depends(signed
         u = _staff(conn, me, user_id)
         if u["pw_hash"]:
             raise auth.Refused("They've already accepted. They can reset their password from the sign-in page.", 400)
+        if u["source"] == "microsoft" or u["ms_oid"]:
+            raise auth.Refused("They sign in with Microsoft: there's no invitation to send.", 400)
     _send_invite(me, u)
     _audit(me, request, "invitation sent again", u["email"])
     return {"ok": True}
@@ -485,6 +489,9 @@ def api_change_user(user_id: int, req: UserChange, request: Request, me: Signed 
     if role not in ("admin", "user"):
         raise auth.Refused("Unknown role.", 400)
     disabled = u["disabled"] if req.disabled is None else int(req.disabled)
+    if u["source"] == "microsoft" and (role != u["role"] or (req.ext is not None and req.ext != u["ext"])):
+        raise auth.Refused("Their role and extension come from Microsoft 365: change them there (the group, or "
+                           "their custom attribute). You can still disable them here.", 400)
     ext, created = (u["ext"], u["ext_created"]) if req.ext is None else _ext_identity(me, req.ext)
     if role == "user" and not ext:
         raise auth.Refused("Choose the extension this person uses.", 400)
@@ -493,9 +500,11 @@ def api_change_user(user_id: int, req: UserChange, request: Request, me: Signed 
         was_admin = u["role"] == "admin" and not u["disabled"]
         if was_admin and (role != "admin" or disabled) and _active_admins(conn, u["tenant_code"], u["id"]) == 0:
             raise auth.Refused("Your organisation needs at least one admin.", 400)
-        conn.execute("UPDATE users SET name = ?, role = ?, ext = ?, ext_created = ?, disabled = ?, updated_at = ? "
-                     "WHERE id = ?", ((req.name if req.name is not None else u["name"]).strip()[:80], role, ext,
-                                      created, disabled, db.iso(), u["id"]))
+        conn.execute("UPDATE users SET name = ?, role = ?, ext = ?, ext_created = ?, disabled = ?, disabled_by = ?, "
+                     "updated_at = ? WHERE id = ?", ((req.name if req.name is not None else u["name"]).strip()[:80], role,
+                                                    ext, created, disabled,
+                                                    ("admin" if disabled else None) if disabled != u["disabled"]
+                                                    else u["disabled_by"], db.iso(), u["id"]))
         if role != u["role"] or disabled != u["disabled"] or ext != u["ext"]:
             auth.end_all_sessions(conn, u["id"], keep_token=me.token if u["id"] == me.user["id"] else "")
         db.audit(conn, "staff changed", me.user, client_ip(request),

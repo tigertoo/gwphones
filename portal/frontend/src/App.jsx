@@ -8,6 +8,7 @@ import { Routing } from "./Routing";
 import { CodeStep, LinkPage, SetUpCodes, SignIn } from "./SignIn";
 import { Staff } from "./Staff";
 import { Message } from "./ui";
+import { takeMicrosoftResult } from "./microsoft";
 
 // The portal: what's shown follows the session's state from the API
 // (none, pending_mfa, enrol, full). Links from emails open /invite#... or
@@ -43,6 +44,9 @@ function Portal() {
   const [session, setSession] = useState(null);
   const [tenant, setTenant] = useState(null);
   const [tab, setTab] = useState("extensions");
+  // Back from Microsoft (/?microsoft=...): its result, shown once; a link starts on Staff.
+  const [notice] = useState(() => takeMicrosoftResult());
+  useEffect(() => { if (notice?.tab) setTab(notice.tab); }, [notice]);
   const refresh = useCallback(() => get("/session").then(setSession).catch(() => setSession({ state: "none" })), []);
   useEffect(() => { refresh(); }, [refresh]);
   useEffect(() => {
@@ -56,7 +60,7 @@ function Portal() {
     return r.state === "full" ? refresh() : setSession(r);
   };
   if (!session) return <Frame><p className="muted">Loading…</p></Frame>;
-  if (session.state === "none") return <Frame><SignIn onState={onState} /></Frame>;
+  if (session.state === "none") return <Frame><SignIn onState={onState} notice={notice} /></Frame>;
   if (session.state === "pending_mfa") return <Frame><CodeStep onState={onState} /></Frame>;
   if (session.state === "enrol") {
     return <Frame><SetUpCodes onDone={refresh}
@@ -89,7 +93,7 @@ function Portal() {
       {tab === "billing" && me.role === "admin" && <Billing />}
       {tab === "status" && <Status />}
       {tab === "recordings" && <Recordings me={me} />}
-      {tab === "staff" && me.role === "admin" && <Staff me={me} />}
+      {tab === "staff" && me.role === "admin" && <Staff me={me} notice={notice} />}
       {tab === "account" && <Account me={me} onChanged={refresh} />}
     </Frame>
   );

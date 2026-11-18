@@ -1,11 +1,12 @@
 import React, { useCallback, useEffect, useState } from "react";
 import { del, get, post, put } from "./api";
 import { Button, Field, Message, useAction } from "./ui";
+import { goToMicrosoft } from "./microsoft";
 
 // Tenant admins: their organisation's people. An admin manages
 // everything; a user has one extension. The API keeps at least one admin.
 
-export function Staff({ me }) {
+export function Staff({ me, notice }) {
   const [users, setUsers] = useState(null);
   const [exts, setExts] = useState([]);
   const [error, setError] = useState(null);
@@ -26,6 +27,8 @@ export function Staff({ me }) {
       <h2>Staff</h2>
       <p className="small muted">Admins manage everything here. Everyone else manages their own extension: its forwarding,
         voicemail and phone setup, and hears its recordings.</p>
+      {notice?.tab === "staff" && <Message kind={notice.kind}>{notice.text}</Message>}
+      <Microsoft365 onSynced={load} />
       <Invite exts={exts} onDone={load} />
       <ul className="list">
         {users.map((u) => <Person key={u.id} u={u} me={me} exts={exts} onChange={load} />)}
@@ -92,6 +95,7 @@ function Person({ u, me, exts, onChange }) {
         <span className="grow">{u.name || u.email}<span className="small muted block">{u.email}</span></span>
         <span className="tag">{u.role === "admin" ? "Admin" : `Ext ${u.ext || "–"}`}</span>
         {u.invited && <span className="tag">Invited</span>}
+        {u.microsoft && <span className="tag">Microsoft 365</span>}
         {u.disabled && <span className="tag tag-off">Disabled</span>}
       </button>
       {open && (
@@ -117,7 +121,9 @@ function Person({ u, me, exts, onChange }) {
                 `${self ? "Disable your own account? You'll be signed out." : `Disable ${u.email}? They're signed out at once.`}`)
                 && save({ disabled: true }, "Disabled.")}>Disable</Button>}
             {!self && <Button kind="danger" busy={a.busy} onClick={() => window.confirm(
-              `Remove ${u.email}? They can't sign in any more, and their passkeys and sessions are deleted. `
+              (u.microsoft ? `${u.email} comes from your Microsoft 365 group: unless they leave it, the next sync adds them `
+                + "again. " : "")
+              + `Remove ${u.email}? They can't sign in any more, and their passkeys and sessions are deleted. `
               + `${u.role === "user" && u.ext ? `Extension ${u.ext} stays as it is. ` : ""}They can be invited again later.`)
               && a.run(() => del(`/users/${u.id}`), "Removed.").then((r) => r && onChange())}>Remove</Button>}
           </div>
@@ -125,5 +131,87 @@ function Person({ u, me, exts, onChange }) {
         </div>
       )}
     </li>
+  );
+}
+
+// Microsoft 365: sign-in with work accounts, and Staff kept in step with a
+// group. Extensions come from an Exchange custom attribute (1-15).
+function Microsoft365({ onSynced }) {
+  const [s, setS] = useState(null);
+  const [f, setF] = useState({ group: "", admin_group: "", attribute: 1 });
+  const [result, setResult] = useState(null);
+  const a = useAction();
+  const load = useCallback(() => get("/microsoft").then((r) => {
+    setS(r);
+    if (r.linked) setF({ group: r.group || "", admin_group: r.admin_group || "", attribute: r.attribute || 1 });
+    if (r.last_result) setResult(r.last_result);
+  }).catch(() => setS({ available: false })), []);
+  useEffect(() => { load(); }, [load]);
+  if (!s || !s.available) return null;
+  if (!s.linked) {
+    return (
+      <div className="card">
+        <h3>Microsoft 365</h3>
+        <p className="small muted">Let your staff sign in with their work accounts, and keep this list in step with a
+          Microsoft 365 group. You sign in with your own Microsoft account to connect your organisation.</p>
+        <p className="small">First, your Microsoft 365 admin approves the phone portal, once:{" "}
+          <a href={s.consent_url} rel="noreferrer">Approve in Microsoft 365</a> (send them this link if that's not you).
+          Then connect.</p>
+        <Button kind="secondary" busy={a.busy} onClick={() => a.run(() => goToMicrosoft("/microsoft/link/start"))}>
+          Connect Microsoft 365</Button>
+        {a.show}
+      </div>
+    );
+  }
+  const save = () => a.run(() => put("/microsoft", f), "Saved.").then((r) => r && load());
+  const run = (path) => a.run(() => post(path)).then((r) => { if (r) { setResult(r); if (path.endsWith("sync")) onSynced(); load(); } });
+  return (
+    <div className="card">
+      <h3>Microsoft 365</h3>
+      <p className="small muted">Connected{s.linked_by ? ` by ${s.linked_by}` : ""}. Staff sign in with Microsoft;
+        admins still give their two-factor code. The group's members are synced every 15 minutes: people who leave it
+        are disabled. Each person's extension is their Exchange <strong>custom attribute {f.attribute}</strong>
+        (Exchange admin centre, Recipients, Mailboxes, their mailbox, Custom attributes).</p>
+      <p className="small">First, your Microsoft 365 admin must approve the phone portal reading your groups, once:{" "}
+        <a href={s.consent_url} rel="noreferrer">Approve in Microsoft 365</a>.</p>
+      <Field label="Group to sync" hint="Its name or object id. Its members use the phone system.">
+        <input value={f.group} onChange={(e) => setF({ ...f, group: e.target.value })} placeholder="e.g. Phone users" />
+      </Field>
+      <Field label="Admins group (optional)" hint="Members of both groups are admins here. Everyone else is staff.">
+        <input value={f.admin_group} onChange={(e) => setF({ ...f, admin_group: e.target.value })} />
+      </Field>
+      <Field label="Extension is in custom attribute">
+        <select value={f.attribute} onChange={(e) => setF({ ...f, attribute: Number(e.target.value) })}>
+          {Array.from({ length: 15 }, (_, i) => i + 1).map((n) => <option key={n} value={n}>{n}</option>)}
+        </select>
+      </Field>
+      <div className="buttons">
+        <Button kind="secondary" busy={a.busy} onClick={save}>Save</Button>
+        <Button kind="secondary" busy={a.busy} disabled={!s.group} onClick={() => run("/microsoft/preview")}>Preview</Button>
+        <Button busy={a.busy} disabled={!s.group} onClick={() => run("/microsoft/sync")}>Sync now</Button>
+        <Button kind="danger" busy={a.busy} onClick={() => window.confirm(
+          "Disconnect Microsoft 365? Nobody signs in with Microsoft any more, and synced people without a password are disabled.")
+          && a.run(() => del("/microsoft"), "Disconnected.").then((r) => r && (load(), onSynced()))}>Disconnect</Button>
+      </div>
+      {a.show}
+      {result && <SyncResult r={result} />}
+    </div>
+  );
+}
+
+const DOING = { add: "Add", link: "Link", change: "Update", enable: "Enable", disable: "Disable" };
+
+function SyncResult({ r }) {
+  if (r.error) return <Message kind="error">{r.error}</Message>;
+  return (
+    <div className="small">
+      <p>{r.members} in the group: {r.counts.added} to add, {r.counts.changed} to update, {r.counts.enabled} to enable,
+        {" "}{r.counts.disabled} to disable{r.at ? ` (${new Date(r.at).toLocaleString()})` : ""}.</p>
+      {r.actions?.length > 0 && <ul>{r.actions.map((x, i) => (
+        <li key={i}>{DOING[x.do]}: {x.email}{x.role === "admin" ? " (admin)" : x.ext ? ` (ext ${x.ext})` : ""}
+          {x.changes ? `: ${x.changes.join(", ")}` : ""}</li>))}</ul>}
+      {r.problems?.length > 0 && <><p><strong>Not synced:</strong></p>
+        <ul>{r.problems.map((p, i) => <li key={i}>{p.who}: {p.problem}</li>)}</ul></>}
+    </div>
   );
 }

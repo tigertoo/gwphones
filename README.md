@@ -137,6 +137,9 @@ through this API as the portal caller above. Being built (phase 4).
   email. Signing in with one goes through the same address limit,
   lockout and disabled checks as a password. `reset-2fa` removes them (a
   lost phone may hold a synced one). Up to 10 per account.
+- **Microsoft 365** (`gwportal/microsoft.py`): "Sign in with Microsoft",
+  and a tenant's Staff kept in step with a Microsoft 365 group (Staff →
+  Microsoft 365). See [Microsoft 365 sign-in and sync](#microsoft-365-sign-in-and-sync).
 - **Sessions:** a `__Host-` cookie (Secure, HttpOnly, SameSite=Strict),
   2 hours idle and 12 hours at most; every route says which session
   states it accepts, fully signed in by default; a new token at each step.
@@ -240,6 +243,83 @@ Settings (its own `.env`): `PORTAL_DB`, `PORTAL_ORIGIN` (e.g.
 `PORTAL_GW_URL`, `PORTAL_GW_SECRET` (gwphones' `GWPHONES_PORTAL_SECRET`),
 `PORTAL_BRAND`, and its own copy of `MS_GRAPH_*` and
 `EMAIL_FROM_ADDRESS`.
+
+### Microsoft 365 sign-in and sync
+
+`gwportal/microsoft.py`, off until `PORTAL_MS_CLIENT_ID` and
+`PORTAL_MS_CLIENT_SECRET` are in the portal's `.env`.
+
+**What a tenant gets.** First their Microsoft 365 admin approves the app
+once: Staff shows **Approve in Microsoft 365** (Microsoft's admin consent
+page) before connecting, since the app is unverified and an ordinary user
+can't consent to it. Then an admin opens Staff → **Connect Microsoft 365**
+and signs in with their own work account: the Microsoft organisation in
+that sign-in (its `tid`, from our own code exchange, never a value in a
+redirect) is linked to the tenant, one organisation per tenant, audited.
+The admin chooses:
+- the **group** whose members use the phone system (name or object id),
+  and optionally an **admins group** (members of both are admins);
+- which **Exchange custom attribute** (1–15, `extensionAttributeN` in
+  Graph) holds each person's extension. Set it in the Exchange admin
+  centre: Recipients → Mailboxes → the mailbox → Custom attributes. With
+  on-premises AD synced by Entra Connect, set the AD `extensionAttributeN`
+  instead (it syncs up). Microsoft doesn't expose `ipPhone` to Graph.
+
+**Preview** shows what a sync would do without doing it; **Sync now**
+does it, and it also runs every 15 minutes. Staff need an extension that
+exists in the tenant, one person each; an admin needs none. People
+synced in sign in with Microsoft (no password, no invitation); someone
+who leaves the group, or whose Microsoft account is disabled, is
+disabled and signed out, and enabled again if they come back. A local
+person (invited by email) with the same address in the same tenant is
+linked; the same address in another tenant is reported and skipped.
+The last active admin is never disabled or demoted. An admin can still
+**disable** a synced person in Staff (say, a compromised account), and
+sync never enables them again (`disabled_by`: only people sync itself
+disabled come back); their role and extension come from Microsoft 365
+only. Guests (other organisations' people in the group) are skipped.
+**Disconnect** stops it all and disables synced people without a
+password; it doesn't withdraw the organisation's approval (their admin
+removes the app under Enterprise applications for that).
+
+**Signing in** finds the person only by Microsoft organisation and
+object id (`tid`, `oid`), never by email (which a Microsoft admin sets
+and nobody verifies). Microsoft replaces the password only: an admin
+still gives the portal's two-factor code. The code flow uses PKCE, a
+nonce and a state kept server-side for 10 minutes, used once, found by a
+`SameSite=Lax` cookie (`__Host-gwportal-ms`: the session cookie is
+Strict, so it isn't sent on Microsoft's redirect back). The id_token
+comes straight from Microsoft's token endpoint, so its claims are
+checked (issuer for its `tid`, audience, expiry, nonce) without fetching
+signing keys (OpenID Connect Core 3.1.3.7). Only `organizations`
+accounts: no personal Microsoft accounts.
+
+**The app registration** (once, in our own Microsoft Entra admin centre,
+a new app, not the one that sends email):
+1. Entra admin centre → App registrations → New registration. Name
+   "GW Phones portal"; **Accounts in any organizational directory
+   (multitenant)**; redirect URI, platform **Web**:
+   `https://portal.amapforyourmoney.com/api/microsoft/callback`.
+2. Authentication → add a second Web redirect URI:
+   `https://portal.amapforyourmoney.com/api/microsoft/consented`.
+3. API permissions → Microsoft Graph: **Delegated** `openid`, `profile`,
+   `email`; **Application** `User.Read.All` and `GroupMember.Read.All`.
+   (Each customer's admin consents to these for their own organisation;
+   grant consent in ours too, to test.)
+4. Certificates & secrets → New client secret (it expires: at most 24
+   months; put a reminder in the calendar). Copy the value straight into
+   `/opt/gwphones/portal/.env` with an editor, never into chat:
+   ```
+   PORTAL_MS_CLIENT_ID=<Application (client) ID>
+   PORTAL_MS_CLIENT_SECRET=<the secret's value>
+   ```
+   then `systemctl restart gwportal`.
+5. The app is unverified (publisher verification needs a verified
+   business), so users can't consent to it themselves: each customer's
+   Microsoft 365 admin approves it first, which the Staff page asks for.
+
+nginx: the `/api/microsoft/(signin/start|callback)` routes are in the
+sign-in location's rate limit (`nginx-site.example`).
 
 ## Branches
 

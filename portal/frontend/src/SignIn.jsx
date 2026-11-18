@@ -2,14 +2,17 @@ import React, { useEffect, useState } from "react";
 import { post, takeFragmentToken } from "./api";
 import { Button, Field, Message, useAction } from "./ui";
 import { cancelled, passkeysAvailable, signInWithPasskey } from "./passkey";
+import { goToMicrosoft, microsoftAvailable } from "./microsoft";
 
 // Signing in, step by step as the API says: password, then the
 // two-factor code (or a recovery code), or for an admin without codes
 // yet, setting them up. Also: forgotten password, and the pages an
 // invitation or reset link opens (/invite#token, /reset#token).
 
-export function SignIn({ onState }) {
+export function SignIn({ onState, notice }) {
   const [email, setEmail] = useState("");
+  const [microsoft, setMicrosoft] = useState(false);
+  useEffect(() => { microsoftAvailable().then(setMicrosoft); }, []);
   const [password, setPassword] = useState("");
   const [forgot, setForgot] = useState(false);
   const a = useAction();
@@ -33,6 +36,7 @@ export function SignIn({ onState }) {
   return (
     <form className="card narrow" onSubmit={submit}>
       <h1>Sign in</h1>
+      {notice && <Message kind={notice.kind}>{notice.text}</Message>}
       <Field label="Email">
         <input type="email" autoComplete="username" required value={email} onChange={(e) => setEmail(e.target.value)} />
       </Field>
@@ -43,6 +47,8 @@ export function SignIn({ onState }) {
       {a.show}
       <Button busy={a.busy} type="submit">Sign in</Button>
       {passkeysAvailable() && <Button kind="secondary" type="button" onClick={withPasskey}>Sign in with a passkey</Button>}
+      {microsoft && <Button kind="secondary" type="button" busy={a.busy}
+        onClick={() => a.run(() => goToMicrosoft("/microsoft/signin/start"))}>Sign in with Microsoft</Button>}
       <button type="button" className="link" onClick={() => setForgot(true)}>Forgotten your password?</button>
     </form>
   );

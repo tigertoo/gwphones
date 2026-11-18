@@ -86,6 +86,28 @@ CREATE TABLE IF NOT EXISTS webauthn_challenges (
     challenge BLOB NOT NULL,
     expires_at TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS ms_flows (       -- a sign-in with Microsoft under way (microsoft.py)
+    token_hash TEXT PRIMARY KEY,         -- its Lax cookie's token, hashed
+    purpose TEXT NOT NULL,               -- signin | link
+    user_id INTEGER,                     -- link: the admin who started it
+    state TEXT NOT NULL,
+    nonce TEXT NOT NULL,
+    verifier TEXT NOT NULL,              -- PKCE
+    expires_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS ms_links (       -- a tenant's Microsoft 365, and what it syncs
+    tenant_code TEXT PRIMARY KEY,
+    ms_tenant TEXT NOT NULL UNIQUE,      -- the Microsoft organisation (tid): one portal tenant each
+    group_id TEXT NOT NULL DEFAULT '',
+    group_name TEXT NOT NULL DEFAULT '',
+    admin_group_id TEXT NOT NULL DEFAULT '',
+    admin_group_name TEXT NOT NULL DEFAULT '',
+    attribute INTEGER NOT NULL DEFAULT 1, -- Exchange custom attribute N: the extension
+    linked_by TEXT NOT NULL DEFAULT '',
+    linked_at TEXT NOT NULL DEFAULT '',
+    last_sync_at TEXT,
+    last_result TEXT
+);
 CREATE INDEX IF NOT EXISTS passkeys_user ON passkeys (user_id);
 CREATE INDEX IF NOT EXISTS sessions_user ON sessions (user_id);
 CREATE INDEX IF NOT EXISTS failures_ip ON failures (ip, at);
@@ -100,7 +122,16 @@ def connect() -> sqlite3.Connection:
     if fresh:
         os.chmod(config.DB_PATH, 0o600)  # password hashes and encrypted two-factor secrets
     conn.executescript(SCHEMA)
-    for migration in ("ALTER TABLE users ADD COLUMN webauthn_handle TEXT",):  # passkeys' user handle
+    for migration in ("ALTER TABLE users ADD COLUMN webauthn_handle TEXT",  # passkeys' user handle
+                      # Microsoft 365 (microsoft.py): the account's organisation and object id,
+                      # and 'microsoft' for people its sync manages.
+                      "ALTER TABLE users ADD COLUMN ms_tenant TEXT",
+                      "ALTER TABLE users ADD COLUMN ms_oid TEXT",
+                      "ALTER TABLE users ADD COLUMN source TEXT NOT NULL DEFAULT 'local'",
+                      # who disabled someone: 'admin' (Staff, the CLI) or 'sync' (Microsoft 365):
+                      # sync only ever enables again the people it disabled itself
+                      "ALTER TABLE users ADD COLUMN disabled_by TEXT",
+                      "CREATE UNIQUE INDEX IF NOT EXISTS users_ms ON users (ms_tenant, ms_oid)"):
         try:
             conn.execute(migration)
         except sqlite3.OperationalError:

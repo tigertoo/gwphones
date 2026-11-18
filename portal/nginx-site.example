@@ -37,7 +37,7 @@ server {
     # The portal's API. X-Real-IP is overwritten with the real address,
     # never passed on from the client: the portal's lockouts and audit
     # log trust it.
-    location ~ ^/api/(login|login/code|password/forgot|password/reset|invite/check|invite/accept)$ {
+    location ~ ^/api/(login|login/code|password/forgot|password/reset|invite/check|invite/accept|microsoft/signin/start|microsoft/callback)$ {
         limit_req zone=gwportal_signin burst=5 nodelay;
         limit_req_status 429;
         proxy_pass http://127.0.0.1:8020;

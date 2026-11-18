@@ -123,7 +123,8 @@ def cmd_disable(args, disabled: bool) -> int:
         u = _one(conn, args.email)
         if not u:
             return 1
-        conn.execute("UPDATE users SET disabled = ?, updated_at = ? WHERE id = ?", (int(disabled), db.iso(), u["id"]))
+        conn.execute("UPDATE users SET disabled = ?, disabled_by = ?, updated_at = ? WHERE id = ?",
+                     (int(disabled), "admin" if disabled else None, db.iso(), u["id"]))
         if disabled:
             auth.end_all_sessions(conn, u["id"])
             auth.forget_devices(conn, u["id"])

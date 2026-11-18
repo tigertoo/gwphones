@@ -354,3 +354,4 @@ from . import routing  # noqa: E402,F401
 from . import passkeys  # noqa: E402,F401
 from . import billing  # noqa: E402,F401
 from . import deskphones  # noqa: E402,F401
+from . import microsoft  # noqa: E402,F401

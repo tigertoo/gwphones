@@ -330,7 +330,11 @@ PUBLIC = {("GET", "/api/session"), ("POST", "/api/login"), ("POST", "/api/logout
           ("POST", "/api/password/forgot"), ("POST", "/api/password/reset"), ("POST", "/api/invite/check"),
           ("POST", "/api/invite/accept"), ("POST", "/api/2fa/start"), ("POST", "/api/2fa/finish"),
           # signing in with a passkey (test_portal_passkeys.py): open, like the password step
-          ("POST", "/api/passkey/login/start"), ("POST", "/api/passkey/login/finish")}
+          ("POST", "/api/passkey/login/start"), ("POST", "/api/passkey/login/finish"),
+          # signing in with Microsoft (test_portal_microsoft.py): open, like the password step; the
+          # callback and consent return are Microsoft's redirects back (checked by flow, not session)
+          ("GET", "/api/microsoft/available"), ("POST", "/api/microsoft/signin/start"),
+          ("GET", "/api/microsoft/callback"), ("GET", "/api/microsoft/consented")}
 
 
 def test_every_route_needs_a_full_session(world):
