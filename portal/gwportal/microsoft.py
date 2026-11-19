@@ -36,7 +36,9 @@ import json
 import logging
 import os
 import secrets
+import re
 import time
+import unicodedata
 from datetime import timedelta
 from typing import Dict, List, Optional
 from urllib.parse import urlencode
@@ -286,7 +288,8 @@ def _link_json(link) -> dict:
     return {"linked": True, "organisation": link["ms_tenant"], "group": link["group_name"],
             "admin_group": link["admin_group_name"], "attribute": link["attribute"],
             "last_sync_at": link["last_sync_at"], "last_result": json.loads(link["last_result"] or "null"),
-            "consent_url": consent_url(link["ms_tenant"]), "linked_by": link["linked_by"]}
+            "consent_url": consent_url(link["ms_tenant"]), "linked_by": link["linked_by"],
+            "create_exts": bool(link["create_exts"])}
 
 
 @app.get("/api/microsoft")
@@ -300,6 +303,7 @@ class Settings(BaseModel):
     group: str = ""          # a group's name or object id
     admin_group: str = ""    # optional: its members are admins
     attribute: int = 1       # Exchange custom attribute 1-15: the extension
+    create_exts: bool = False  # create an extension that doesn't exist yet
 
 
 @app.put("/api/microsoft")
@@ -320,11 +324,12 @@ def api_save_settings(req: Settings, request: Request, me: Signed = Depends(sign
         raise auth.Refused("Choose the group whose members use the phone system.", 400)
     with db.connect() as conn:
         conn.execute("UPDATE ms_links SET group_id = ?, group_name = ?, admin_group_id = ?, admin_group_name = ?, "
-                     "attribute = ? WHERE tenant_code = ?", (g["id"], g["name"], a["id"] if a else "",
-                                                            a["name"] if a else "", req.attribute,
-                                                            me.user["tenant_code"]))
+                     "attribute = ?, create_exts = ? WHERE tenant_code = ?",
+                     (g["id"], g["name"], a["id"] if a else "", a["name"] if a else "", req.attribute,
+                      int(req.create_exts), me.user["tenant_code"]))
         db.audit(conn, "Microsoft 365 sync settings", me.user, client_ip(request),
-                 f"group {g['name']}, admins {a['name'] if a else 'none'}, custom attribute {req.attribute}")
+                 f"group {g['name']}, admins {a['name'] if a else 'none'}, custom attribute {req.attribute}, "
+                 f"create extensions {'on' if req.create_exts else 'off'}")
     return {"ok": True}
 
 
@@ -433,7 +438,8 @@ def _find_group(ms_tenant: str, name_or_id: str) -> dict:
 
 def _members(ms_tenant: str, group_id: str, attribute: int) -> List[dict]:
     url = f"{GRAPH}/groups/{group_id}/transitiveMembers/microsoft.graph.user"
-    params = {"$select": "id,displayName,mail,userPrincipalName,accountEnabled,userType,onPremisesExtensionAttributes",
+    params = {"$select": "id,displayName,mail,userPrincipalName,accountEnabled,userType,businessPhones,"
+                         "onPremisesExtensionAttributes",
               "$top": "999"}
     out = []
     while url:
@@ -443,12 +449,141 @@ def _members(ms_tenant: str, group_id: str, attribute: int) -> List[dict]:
             out.append({"oid": u["id"], "name": (u.get("displayName") or "")[:80],
                         "email": auth.normal_email(u.get("mail") or u.get("userPrincipalName") or ""),
                         "enabled": bool(u.get("accountEnabled")), "guest": u.get("userType") == "Guest",
-                        "ext": str(attrs.get(f"extensionAttribute{attribute}") or "").strip()})
+                        "ext": str(attrs.get(f"extensionAttribute{attribute}") or "").strip(),
+                        "phone": e164((u.get("businessPhones") or [""])[0])})
         url, params = data.get("@odata.nextLink"), None
     return out
 
 
 # -- sync ----------------------------------------------------------------------------------------------------
+
+NEW = "new"  # an extension this sync is about to create (its created_at once it exists)
+EXT_RE = re.compile(r"2[0-9][0-9]")  # gwphones' extension numbers (pbx.EXT_MIN..EXT_MAX)
+NAME_KEEP = re.compile(r"[^A-Za-z0-9 .'_-]")  # gwphones' extension names (pbx.NAME_RE)
+
+
+def e164(number: str) -> str:
+    """A phone number as +353... (as gwphones' tenant_caller_ids lists the
+    tenant's numbers), or "" if it isn't one. National numbers are Irish."""
+    d = re.sub(r"[\s()./-]", "", number or "")
+    if d.startswith("+"):
+        d = d[1:]
+    elif d.startswith("00"):
+        d = d[2:]
+    elif d.startswith("0"):
+        d = "353" + d[1:]
+    return "+" + d if re.fullmatch(r"[1-9][0-9]{5,15}", d) else ""
+
+
+def ext_name(display_name: str) -> str:
+    """A person's name as an extension name: what phones and busy lamps show.
+    gwphones takes plain letters only, so accents go (Seán is Sean)."""
+    plain = unicodedata.normalize("NFKD", display_name or "").encode("ascii", "ignore").decode()
+    return re.sub(r"\s+", " ", NAME_KEEP.sub("", plain)).strip()[:40]
+
+
+def plan_extensions(conn, link, result: dict, members: List[dict], info: Dict[str, dict], caller_ids: dict) -> list:
+    """What sync does to the tenant's extensions, for the people it keeps:
+    create a missing one (if the tenant chose that), name it after them,
+    send its voicemail to their own email if nothing is set, show their
+    Office phone as its caller ID (only one of the tenant's own numbers),
+    switch a leaver's off and a returner's back on (only one sync switched
+    off). Writes nothing."""
+    tenant = link["tenant_code"]
+    by_oid = {m["oid"]: m for m in members}
+    allowed = set(caller_ids.get("numbers") or []) | ({caller_ids["default"]} if caller_ids.get("default") else set())
+    switched = {r["ext"] for r in conn.execute("SELECT ext FROM ms_switched_off WHERE tenant_code = ?", (tenant,))}
+    out = []
+    # Who'll be on which extension once the people actions are done: those
+    # unchanged by them too.
+    people = {}
+    for u in conn.execute("SELECT * FROM users WHERE tenant_code = ? AND ms_tenant = ? AND source = 'microsoft' "
+                          "AND disabled = 0 AND ext IS NOT NULL", (tenant, link["ms_tenant"])).fetchall():
+        people[u["ms_oid"]] = u["ext"]
+    leaving = set()
+    for a in result["actions"]:
+        if a["do"] == "disable":
+            leaving.add(a["ext"])
+            people = {k: v for k, v in people.items() if v != a["ext"]}
+        elif a.get("ext"):
+            people[a["oid"]] = a["ext"]
+    for oid, ext in sorted(people.items(), key=lambda x: x[1]):
+        m, e = by_oid.get(oid), info.get(ext)
+        if not m:
+            continue
+        name = ext_name(m["name"])
+        if e is None:
+            out.append({"do": "create", "ext": ext, "name": name or f"Extension {ext}", "who": m["email"]})
+            e = {"name": name, "vm_email": "", "outbound_cid": "", "enabled": True}
+        elif name and e["name"] != name:
+            out.append({"do": "rename", "ext": ext, "name": name, "enabled": bool(e.get("enabled", True)),
+                        "who": m["email"]})
+        if not e.get("vm_email") and m["email"]:
+            out.append({"do": "voicemail_email", "ext": ext, "email": m["email"], "who": m["email"]})
+        if m["phone"] and m["phone"] in allowed:
+            want = "" if m["phone"] == caller_ids.get("default") else m["phone"]
+            if want != (e.get("outbound_cid") or ""):
+                out.append({"do": "caller_id", "ext": ext, "number": want or caller_ids.get("default"), "cid": want,
+                            "who": m["email"]})
+        if not e.get("enabled", True) and ext in switched:
+            out.append({"do": "switch_on", "ext": ext, "name": name or e["name"], "who": m["email"]})
+    leavers = {a["id"] for a in result["actions"] if a["do"] == "disable"}
+    for ext in sorted(leaving - set(people.values())):
+        e = info.get(ext)
+        others = [u for u in conn.execute("SELECT id FROM users WHERE tenant_code = ? AND ext = ? AND disabled = 0",
+                                          (tenant, ext)).fetchall() if u["id"] not in leavers]
+        if e and e.get("enabled") and not others:  # nobody else (say, someone invited by email) uses it
+            out.append({"do": "switch_off", "ext": ext, "name": e["name"], "who": ""})
+    return out
+
+
+def _gw_try(caller, result: dict, x: dict, method: str, path: str, body: dict) -> bool:
+    try:
+        gw.call(caller, method, path, json=body)
+        return True
+    except auth.Refused as e:
+        result["problems"].append({"who": x.get("who") or f"extension {x['ext']}",
+                                   "problem": f"extension {x['ext']}: {e}"})
+        return False
+
+
+def _apply_extensions_first(caller, result: dict):
+    """Creates the missing extensions, then gives the people actions their
+    real created_at (what a portal login is bound to)."""
+    made = [x for x in result["extensions"] if x["do"] == "create"]
+    failed = {x["ext"] for x in made if not _gw_try(caller, result, x, "POST", "/extensions",
+                                                     {"ext": x["ext"], "name": x["name"]})}
+    if not made:
+        return
+    created = {e["ext"]: e["created_at"] for e in gw.call(caller, "GET", "/extensions")["extensions"]}
+    for a in list(result["actions"]):
+        if a.get("ext_created") == NEW:
+            if a["ext"] in failed or a["ext"] not in created:
+                result["actions"].remove(a)
+            else:
+                a["ext_created"] = created[a["ext"]]
+    result["extensions"] = [x for x in result["extensions"] if x["ext"] not in failed]
+
+
+def _apply_extensions_after(conn, caller, link, result: dict):
+    tenant = link["tenant_code"]
+    for x in result["extensions"]:
+        ext = x["ext"]
+        if x["do"] == "rename":  # its on/off state left as it is (an admin may have switched it off)
+            _gw_try(caller, result, x, "PUT", f"/extensions/{ext}", {"name": x["name"], "enabled": x["enabled"]})
+        elif x["do"] == "switch_on":
+            if _gw_try(caller, result, x, "PUT", f"/extensions/{ext}", {"name": x["name"], "enabled": True}):
+                conn.execute("DELETE FROM ms_switched_off WHERE tenant_code = ? AND ext = ?", (tenant, ext))
+        elif x["do"] == "switch_off":
+            if _gw_try(caller, result, x, "PUT", f"/extensions/{ext}", {"name": x["name"], "enabled": False}):
+                conn.execute("INSERT OR IGNORE INTO ms_switched_off (tenant_code, ext) VALUES (?, ?)", (tenant, ext))
+        elif x["do"] == "voicemail_email":
+            _gw_try(caller, result, x, "PUT", f"/extensions/{ext}/voicemail-email", {"email": x["email"]})
+        elif x["do"] == "caller_id":
+            _gw_try(caller, result, x, "PUT", f"/extensions/{ext}/outbound-cid", {"outbound_cid": x["cid"]})
+        if x["do"] != "create":
+            db.audit(conn, f"Microsoft 365 sync: extension {x['do']}", {"id": None, "email": "microsoft-365-sync",
+                                                                        "tenant_code": tenant}, "", f"{ext} {x.get('who', '')}")
 
 def _summary(result: dict) -> str:
     if result.get("error"):
@@ -470,7 +605,7 @@ def _run(tenant_code: str, apply: bool) -> dict:
         members = _members(link["ms_tenant"], link["group_id"], link["attribute"])
         admins = ({m["oid"] for m in _members(link["ms_tenant"], link["admin_group_id"], link["attribute"])}
                   if link["admin_group_id"] else set())
-        exts = {e["ext"]: e["created_at"] for e in gw.call(caller, "GET", "/extensions")["extensions"]}
+        listed = gw.call(caller, "GET", "/extensions")
     except (MsError, auth.Refused) as e:
         result = {"error": str(e), "at": iso()}
         if apply:
@@ -478,10 +613,21 @@ def _run(tenant_code: str, apply: bool) -> dict:
                 conn.execute("UPDATE ms_links SET last_sync_at = ?, last_result = ? WHERE tenant_code = ?",
                              (result["at"], json.dumps(result), tenant_code))
         return result
+    info = {e["ext"]: e for e in listed["extensions"]}
+    exts = {e: i["created_at"] for e, i in info.items()}
+    if link["create_exts"]:
+        # A staff member's number that isn't an extension yet: made by this sync (NEW until then).
+        for m in members:
+            if (m["enabled"] and not m.get("guest") and m["oid"] not in admins and m["ext"] not in exts
+                    and EXT_RE.fullmatch(m["ext"])):
+                exts[m["ext"]] = NEW
     with db.connect() as conn:
         result = plan(conn, link, members, admins, exts)
+        result["extensions"] = plan_extensions(conn, link, result, members, info, listed.get("caller_ids") or {})
         if apply:
+            _apply_extensions_first(caller, result)
             _apply(conn, link, result)
+            _apply_extensions_after(conn, caller, link, result)
             conn.execute("UPDATE ms_links SET last_sync_at = ?, last_result = ? WHERE tenant_code = ?",
                          (result["at"], json.dumps(result), tenant_code))
     return result

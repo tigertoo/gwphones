@@ -131,6 +131,11 @@ def connect() -> sqlite3.Connection:
                       # who disabled someone: 'admin' (Staff, the CLI) or 'sync' (Microsoft 365):
                       # sync only ever enables again the people it disabled itself
                       "ALTER TABLE users ADD COLUMN disabled_by TEXT",
+                      # Microsoft 365 sync may create missing extensions (per tenant, off by default)
+                      "ALTER TABLE ms_links ADD COLUMN create_exts INTEGER NOT NULL DEFAULT 0",
+                      # extensions sync switched off for a leaver: only these does it switch on again
+                      "CREATE TABLE IF NOT EXISTS ms_switched_off (tenant_code TEXT NOT NULL, ext TEXT NOT NULL, "
+                      "PRIMARY KEY (tenant_code, ext))",
                       "CREATE UNIQUE INDEX IF NOT EXISTS users_ms ON users (ms_tenant, ms_oid)"):
         try:
             conn.execute(migration)

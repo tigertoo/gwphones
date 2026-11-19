@@ -344,3 +344,91 @@ def test_still_in_the_group_with_a_problem_isnt_disabled(world, ms):
     assert r["counts"]["disabled"] == 0 and "no extension 299" in json.dumps(r["problems"])
     cara = next(u for u in admin.get("/api/users").json()["users"] if u["email"] == "cara@acme.example")
     assert not cara["disabled"] and cara["ext"] == "203"
+
+
+def ext_of(world, ext):
+    return ext_row(world, world["acme"]["id"], ext)
+
+
+def with_phone(m, phone):
+    m["businessPhones"] = [phone]
+    return m
+
+
+def acme_number(world, did):
+    pbx = world["pbx"]
+    token = pbx._current_tenant.set(world["acme"]["id"])
+    try:
+        pbx.api_set_inbound_route(pbx.InboundRouteRequest(did=did, target="201"))
+    finally:
+        pbx._current_tenant.reset(token)
+
+
+def test_extension_details_from_microsoft_365(world, ms):
+    admin = link(world, ms)
+    acme_number(world, "35315557777")
+    ms.members[GROUP] = [with_phone(member("oid-cara", "cara@acme.example", "203", name="Cara Ó Murphy"), "01 555 7777")]
+    preview = admin.post("/api/microsoft/preview").json()
+    assert {x["do"] for x in preview["extensions"]} == {"rename", "voicemail_email", "caller_id"}
+    assert ext_of(world, "203")["name"] == "Free"  # preview writes nothing
+    admin.post("/api/microsoft/sync")
+    e = ext_of(world, "203")
+    assert e["name"] == "Cara O Murphy" and e["vm_email"] == "cara@acme.example" and e["outbound_cid"] == "+35315557777"
+    # nothing to do the second time
+    assert admin.post("/api/microsoft/preview").json()["extensions"] == []
+
+
+def test_caller_id_only_a_tenant_number_and_voicemail_email_not_overwritten(world, ms):
+    admin = link(world, ms)
+    ms.members[GROUP] = [with_phone(member("oid-cara", "cara@acme.example", "203"), "087 123 4567")]  # her mobile
+    admin.post("/api/microsoft/sync")
+    assert ext_of(world, "203")["outbound_cid"] == ""
+    admin.put("/api/extensions/203/voicemail-email", json={"email": "office@acme.example"})
+    ms.members[GROUP] = [with_phone(member("oid-cara", "cara@acme.example", "203"), "01 555 9999")]  # the main number
+    r = admin.post("/api/microsoft/sync").json()
+    assert all(x["do"] != "voicemail_email" for x in r["extensions"])
+    assert ext_of(world, "203")["vm_email"] == "office@acme.example" and ext_of(world, "203")["outbound_cid"] == ""
+
+
+def test_missing_extension_created_when_chosen(world, ms):
+    admin = link(world, ms)
+    ms.members[GROUP] = [member("oid-dan", "dan@acme.example", "205", name="Dan"),
+                         member("oid-eve", "eve@acme.example", "999")]
+    r = admin.post("/api/microsoft/sync").json()
+    assert "no extension 205" in json.dumps(r["problems"])  # off by default
+    assert admin.put("/api/microsoft", json={"group": "Phone users", "admin_group": "Phone admins", "attribute": 1,
+                                             "create_exts": True}).status_code == 200
+    preview = admin.post("/api/microsoft/preview").json()
+    assert {"do": "create", "ext": "205", "name": "Dan", "who": "dan@acme.example"} in preview["extensions"]
+    assert "no extension 999" in json.dumps(preview["problems"])  # not an extension number: never made
+    r = admin.post("/api/microsoft/sync").json()
+    assert r["counts"]["added"] == 1
+    e = ext_of(world, "205")
+    assert e["name"] == "Dan" and e["enabled"]
+    from gwportal import db
+    with db.connect() as conn:
+        dan = conn.execute("SELECT * FROM users WHERE email = 'dan@acme.example'").fetchone()
+    assert dan["ext"] == "205" and dan["ext_created"] == e["created_at"]
+
+
+def test_leavers_extension_switched_off_and_back_on(world, ms):
+    admin = link(world, ms)
+    ms.members[GROUP] = [member("oid-cara", "cara@acme.example", "203")]
+    admin.post("/api/microsoft/sync")
+    ms.members[GROUP] = []
+    r = admin.post("/api/microsoft/sync").json()
+    assert [x["do"] for x in r["extensions"]] == ["switch_off"] and not ext_of(world, "203")["enabled"]
+    ms.members[GROUP] = [member("oid-cara", "cara@acme.example", "203")]
+    admin.post("/api/microsoft/sync")
+    assert ext_of(world, "203")["enabled"]
+
+
+def test_an_admins_switched_off_extension_stays_off(world, ms):
+    admin = link(world, ms)
+    ms.members[GROUP] = [member("oid-cara", "cara@acme.example", "203", name="Cara")]
+    admin.post("/api/microsoft/sync")
+    assert admin.put("/api/extensions/203", json={"name": "Cara", "enabled": False}).status_code == 200
+    ms.members[GROUP] = [member("oid-cara", "cara@acme.example", "203", name="Cara Murphy")]
+    admin.post("/api/microsoft/sync")
+    e = ext_of(world, "203")
+    assert e["name"] == "Cara Murphy" and not e["enabled"]  # renamed, still off

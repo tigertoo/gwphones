@@ -265,6 +265,18 @@ The admin chooses:
   on-premises AD synced by Entra Connect, set the AD `extensionAttributeN`
   instead (it syncs up). Microsoft doesn't expose `ipPhone` to Graph.
 
+Sync also fills in each person's **extension** (`plan_extensions`):
+its name (their display name, accents dropped: phones and busy lamps
+show it), voicemail by email to their own address (only if none is set),
+and their **Office phone** as its caller ID, only if that's one of the
+tenant's own numbers (the main one means the default). With **Create an
+extension that doesn't exist yet** ticked (off by default), a number in
+200–299 that isn't an extension yet is created, named after them. A
+leaver's extension is switched off (nobody else on it), and switched on
+again when they return; one an admin switched off stays off
+(`ms_switched_off` keeps which ones sync switched off). Nothing is ever
+deleted.
+
 **Preview** shows what a sync would do without doing it; **Sync now**
 does it, and it also runs every 15 minutes. Staff need an extension that
 exists in the tenant, one person each: not one another active person
