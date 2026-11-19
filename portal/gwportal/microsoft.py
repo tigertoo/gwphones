@@ -519,6 +519,27 @@ def plan(conn, link, members: List[dict], admins: set, exts: Dict[str, str]) -> 
         problems.append({"who": ", ".join(per_ext[e]), "problem": f"they share extension {e}: one person each"})
     wanted = {c["oid"]: c for c in candidates if c["ext"] not in shared}
 
+    # Nor an extension an active person outside this sync already has (say,
+    # someone invited by email): one person per extension. People this
+    # sync manages who are leaving don't count: they're disabled below.
+    def mine(u) -> bool:
+        return u["ms_tenant"] == tid and u["ms_oid"] in wanted
+    in_group = {m["oid"] for m in present}
+    leaving = {u["id"] for u in conn.execute("SELECT id, ms_oid FROM users WHERE tenant_code = ? AND ms_tenant = ? "
+                                             "AND source = 'microsoft' AND disabled = 0", (tenant, tid)).fetchall()
+               if u["ms_oid"] not in in_group}
+    for oid, w in list(wanted.items()):
+        if not w["ext"]:
+            continue
+        for h in conn.execute("SELECT * FROM users WHERE tenant_code = ? AND ext = ? AND disabled = 0",
+                              (tenant, w["ext"])).fetchall():
+            same_person = (h["ms_tenant"] == tid and h["ms_oid"] == oid) or (not h["ms_oid"] and h["email"] == w["email"])
+            if not same_person and h["id"] not in leaving and not (mine(h) and wanted[h["ms_oid"]]["ext"] != w["ext"]):
+                problems.append({"who": w["email"], "problem": f"extension {w['ext']} is already "
+                                                               f"{h['name'] or h['email']}'s: one person per extension"})
+                del wanted[oid]
+                break
+
     for oid, w in wanted.items():
         u = conn.execute("SELECT * FROM users WHERE ms_tenant = ? AND ms_oid = ?", (tid, oid)).fetchone()
         if not u:
@@ -553,10 +574,12 @@ def plan(conn, link, members: List[dict], admins: set, exts: Dict[str, str]) -> 
         elif changes:
             actions.append({"do": "change", "id": u["id"], "changes": changes, **_fields(w)})
 
-    # Leavers: people sync manages who are no longer wanted. Local people are never touched.
+    # Leavers: people sync manages who have left the group, or whose
+    # Microsoft account is disabled. Someone still in the group with a
+    # problem (above) is left as they are. Local people are never touched.
     for u in conn.execute("SELECT * FROM users WHERE tenant_code = ? AND ms_tenant = ? AND source = 'microsoft' "
                           "AND disabled = 0", (tenant, tid)).fetchall():
-        if u["ms_oid"] not in wanted:
+        if u["id"] in leaving:
             actions.append({"do": "disable", "id": u["id"], "email": u["email"], "name": u["name"], "role": u["role"],
                             "ext": u["ext"]})
 

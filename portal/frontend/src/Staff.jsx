@@ -96,6 +96,8 @@ function Person({ u, me, exts, onChange }) {
         <span className="tag">{u.role === "admin" ? "Admin" : `Ext ${u.ext || "–"}`}</span>
         {u.invited && <span className="tag">Invited</span>}
         {u.microsoft && <span className="tag">Microsoft 365</span>}
+        {u.shares_ext && <span className="tag tag-off" title="Another active person is on this extension: one person each">
+          Shares ext {u.ext}</span>}
         {u.disabled && <span className="tag tag-off">Disabled</span>}
       </button>
       {open && (

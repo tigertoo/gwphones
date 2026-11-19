@@ -267,7 +267,12 @@ The admin chooses:
 
 **Preview** shows what a sync would do without doing it; **Sync now**
 does it, and it also runs every 15 minutes. Staff need an extension that
-exists in the tenant, one person each; an admin needs none. People
+exists in the tenant, one person each: not one another active person
+already has (someone invited by email, say), which is reported instead;
+an admin needs none. Someone still in the group with a problem like that
+is left as they are, not disabled. Staff itself also refuses a second
+active person on an extension (inviting, moving, switching back on), and
+flags older duplicates ("Shares ext"). People
 synced in sign in with Microsoft (no password, no invitation); someone
 who leaves the group, or whose Microsoft account is disabled, is
 disabled and signed out, and enabled again if they come back. A local

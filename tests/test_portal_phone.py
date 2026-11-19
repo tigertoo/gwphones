@@ -222,6 +222,10 @@ def test_invite_staff(world):
     admin = world["client"]("admin")
     assert admin.post("/api/users", json={"email": "cara@acme.example", "role": "user"}).status_code == 400  # no ext
     assert admin.post("/api/users", json={"email": "cara@acme.example", "role": "user", "ext": "203"}).status_code == 400
+    assert admin.post("/api/users", json={"email": "cara@acme.example", "role": "user", "ext": "202"}).status_code == 409  # bob's
+    from gwportal import db
+    with db.connect() as conn:
+        conn.execute("UPDATE users SET disabled = 1 WHERE email = 'bob@acme.example'")
     r = admin.post("/api/users", json={"email": "Cara@Acme.example", "name": "Cara", "role": "user", "ext": "202"})
     assert r.status_code == 200 and r.json()["user"]["invited"]
     to, subject, body = world["sent"][-1]

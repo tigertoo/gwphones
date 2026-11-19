@@ -78,6 +78,13 @@ def member(oid, email, ext="", enabled=True, name=None):
 
 @pytest.fixture
 def ms(world, monkeypatch):
+    """A fake Microsoft, and a free extension 203 for Acme (ann has 201, bob 202)."""
+    pbx = world["pbx"]
+    token = pbx._current_tenant.set(world["acme"]["id"])
+    try:
+        pbx.api_create_extension(pbx.ExtensionCreate(ext="203", name="Free"))
+    finally:
+        pbx._current_tenant.reset(token)
     from gwportal import microsoft
     fake = FakeMicrosoft()
     monkeypatch.setattr(microsoft, "CLIENT_ID", CLIENT)
@@ -110,7 +117,7 @@ def link(world, fake):
 
 def test_link_and_sync_staff_with_extensions(world, ms):
     admin = link(world, ms)
-    ms.members[GROUP] = [member("oid-cara", "cara@acme.example", "202"), member("oid-dev", "dev@acme.example", "")]
+    ms.members[GROUP] = [member("oid-cara", "cara@acme.example", "203"), member("oid-dev", "dev@acme.example", "")]
     preview = admin.post("/api/microsoft/preview").json()
     assert preview["counts"]["added"] == 1 and any("empty" in p["problem"] for p in preview["problems"])
     from gwportal import db
@@ -119,15 +126,15 @@ def test_link_and_sync_staff_with_extensions(world, ms):
     r = admin.post("/api/microsoft/sync").json()
     assert r["counts"]["added"] == 1
     cara = next(u for u in admin.get("/api/users").json()["users"] if u["email"] == "cara@acme.example")
-    assert cara["microsoft"] and cara["ext"] == "202" and cara["role"] == "user" and not cara["invited"]
+    assert cara["microsoft"] and cara["ext"] == "203" and cara["role"] == "user" and not cara["invited"]
     with db.connect() as conn:
         row = conn.execute("SELECT * FROM users WHERE email = 'cara@acme.example'").fetchone()
-    assert row["ext_created"] == ext_row(world, world["acme"]["id"], "202")["created_at"]
+    assert row["ext_created"] == ext_row(world, world["acme"]["id"], "203")["created_at"]
 
 
 def test_signin_found_by_object_id_never_email(world, ms):
     admin = link(world, ms)
-    ms.members[GROUP] = [member("oid-cara", "cara@acme.example", "202")]
+    ms.members[GROUP] = [member("oid-cara", "cara@acme.example", "203")]
     admin.post("/api/microsoft/sync")
     from fastapi.testclient import TestClient
     from gwportal import app as portal_app
@@ -201,7 +208,7 @@ def test_one_tenant_per_organisation(world, ms):
 
 def test_leavers_disabled_and_back_again(world, ms):
     admin = link(world, ms)
-    ms.members[GROUP] = [member("oid-cara", "cara@acme.example", "202")]
+    ms.members[GROUP] = [member("oid-cara", "cara@acme.example", "203")]
     admin.post("/api/microsoft/sync")
     ms.members[GROUP] = []
     assert admin.post("/api/microsoft/sync").json()["counts"]["disabled"] == 1
@@ -209,14 +216,14 @@ def test_leavers_disabled_and_back_again(world, ms):
     assert cara["disabled"]
     ms.members[GROUP] = [member("oid-cara", "cara@acme.example", "202", enabled=False)]
     assert admin.post("/api/microsoft/sync").json()["counts"]["enabled"] == 0  # account disabled in Microsoft
-    ms.members[GROUP] = [member("oid-cara", "cara@acme.example", "202")]
+    ms.members[GROUP] = [member("oid-cara", "cara@acme.example", "203")]
     assert admin.post("/api/microsoft/sync").json()["counts"]["enabled"] == 1
 
 
 def test_problems_reported_not_guessed(world, ms):
     admin = link(world, ms)
     ms.members[GROUP] = [member("oid-a", "a@acme.example", "201"), member("oid-b", "b@acme.example", "201"),
-                         member("oid-c", "c@acme.example", "299"), member("oid-z", "zoe@main.example", "202")]
+                         member("oid-c", "c@acme.example", "299"), member("oid-z", "zoe@main.example", "203")]
     r = admin.post("/api/microsoft/sync").json()
     text = json.dumps(r["problems"])
     assert "share extension 201" in text and "no extension 299" in text and "another organisation" in text
@@ -254,7 +261,7 @@ def test_not_consented_says_so(world, ms):
 
 def test_staff_refused_and_nothing_secret_shown(world, ms):
     admin = link(world, ms)
-    ms.members[GROUP] = [member("oid-cara", "cara@acme.example", "202")]
+    ms.members[GROUP] = [member("oid-cara", "cara@acme.example", "203")]
     answers = [admin.get("/api/microsoft").text, admin.post("/api/microsoft/sync").text,
                admin.post("/api/microsoft/preview").text]
     for text in answers:
@@ -272,7 +279,7 @@ def test_staff_refused_and_nothing_secret_shown(world, ms):
 
 def test_unlink_disables_people_without_a_password(world, ms):
     admin = link(world, ms)
-    ms.members[GROUP] = [member("oid-cara", "cara@acme.example", "202")]
+    ms.members[GROUP] = [member("oid-cara", "cara@acme.example", "203")]
     admin.post("/api/microsoft/sync")
     assert admin.delete("/api/microsoft").status_code == 200
     users = {u["email"]: u for u in admin.get("/api/users").json()["users"]}
@@ -282,7 +289,7 @@ def test_unlink_disables_people_without_a_password(world, ms):
 
 def test_sync_never_undoes_an_admins_disable(world, ms):
     admin = link(world, ms)
-    ms.members[GROUP] = [member("oid-cara", "cara@acme.example", "202")]
+    ms.members[GROUP] = [member("oid-cara", "cara@acme.example", "203")]
     admin.post("/api/microsoft/sync")
     cara = next(u for u in admin.get("/api/users").json()["users"] if u["email"] == "cara@acme.example")
     assert admin.put(f"/api/users/{cara['id']}", json={"disabled": True}).status_code == 200
@@ -300,14 +307,14 @@ def test_disabled_local_person_not_linked(world, ms):
     with db.connect() as conn:
         bob = conn.execute("SELECT id FROM users WHERE email = 'bob@acme.example'").fetchone()["id"]
     admin.put(f"/api/users/{bob}", json={"disabled": True})
-    ms.members[GROUP] = [member("oid-bob", "bob@acme.example", "202")]
+    ms.members[GROUP] = [member("oid-bob", "bob@acme.example", "203")]
     r = admin.post("/api/microsoft/sync").json()
     assert r["actions"] == [] and "disabled by an admin" in json.dumps(r["problems"])
 
 
 def test_guests_skipped(world, ms):
     admin = link(world, ms)
-    g = member("oid-guest", "guest@elsewhere.example", "202")
+    g = member("oid-guest", "guest@elsewhere.example", "203")
     g["userType"] = "Guest"
     ms.members[GROUP] = [g]
     r = admin.post("/api/microsoft/sync").json()
@@ -318,3 +325,22 @@ def test_approval_link_before_connecting(world, ms):
     s = world["client"]("admin").get("/api/microsoft").json()
     assert s["linked"] is False
     assert s["consent_url"].startswith("https://login.microsoftonline.com/organizations/v2.0/adminconsent?")
+
+
+def test_sync_wont_put_two_people_on_one_extension(world, ms):
+    admin = link(world, ms)
+    # ann (invited by email) is on 201
+    ms.members[GROUP] = [member("oid-cara", "cara@acme.example", "201")]
+    r = admin.post("/api/microsoft/sync").json()
+    assert r["counts"]["added"] == 0 and "extension 201 is already" in json.dumps(r["problems"])
+
+
+def test_still_in_the_group_with_a_problem_isnt_disabled(world, ms):
+    admin = link(world, ms)
+    ms.members[GROUP] = [member("oid-cara", "cara@acme.example", "203")]
+    admin.post("/api/microsoft/sync")
+    ms.members[GROUP] = [member("oid-cara", "cara@acme.example", "299")]  # a typo in Microsoft 365
+    r = admin.post("/api/microsoft/sync").json()
+    assert r["counts"]["disabled"] == 0 and "no extension 299" in json.dumps(r["problems"])
+    cara = next(u for u in admin.get("/api/users").json()["users"] if u["email"] == "cara@acme.example")
+    assert not cara["disabled"] and cara["ext"] == "203"

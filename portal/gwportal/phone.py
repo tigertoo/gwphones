@@ -409,6 +409,22 @@ def _ext_identity(me: Signed, ext: Optional[str]):
     return e["ext"], e["created_at"]
 
 
+def ext_holder(conn, tenant_code: str, ext: Optional[str], besides: int = 0):
+    """The active person (not disabled) already on this extension, if any:
+    one person per extension (a disabled one doesn't hold it)."""
+    if not ext:
+        return None
+    return conn.execute("SELECT * FROM users WHERE tenant_code = ? AND ext = ? AND disabled = 0 AND id != ?",
+                        (tenant_code, ext, besides)).fetchone()
+
+
+def _ext_free(conn, tenant_code: str, ext: Optional[str], besides: int = 0):
+    holder = ext_holder(conn, tenant_code, ext, besides)
+    if holder:
+        raise auth.Refused(f"Extension {ext} is already {holder['name'] or holder['email']}'s: one person per "
+                           "extension. Change or disable theirs first.", 409)
+
+
 def _active_admins(conn, tenant_code: str, besides: int) -> int:
     return conn.execute("SELECT COUNT(*) FROM users WHERE tenant_code = ? AND role = 'admin' AND disabled = 0 "
                         "AND id != ?", (tenant_code, besides)).fetchone()[0]
@@ -431,7 +447,13 @@ def api_users(me: Signed = Depends(signed_in())):
     _admin(me)
     with db.connect() as conn:
         rows = conn.execute("SELECT * FROM users WHERE tenant_code = ? ORDER BY email", (me.user["tenant_code"],)).fetchall()
-    return {"users": [_user_json(u) for u in rows]}
+    # Anyone sharing an extension with another active person (from before this was checked): flagged.
+    on = {}
+    for u in rows:
+        if u["ext"] and not u["disabled"]:
+            on[u["ext"]] = on.get(u["ext"], 0) + 1
+    return {"users": [{**_user_json(u), "shares_ext": bool(u["ext"] and not u["disabled"] and on[u["ext"]] > 1)}
+                      for u in rows]}
 
 
 class NewUser(BaseModel):
@@ -448,6 +470,7 @@ def api_invite(req: NewUser, request: Request, me: Signed = Depends(signed_in())
         raise auth.Refused("Choose the extension this person uses.", 400)
     ext, created = _ext_identity(me, req.ext)
     with db.connect() as conn:
+        _ext_free(conn, me.user["tenant_code"], ext if req.role == "user" else None)
         u = create_user(conn, req.email, me.user["tenant_code"], req.role, req.name, ext, created)
         db.audit(conn, "staff invited", me.user, client_ip(request), f"{u['email']} as {u['role']}")
     try:
@@ -500,6 +523,8 @@ def api_change_user(user_id: int, req: UserChange, request: Request, me: Signed 
         was_admin = u["role"] == "admin" and not u["disabled"]
         if was_admin and (role != "admin" or disabled) and _active_admins(conn, u["tenant_code"], u["id"]) == 0:
             raise auth.Refused("Your organisation needs at least one admin.", 400)
+        if not disabled and role == "user" and (ext != u["ext"] or u["disabled"] or role != u["role"]):
+            _ext_free(conn, u["tenant_code"], ext, u["id"])  # given an extension, or switched back on
         conn.execute("UPDATE users SET name = ?, role = ?, ext = ?, ext_created = ?, disabled = ?, disabled_by = ?, "
                      "updated_at = ? WHERE id = ?", ((req.name if req.name is not None else u["name"]).strip()[:80], role,
                                                     ext, created, disabled,
