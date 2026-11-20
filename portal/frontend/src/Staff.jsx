@@ -102,7 +102,13 @@ function Person({ u, me, exts, onChange }) {
       </button>
       {open && (
         <div className="editor">
-          <div className="block">
+          {u.microsoft && <div className="block">
+            <p className="small">{u.name || u.email}'s name, role and extension come from Microsoft 365: change them in
+              {" "}<a href={MS_ADMIN[0][0]} target="_blank" rel="noreferrer">the Microsoft 365 admin centre</a> (name,
+              Office phone, group) or <a href={MS_ADMIN[2][0]} target="_blank" rel="noreferrer">the Exchange admin
+              centre</a> (extension, Custom attributes). You can still disable them here.</p>
+          </div>}
+          {!u.microsoft && <div className="block">
             <Field label="Role">
               <select value={role} onChange={(e) => setRole(e.target.value)}>
                 <option value="user">Staff, with their own extension</option>
@@ -113,7 +119,7 @@ function Person({ u, me, exts, onChange }) {
             <Button busy={a.busy} kind="secondary" disabled={role === u.role && (ext || "") === (u.ext || "")}
               onClick={() => save({ role, ext: role === "user" ? ext : null }, "Saved. They're signed out, to sign in again.")}>
               Save</Button>
-          </div>
+          </div>}
           <div className="buttons">
             {u.invited && <Button kind="secondary" busy={a.busy}
               onClick={() => a.run(() => post(`/users/${u.id}/invite-again`), "Invitation sent again.")}>Send the invitation again</Button>}
@@ -188,6 +194,7 @@ function Microsoft365({ onSynced }) {
           {Array.from({ length: 15 }, (_, i) => i + 1).map((n) => <option key={n} value={n}>{n}</option>)}
         </select>
       </Field>
+      <MicrosoftAdminLinks />
       <label className="check">
         <input type="checkbox" checked={f.create_exts} onChange={(e) => setF({ ...f, create_exts: e.target.checked })} />
         Create an extension (200–299) that doesn't exist yet, named after the person
@@ -205,6 +212,28 @@ function Microsoft365({ onSynced }) {
       </div>
       {a.show}
       {result && <SyncResult r={result} />}
+    </div>
+  );
+}
+
+// Where an organisation changes what sync reads: Microsoft's own admin sites
+// (signed in as a Microsoft 365 admin).
+const MS_ADMIN = [
+  ["https://admin.microsoft.com/#/users", "Microsoft 365 admin centre: users",
+    "names, Office phone (caller ID), and switching an account off"],
+  ["https://admin.microsoft.com/#/groups", "Microsoft 365 admin centre: groups",
+    "who's in the group to sync, and the admins group"],
+  ["https://admin.exchange.microsoft.com/#/mailboxes", "Exchange admin centre: mailboxes",
+    "each person's extension: their mailbox, Others, Custom attributes"],
+];
+
+function MicrosoftAdminLinks() {
+  return (
+    <div className="small">
+      <p><strong>Where to make changes</strong> (sign in with a Microsoft 365 admin account; the next sync picks them
+        up, or click Sync now):</p>
+      <ul>{MS_ADMIN.map(([href, label, what]) => (
+        <li key={href}><a href={href} target="_blank" rel="noreferrer">{label}</a>: {what}</li>))}</ul>
     </div>
   );
 }
