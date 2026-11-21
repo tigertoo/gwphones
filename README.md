@@ -282,7 +282,11 @@ does it, and it also runs every 15 minutes. Staff need an extension that
 exists in the tenant, one person each: not one another active person
 already has (someone invited by email, say), which is reported instead;
 an admin needs none. Someone still in the group with a problem like that
-is left as they are, not disabled. Staff itself also refuses a second
+(or a number that isn't an extension: likely a typo) is left as they
+are, not disabled. An **emptied** custom attribute means no phone: like
+a leaver, their login is disabled and their extension switched off, both
+back on when a number is put back. Someone moved to another number frees
+the old one (switched off, if nobody else is on it). Staff itself also refuses a second
 active person on an extension (inviting, moving, switching back on), and
 flags older duplicates ("Shares ext"). People
 synced in sign in with Microsoft (no password, no invitation); someone

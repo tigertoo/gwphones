@@ -507,6 +507,8 @@ def plan_extensions(conn, link, result: dict, members: List[dict], info: Dict[st
             people = {k: v for k, v in people.items() if v != a["ext"]}
         elif a.get("ext"):
             people[a["oid"]] = a["ext"]
+        if a["do"] == "change" and a.get("old_ext") and a["old_ext"] != a.get("ext"):
+            leaving.add(a["old_ext"])  # moved to another number: the old one is free (switched off below)
     for oid, ext in sorted(people.items(), key=lambda x: x[1]):
         m, e = by_oid.get(oid), info.get(ext)
         if not m:
@@ -527,7 +529,7 @@ def plan_extensions(conn, link, result: dict, members: List[dict], info: Dict[st
                             "who": m["email"]})
         if not e.get("enabled", True) and ext in switched:
             out.append({"do": "switch_on", "ext": ext, "name": name or e["name"], "who": m["email"]})
-    leavers = {a["id"] for a in result["actions"] if a["do"] == "disable"}
+    leavers = {a["id"] for a in result["actions"] if a["do"] in ("disable", "change")}
     for ext in sorted(leaving - set(people.values())):
         e = info.get(ext)
         others = [u for u in conn.execute("SELECT id FROM users WHERE tenant_code = ? AND ext = ? AND disabled = 0",
@@ -641,7 +643,7 @@ def plan(conn, link, members: List[dict], admins: set, exts: Dict[str, str]) -> 
     present = [m for m in members if m["enabled"]]
 
     # Who should be here, as what. Staff need an extension of the tenant's own, one person each.
-    candidates = []
+    candidates, cleared = [], set()
     for m in present:
         r = "admin" if m["oid"] in admins else "user"
         if m.get("guest"):
@@ -650,7 +652,10 @@ def plan(conn, link, members: List[dict], admins: set, exts: Dict[str, str]) -> 
         elif not m["email"]:
             problems.append({"who": m["name"], "problem": "no email address"})
         elif r == "user" and not m["ext"]:
-            problems.append({"who": m["email"], "problem": f"custom attribute {attr} (their extension) is empty"})
+            # Emptied on purpose: no phone any more. Like a leaver (below).
+            cleared.add(m["oid"])
+            problems.append({"who": m["email"], "problem": f"custom attribute {attr} (their extension) is empty: "
+                                                           "no phone, so their login and extension are switched off"})
         elif r == "user" and m["ext"] not in exts:
             problems.append({"who": m["email"], "problem": f"there's no extension {m['ext']}"})
         else:
@@ -670,7 +675,7 @@ def plan(conn, link, members: List[dict], admins: set, exts: Dict[str, str]) -> 
     # sync manages who are leaving don't count: they're disabled below.
     def mine(u) -> bool:
         return u["ms_tenant"] == tid and u["ms_oid"] in wanted
-    in_group = {m["oid"] for m in present}
+    in_group = {m["oid"] for m in present} - cleared
     leaving = {u["id"] for u in conn.execute("SELECT id, ms_oid FROM users WHERE tenant_code = ? AND ms_tenant = ? "
                                              "AND source = 'microsoft' AND disabled = 0", (tenant, tid)).fetchall()
                if u["ms_oid"] not in in_group}
@@ -718,7 +723,7 @@ def plan(conn, link, members: List[dict], admins: set, exts: Dict[str, str]) -> 
         elif u["disabled"]:
             actions.append({"do": "enable", "id": u["id"], **_fields(w)})
         elif changes:
-            actions.append({"do": "change", "id": u["id"], "changes": changes, **_fields(w)})
+            actions.append({"do": "change", "id": u["id"], "changes": changes, "old_ext": u["ext"], **_fields(w)})
 
     # Leavers: people sync manages who have left the group, or whose
     # Microsoft account is disabled. Someone still in the group with a

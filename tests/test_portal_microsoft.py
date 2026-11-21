@@ -432,3 +432,33 @@ def test_an_admins_switched_off_extension_stays_off(world, ms):
     admin.post("/api/microsoft/sync")
     e = ext_of(world, "203")
     assert e["name"] == "Cara Murphy" and not e["enabled"]  # renamed, still off
+
+
+def test_emptied_attribute_switches_login_and_extension_off(world, ms):
+    admin = link(world, ms)
+    ms.members[GROUP] = [member("oid-cara", "cara@acme.example", "203")]
+    admin.post("/api/microsoft/sync")
+    ms.members[GROUP] = [member("oid-cara", "cara@acme.example", "")]  # number removed in Exchange
+    r = admin.post("/api/microsoft/sync").json()
+    assert r["counts"]["disabled"] == 1 and [x["do"] for x in r["extensions"]] == ["switch_off"]
+    cara = next(u for u in admin.get("/api/users").json()["users"] if u["email"] == "cara@acme.example")
+    assert cara["disabled"] and not ext_of(world, "203")["enabled"]
+    # the number put back: both on again
+    ms.members[GROUP] = [member("oid-cara", "cara@acme.example", "203")]
+    admin.post("/api/microsoft/sync")
+    cara = next(u for u in admin.get("/api/users").json()["users"] if u["email"] == "cara@acme.example")
+    assert not cara["disabled"] and ext_of(world, "203")["enabled"]
+
+
+def test_moved_to_another_number_frees_the_old_one(world, ms):
+    admin = link(world, ms)
+    admin.put("/api/microsoft", json={"group": "Phone users", "admin_group": "Phone admins", "attribute": 1,
+                                      "create_exts": True})
+    ms.members[GROUP] = [member("oid-cara", "cara@acme.example", "203")]
+    admin.post("/api/microsoft/sync")
+    ms.members[GROUP] = [member("oid-cara", "cara@acme.example", "205")]
+    r = admin.post("/api/microsoft/sync").json()
+    assert {x["do"] for x in r["extensions"]} >= {"create", "switch_off"}
+    assert ext_of(world, "205")["enabled"] and not ext_of(world, "203")["enabled"]
+    cara = next(u for u in admin.get("/api/users").json()["users"] if u["email"] == "cara@acme.example")
+    assert cara["ext"] == "205" and not cara["disabled"]
