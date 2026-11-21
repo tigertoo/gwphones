@@ -1246,14 +1246,16 @@ def _ring_ext_context() -> List[str]:
     desk_first, the desk phone alone for DESK_FIRST_SECONDS, then all; and
     backup, the desk phone only, or the apps when no desk phone is
     connected. With only one kind connected, every mode rings what's
-    there. Option c: the devices that didn't answer are told the call was
-    answered elsewhere, so they don't show it as missed."""
+    there. When one device answers, Dial tells the others it was answered
+    elsewhere, so they don't show it as missed. Not Dial's c option: that
+    says "answered elsewhere" on every cancel, the caller hanging up and
+    ringing out too, so real missed calls wouldn't show."""
     return ["; ---- An extension's devices: a desk phone and its apps ----",
             "[sub-ring-ext]",
             "exten => s,1,Set(LOCAL(all)=${PJSIP_DIAL_CONTACTS(${ARG1})})",
-            " same => n,Set(LOCAL(o)=c)",
+            " same => n,Set(LOCAL(o)=)",
             ' same => n,GotoIf($["${ARG4}" != "rec"]?ready)',
-            f" same => n,Set(LOCAL(o)={REC_DIAL}c)",
+            f" same => n,Set(LOCAL(o)={REC_DIAL})",
             ' same => n(ready),GotoIf($["${all}" = ""]?none)',
             ' same => n,GotoIf($["${ARG3}" != "desk_first" & "${ARG3}" != "backup"]?ringall)',
             " same => n,Set(LOCAL(desk)=)",
@@ -1658,7 +1660,7 @@ def _ringgroups_context(conn, t: TenantNames) -> List[str]:
                         " same => n,Set(RG=${RG}&${C})",
                         f" same => n(rg{i}),NoOp()"]
             out += [' same => n,GotoIf($["${RG}" = ""]?nobody)',
-                    f" same => n,Dial(${{RG:1}},{ring},{REC_DIAL}c)",
+                    f" same => n,Dial(${{RG:1}},{ring},{REC_DIAL})",
                     ' same => n,ExecIf($["${DIALSTATUS}" = "ANSWER"]?Hangup())',
                     " same => n(nobody),NoOp()"]
         if g["voicemail"] in active:

@@ -18,8 +18,10 @@ def test_several_devices_and_every_one_rung(world):
     assert "Gosub(sub-ring-ext,s,1(${EXTEN},30,${RINGMODE_${EXTEN}},rec))" in dial
     import re
     assert not re.search(r"Dial\(PJSIP/(1002)?(\$\{EXTEN[^}]*\}|2\d\d)[,)]", dial)
-    # the others are told it was answered elsewhere (no missed call)
-    assert "Set(LOCAL(o)=U(portal-rec)c)" in dial
+    # never Dial's c option: it would hide real missed calls (abandoned, rung out)
+    assert "Set(LOCAL(o)=U(portal-rec))" in dial
+    import re as _re
+    assert not any(_re.search(r"Dial\([^)]*,[^,)]*,[^)]*c\)", ln) and "portal-rec)c" in ln for ln in dial.splitlines())
     # no ExecIf around a contact's address: it splits on ":"
     assert not any("ExecIf" in ln and ("PJSIP_DIAL_CONTACTS" in ln or "${d}" in ln) for ln in dial.splitlines())
 

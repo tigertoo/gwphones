@@ -500,8 +500,11 @@ desk phone, Groundwire through its push server, another app. A call for
 the extension, from a ring group, or click to call rings every connected
 device through `[sub-ring-ext]` (`Dial(PJSIP/<login>)` alone rings only
 the first contact; it uses `PJSIP_DIAL_CONTACTS`). The first answered
-takes the call; Dial's `c` option tells the others it was answered
-elsewhere, so they don't show a missed call. Voicemail, its lamp, do not
+takes the call; Dial tells the others it was answered elsewhere, so
+they don't show a missed call. Not Dial's `c` option: on Asterisk 20 it
+sets "answered elsewhere" on every cancel ("If the Dial() application
+cancels this call, always set HANGUPCAUSE to 'answered elsewhere'"), so a
+caller hanging up or a ring-out to voicemail wouldn't show as missed. Voicemail, its lamp, do not
 disturb, forwarding, busy lamps, caller ID, recording and billing are the
 extension's, so they're the same on every device.
 
