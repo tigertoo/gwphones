@@ -1245,7 +1245,8 @@ def _ring_ext_context() -> List[str]:
     each contact (PJSIP_DIAL_CONTACTS). Modes (RING_MODES): all at once;
     desk_first, the desk phone alone for DESK_FIRST_SECONDS, then all; and
     backup, the desk phone only, or the apps when no desk phone is
-    connected. With only one kind connected, every mode rings what's
+    connected (an unreachable device isn't: qualify notices an unplugged
+    desk phone within about a minute). With only one kind connected, every mode rings what's
     there. When one device answers, Dial tells the others it was answered
     elsewhere, so they don't show it as missed. Not Dial's c option: that
     says "answered elsewhere" on every cancel, the caller hanging up and
@@ -1264,6 +1265,10 @@ def _ring_ext_context() -> List[str]:
             " same => n,Set(LOCAL(i)=1)",
             ' same => n,While($["${CUT(cs,\\,,${i})}" != ""])',
             " same => n,Set(LOCAL(c)=${CUT(cs,\\,,${i})})",
+            # A device the server can't reach any more (a desk phone unplugged:
+            # found by qualify within a minute) doesn't count as connected.
+            " same => n,Set(LOCAL(st)=${PJSIP_CONTACT(${c},status)})",
+            ' same => n,GotoIf($["${st}" = "Unreachable" | "${st}" = "Unavail" | "${st}" = "Unavailable"]?next)',
             " same => n,Set(LOCAL(d)=PJSIP/${ARG1}/${PJSIP_CONTACT(${c},uri)})",
             # (Not ExecIf: it splits on ":", and a contact's address has one.)
             f' same => n,GotoIf($[${{REGEX("{DESK_UA_RE}" ${{PJSIP_CONTACT(${{c}},user_agent)}})}}]?isdesk)',
