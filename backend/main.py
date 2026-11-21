@@ -70,6 +70,8 @@ PORTAL_ROUTES = {
     ("PUT", "/api/pbx/extensions/{ext}/voicemail-email"),
     # An extension's caller ID: the portal may choose only the tenant's own numbers (pbx.tenant_caller_ids).
     ("PUT", "/api/pbx/extensions/{ext}/outbound-cid"),
+    # How an extension's devices ring (a desk phone and its apps).
+    ("PUT", "/api/pbx/extensions/{ext}/ring-mode"),
     ("GET", "/api/pbx/forwarding"),
     ("PUT", "/api/pbx/extensions/{ext}/forwarding"),
     ("GET", "/api/pbx/status/tenant"),

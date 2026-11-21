@@ -197,7 +197,8 @@ through this API as the portal caller above. Being built (phase 4).
   (the phone keeps its settings until it's factory-reset). The page shows
   the Server URL, user name and password to enter on the phone, the steps,
   and its web-page login. gwphones keeps it to the tenant's own phones,
-  allows one phone per extension (`aor-ext` takes one device), and refuses
+  allows one desk phone per extension (the apps can share it: see
+  "A desk phone and the apps on one extension"), and refuses
   a MAC another tenant has without saying so. The passwords are shown to
   the admin but never written to the audit log. Its own router, which
   refuses anyone but an admin.
@@ -489,6 +490,35 @@ config, the service refuses to create a new, empty one (and says so in
 `pbx-changes.log`): applying from it would rewrite the live config with no
 extensions. That catches a wrong `PBX_DB` path after a move. Set
 `PBX_ALLOW_NEW_DB=1` only when starting afresh is really meant.
+
+### A desk phone and the apps on one extension
+
+An extension takes up to 4 devices at once (`max_contacts=4` on each
+generated AOR, over the `aor-ext` template's one; `remove_existing` still
+drops the oldest beyond that), all with the extension's own password: a
+desk phone, Groundwire through its push server, another app. A call for
+the extension, from a ring group, or click to call rings every connected
+device through `[sub-ring-ext]` (`Dial(PJSIP/<login>)` alone rings only
+the first contact; it uses `PJSIP_DIAL_CONTACTS`). The first answered
+takes the call; Dial's `c` option tells the others it was answered
+elsewhere, so they don't show a missed call. Voicemail, its lamp, do not
+disturb, forwarding, busy lamps, caller ID, recording and billing are the
+extension's, so they're the same on every device.
+
+**When a call comes in** (portal: the extension; console: Phone setup),
+per extension (`ring_mode`, `RINGMODE_<login>` in `[globals]`):
+- **all** (default): every device at once;
+- **desk_first**: the desk phone alone for 10 s, then every device (and
+  straight to every device if the desk phone is busy);
+- **backup**: the desk phone only, or the apps when no desk phone is
+  connected.
+With only one kind connected, every mode rings what's there. A desk phone
+is told from an app by the User-Agent it registered with (`DESK_UA_RE`:
+Yealink, Cisco, Panasonic, ...). Ring groups ring every device of each
+member. Admins set it for any extension, a user for their own.
+
+Not ExecIf around a device list: it splits on `:`, and every contact's
+address has one (`sip:`), so the dialplan uses GotoIf and Set instead.
 
 ### Saves not applied
 
@@ -1288,9 +1318,8 @@ body" in `/var/log/nginx/error.log`):
         client_max_body_size 110m;
 ```
 
-Give a desk phone its own extension. `aor-ext` allows one contact with
-`remove_existing`, so a phone and an app on the same extension (the app
-through its push server) keep logging each other out. A phone can be moved
+A desk phone can share its extension with the apps (see "A desk phone
+and the apps on one extension"). A phone can be moved
 to another extension in the console without a new password; it picks it
 up at its next fetch. If it then shows "No service", see the cipher list
 in the PBX certificate section.

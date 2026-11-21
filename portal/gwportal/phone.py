@@ -123,7 +123,7 @@ def api_extensions(request: Request, me: Signed = Depends(signed_in())):
     data = gw.call(me.user, "GET", "/extensions")
     exts = data["extensions"]
     mine = _bound(me, request, exts)
-    keep = ("ext", "name", "enabled", "vm_email", "record", "vm_nopin", "outbound_cid")
+    keep = ("ext", "name", "enabled", "vm_email", "record", "vm_nopin", "outbound_cid", "ring_mode")
     return {"extensions": [{k: e.get(k) for k in keep} for e in exts if mine is None or e["ext"] == mine],
             # what an extension may show on calls out: the organisation's own numbers
             "caller_ids": data.get("caller_ids") or {"default": "", "numbers": []}}
@@ -269,6 +269,22 @@ def api_caller_id(ext: str, req: CallerId, request: Request, me: Signed = Depend
     _saving(me.user)
     r = gw.call(me.user, "PUT", f"/extensions/{ext}/outbound-cid", json={"outbound_cid": cid})
     _audit(me, request, "caller ID changed", f"{ext} shows {cid or 'the main number'}")
+    return _done(r)
+
+
+class RingMode(BaseModel):
+    mode: str
+
+
+@app.put("/api/extensions/{ext}/ring-mode")
+def api_ring_mode(ext: str, req: RingMode, request: Request, me: Signed = Depends(signed_in())):
+    """How the extension's phones ring: all at once, the desk phone first,
+    or the apps only when the desk phone isn't connected. An admin for any
+    extension, a user for their own."""
+    _may(me, request, ext)
+    _saving(me.user)
+    r = gw.call(me.user, "PUT", f"/extensions/{ext}/ring-mode", json={"mode": req.mode})
+    _audit(me, request, "ringing changed", f"{ext}: {req.mode}")
     return _done(r)
 
 

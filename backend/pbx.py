@@ -131,6 +131,16 @@ WEB_MAX_LIMIT, WEB_MAX_TOTAL_LIMIT = 50, 200
 
 FORWARD_FAMILIES = {"always": "CF", "busy": "CFB", "no_answer": "CFU"}
 DND_FAMILY = "DND"
+# An extension's devices: a desk phone and the apps (each a contact on its
+# AOR), up to MAX_DEVICES at once, all with the extension's own password.
+# [sub-ring-ext] rings them by its ring mode; a desk phone is told from an
+# app by the User-Agent it registered with (DESK_UA_RE).
+MAX_DEVICES = 4
+RING_MODES = {"all": "Ring all my phones at once",
+              "desk_first": "Ring my desk phone first, then my apps too",
+              "backup": "Ring my apps only when my desk phone isn't connected"}
+DESK_FIRST_SECONDS = 10
+DESK_UA_RE = "^(Yealink|Cisco|Panasonic|Grandstream|Snom|Polycom|Poly|Fanvil|Gigaset|Htek|Alcatel)"
 MAX_FORWARD_HOPS = 3  # 201 -> 202 -> 201 ... stops here, at voicemail
 # Where calls may be forwarded: other extensions and Irish landlines and
 # mobiles (national format). Never abroad, 1800/premium or 112/999: anyone
@@ -606,6 +616,8 @@ def get_db() -> sqlite3.Connection:
                    "extensions ADD COLUMN record INTEGER NOT NULL DEFAULT 0",
                    # *97 from the extension's own phones without the PIN
                    "extensions ADD COLUMN vm_nopin INTEGER NOT NULL DEFAULT 0",
+                   # how its devices ring (RING_MODES): all at once, desk phone first, app as backup
+                   "extensions ADD COLUMN ring_mode TEXT NOT NULL DEFAULT 'all'",
                    # Yealink RPS (rps.py): the phone's entry there, and how its last sync went
                    "desk_phones ADD COLUMN rps_id TEXT",
                    "desk_phones ADD COLUMN rps_status TEXT NOT NULL DEFAULT ''",
@@ -682,7 +694,8 @@ TENANT_KEYED = {
     "extensions": ("ext", """(ext TEXT NOT NULL, name TEXT NOT NULL, password TEXT NOT NULL,
         enabled INTEGER NOT NULL DEFAULT 1, created_at TEXT NOT NULL, updated_at TEXT NOT NULL, vm_pin TEXT,
         vm_email TEXT NOT NULL DEFAULT '', setup_email TEXT NOT NULL DEFAULT '', outbound_cid TEXT NOT NULL DEFAULT '',
-        record INTEGER NOT NULL DEFAULT 0, vm_nopin INTEGER NOT NULL DEFAULT 0, tenant_id INTEGER NOT NULL DEFAULT 1,
+        record INTEGER NOT NULL DEFAULT 0, vm_nopin INTEGER NOT NULL DEFAULT 0, ring_mode TEXT NOT NULL DEFAULT 'all',
+        tenant_id INTEGER NOT NULL DEFAULT 1,
         PRIMARY KEY (tenant_id, ext))"""),
     "ring_groups": ("number", """(number TEXT NOT NULL, name TEXT NOT NULL, strategy TEXT NOT NULL DEFAULT 'ringall',
         ring_time INTEGER NOT NULL DEFAULT 25, members TEXT NOT NULL DEFAULT '', voicemail TEXT NOT NULL DEFAULT '',
@@ -966,6 +979,7 @@ def build_extensions_conf(conn) -> str:
                 f"password={r['password']}",
                 "",
                 f"[{login}](aor-ext)",
+                f"max_contacts={MAX_DEVICES}  ; a desk phone and its apps together (the template allows one)",
                 ""]
     out += _web_guest_endpoint(conn)
     return "\n".join(out)
@@ -1195,7 +1209,7 @@ def _call_ext_context(t: TenantNames) -> List[str]:
         ' same => n,GotoIf($["${FWD}" != ""]?fwd)',
         f' same => n,GotoIf($["${{DB({DND_FAMILY}/{me})}}" = "1"]?busy)',
         *REC_EXT_LINES,
-        f" same => n,Dial(PJSIP/{me},30,{REC_DIAL})",
+        f" same => n,Gosub(sub-ring-ext,s,1({me},30,${{RINGMODE_{me}}},rec))",
         ' same => n,GotoIf($["${DIALSTATUS}" = "ANSWER"]?done)',
         ' same => n,GotoIf($["${DIALSTATUS}" = "BUSY"]?busy)',
         f" same => n,Set(FWD=${{DB({cfu}/{me})}})",
@@ -1222,6 +1236,54 @@ def _call_ext_context(t: TenantNames) -> List[str]:
 REC_EXT_LINES = [' same => n,ExecIf($["${RECEXT}" = "" & "${PBX_EXT}" != ""]?Set(__RECEXT=${PBX_EXT}))',
                  ' same => n,ExecIf($["${RECTENANT}" = "" & "${PBX_TENANT}" != ""]?Set(__RECTENANT=${PBX_TENANT}))']
 REC_DIAL = "U(portal-rec)"  # Dial option: runs [portal-rec] on the answering channel
+
+
+def _ring_ext_context() -> List[str]:
+    """Rings an extension's devices: Gosub(sub-ring-ext,s,1(login,seconds,
+    mode,rec)), DIALSTATUS as Dial leaves it (CHANUNAVAIL with nothing
+    connected). Dial(PJSIP/<login>) would ring only one of them: this rings
+    each contact (PJSIP_DIAL_CONTACTS). Modes (RING_MODES): all at once;
+    desk_first, the desk phone alone for DESK_FIRST_SECONDS, then all; and
+    backup, the desk phone only, or the apps when no desk phone is
+    connected. With only one kind connected, every mode rings what's
+    there. Option c: the devices that didn't answer are told the call was
+    answered elsewhere, so they don't show it as missed."""
+    return ["; ---- An extension's devices: a desk phone and its apps ----",
+            "[sub-ring-ext]",
+            "exten => s,1,Set(LOCAL(all)=${PJSIP_DIAL_CONTACTS(${ARG1})})",
+            " same => n,Set(LOCAL(o)=c)",
+            ' same => n,GotoIf($["${ARG4}" != "rec"]?ready)',
+            f" same => n,Set(LOCAL(o)={REC_DIAL}c)",
+            ' same => n(ready),GotoIf($["${all}" = ""]?none)',
+            ' same => n,GotoIf($["${ARG3}" != "desk_first" & "${ARG3}" != "backup"]?ringall)',
+            " same => n,Set(LOCAL(desk)=)",
+            " same => n,Set(LOCAL(apps)=)",
+            " same => n,Set(LOCAL(cs)=${PJSIP_AOR(${ARG1},contact)})",
+            " same => n,Set(LOCAL(i)=1)",
+            ' same => n,While($["${CUT(cs,\\,,${i})}" != ""])',
+            " same => n,Set(LOCAL(c)=${CUT(cs,\\,,${i})})",
+            " same => n,Set(LOCAL(d)=PJSIP/${ARG1}/${PJSIP_CONTACT(${c},uri)})",
+            # (Not ExecIf: it splits on ":", and a contact's address has one.)
+            f' same => n,GotoIf($[${{REGEX("{DESK_UA_RE}" ${{PJSIP_CONTACT(${{c}},user_agent)}})}}]?isdesk)',
+            " same => n,Set(LOCAL(apps)=${apps}&${d})",
+            " same => n,Goto(next)",
+            " same => n(isdesk),Set(LOCAL(desk)=${desk}&${d})",
+            " same => n(next),Set(i=$[${i} + 1])",
+            " same => n,EndWhile()",
+            ' same => n,GotoIf($["${desk}" = "" | "${apps}" = ""]?ringall)  ; only one kind connected',
+            ' same => n,GotoIf($["${ARG3}" = "backup"]?deskonly)',
+            f" same => n,Dial(${{desk:1}},{DESK_FIRST_SECONDS},${{o}})",
+            ' same => n,GotoIf($["${DIALSTATUS}" = "ANSWER"]?done)  ; busy at the desk: the apps can take it',
+            f" same => n,Set(LOCAL(left)=$[${{ARG2}} - {DESK_FIRST_SECONDS}])",
+            ' same => n,GotoIf($[${left} < 5]?done)',
+            " same => n,Dial(${all},${left},${o})",
+            " same => n,Goto(done)",
+            " same => n(deskonly),Dial(${desk:1},${ARG2},${o})",
+            " same => n,Goto(done)",
+            " same => n(ringall),Dial(${all},${ARG2},${o})",
+            " same => n,Goto(done)",
+            " same => n(none),Set(DIALSTATUS=CHANUNAVAIL)",
+            " same => n(done),Return()"]
 
 
 def _rec_context() -> List[str]:
@@ -1460,7 +1522,7 @@ def _click_to_call_contexts(t: TenantNames) -> List[str]:
             f"[{t.c2c_ring}]",
             "exten => _2XXX.,1,Set(CALLERID(name)=Calling ${EXTEN:3})",
             " same => n,Set(CALLERID(num)=${EXTEN:3})",
-            f" same => n,Dial(PJSIP/{pre}${{EXTEN:0:3}},30)",
+            f" same => n,Gosub(sub-ring-ext,s,1({pre}${{EXTEN:0:3}},30,all,))",
             " same => n,Hangup()",
             f"[{t.c2c_dial}]",
             "exten => _2XXX.,1,Set(C2C=${EXTEN:0:3})",
@@ -1582,15 +1644,21 @@ def _ringgroups_context(conn, t: TenantNames) -> List[str]:
         elif g["strategy"] == "hunt":
             for i, m in enumerate(members):
                 out += [f' same => n,GotoIf($["${{DB({DND_FAMILY}/{t.login(m)})}}" = "1"]?skip{i})',
-                        f" same => n,Dial(PJSIP/{t.login(m)},{ring},{REC_DIAL})",
+                        f" same => n,Gosub(sub-ring-ext,s,1({t.login(m)},{ring},all,rec))",
                         ' same => n,ExecIf($["${DIALSTATUS}" = "ANSWER"]?Hangup())',
                         f" same => n(skip{i}),NoOp()"]
         else:
             out.append(" same => n,Set(RG=)")
-            out += [f' same => n,ExecIf($["${{DB({DND_FAMILY}/{t.login(m)})}}" != "1"]?Set(RG=${{RG}}&PJSIP/{t.login(m)}))'
-                    for m in members]
+            # every connected device of each member (PJSIP/<login> alone rings
+            # only one). Not ExecIf: it splits on ":", and the addresses have one.
+            for i, m in enumerate(members):
+                out += [f' same => n,GotoIf($["${{DB({DND_FAMILY}/{t.login(m)})}}" = "1"]?rg{i})',
+                        f" same => n,Set(C=${{PJSIP_DIAL_CONTACTS({t.login(m)})}})",
+                        f' same => n,GotoIf($["${{C}}" = ""]?rg{i})',
+                        " same => n,Set(RG=${RG}&${C})",
+                        f" same => n(rg{i}),NoOp()"]
             out += [' same => n,GotoIf($["${RG}" = ""]?nobody)',
-                    f" same => n,Dial(${{RG:1}},{ring},{REC_DIAL})",
+                    f" same => n,Dial(${{RG:1}},{ring},{REC_DIAL}c)",
                     ' same => n,ExecIf($["${DIALSTATUS}" = "ANSWER"]?Hangup())',
                     " same => n(nobody),NoOp()"]
         if g["voicemail"] in active:
@@ -1622,6 +1690,10 @@ def build_portal_dialplan(conn) -> str:
     out += [f"EXTCID_{names[r['tenant_id']].login(r['ext'])}={r['outbound_cid']}"
             for r in conn.execute("SELECT ext, outbound_cid, tenant_id FROM extensions WHERE enabled = 1 AND outbound_cid != '' "
                                   "ORDER BY ext")]
+    # Extensions whose devices don't all ring at once (see [sub-ring-ext]).
+    out += [f"RINGMODE_{names[r['tenant_id']].login(r['ext'])}={r['ring_mode']}"
+            for r in conn.execute("SELECT ext, ring_mode, tenant_id FROM extensions WHERE enabled = 1 "
+                                  "AND ring_mode != 'all' ORDER BY ext") if r["ring_mode"] in RING_MODES]
     # Extensions whose calls are all recorded (see [portal-rec]).
     out += [f"REC_{names[r['tenant_id']].login(r['ext'])}=1"
             for r in conn.execute("SELECT ext, tenant_id FROM extensions WHERE enabled = 1 AND record = 1 ORDER BY ext")]
@@ -1659,6 +1731,7 @@ def build_portal_dialplan(conn) -> str:
         out += [""] + _click_to_call_contexts(t)
     out += [""] + _weblinks_context(conn, notices)
     out += [""] + _rec_context()
+    out += [""] + _ring_ext_context()
     for t in tenants:
         out += _ringgroups_context(conn, t) + _ivr_contexts(conn, t) + _hours_contexts(conn, t)
     for t in tenants:
@@ -2034,9 +2107,18 @@ def parse_contacts(output: str) -> Dict[str, dict]:
                         pass
                 break
         ip = re.search(r"@(\[[^\]]+\]|[^:;>]+)", uri)
-        contacts[aor] = {"status": status or "Unknown", "rtt_ms": rtt,
-                         "address": ip.group(1).strip("[]") if ip else None}
+        found = {"status": status or "Unknown", "rtt_ms": rtt, "address": ip.group(1).strip("[]") if ip else None}
+        # Several devices on one extension (a desk phone and its apps): the
+        # best-connected one shows, with how many there are.
+        had = contacts.get(aor)
+        if had and _CONTACT_RANK.get(had["status"], 0) >= _CONTACT_RANK.get(found["status"], 0):
+            had["devices"] += 1
+            continue
+        contacts[aor] = {**found, "devices": (had["devices"] + 1) if had else 1}
     return contacts
+
+
+_CONTACT_RANK = {"Avail": 3, "Reachable": 3, "NonQual": 2, "Created": 1, "Updated": 1}
 
 
 def parse_channels(output: str) -> List[dict]:
@@ -2340,6 +2422,7 @@ def api_config():
             "extensions": [{"ext": r["ext"], "name": r["name"], "enabled": bool(r["enabled"]),
                             "voicemail_email": r["vm_email"], "setup_email": r["setup_email"],
                             "outbound_cid": r["outbound_cid"], "record": bool(r["record"]),
+                            "ring_mode": r["ring_mode"],
                             "vm_nopin": bool(r["vm_nopin"]),
                             "created_at": r["created_at"], "updated_at": r["updated_at"]}
                            for r in conn.execute("SELECT * FROM extensions WHERE tenant_id = ? ORDER BY ext", (tid,))],
@@ -2431,6 +2514,23 @@ def api_update_extension(ext: str, req: ExtensionUpdate):
             _revoke_setup_links(conn, ext)
         conn.commit()
         return apply_config(conn, f"Updated extension {ext}: name={name}, enabled={req.enabled}")
+
+
+class RingModeRequest(BaseModel):
+    mode: str
+
+
+@router.put("/extensions/{ext}/ring-mode")
+def api_ring_mode(ext: str, req: RingModeRequest):
+    """How the extension's devices ring (RING_MODES)."""
+    if req.mode not in RING_MODES:
+        raise HTTPException(400, "Choose how its phones ring.")
+    with _lock, get_db() as conn:
+        if conn.execute("UPDATE extensions SET ring_mode = ?, updated_at = ? WHERE ext = ? AND tenant_id = ?",
+                        (req.mode, _now(), ext, current_tenant())).rowcount == 0:
+            raise HTTPException(404, "Extension not found.")
+        conn.commit()
+        return apply_config(conn, f"Extension {ext}: {RING_MODES[req.mode].lower()}")
 
 
 @router.post("/extensions/{ext}/reset-password")
@@ -2561,12 +2661,13 @@ def api_list_extensions():
     extension from a later one with the same number. caller_ids: the
     numbers its extensions may show on calls out (tenant_caller_ids)."""
     with get_db() as conn:
-        rows = conn.execute("SELECT ext, name, enabled, created_at, vm_email, record, vm_nopin, outbound_cid "
+        rows = conn.execute("SELECT ext, name, enabled, created_at, vm_email, record, vm_nopin, outbound_cid, ring_mode "
                             "FROM extensions WHERE tenant_id = ? ORDER BY ext", (current_tenant(),)).fetchall()
         caller_ids = tenant_caller_ids(conn, current_tenant())
     return {"extensions": [{"ext": r["ext"], "name": r["name"], "enabled": bool(r["enabled"]),
                             "created_at": r["created_at"], "vm_email": r["vm_email"], "record": bool(r["record"]),
-                            "vm_nopin": bool(r["vm_nopin"]), "outbound_cid": r["outbound_cid"]} for r in rows],
+                            "vm_nopin": bool(r["vm_nopin"]), "outbound_cid": r["outbound_cid"],
+                            "ring_mode": r["ring_mode"]} for r in rows],
             "caller_ids": caller_ids}
 
 

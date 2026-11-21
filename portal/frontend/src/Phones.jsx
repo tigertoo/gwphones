@@ -79,6 +79,7 @@ function ExtensionEditor({ ext, me, fwd, callerIds, onChange }) {
     <div className="editor">
       <NameAndSwitch ext={ext} admin={admin} onChange={onChange} />
       <CallerId ext={ext} callerIds={callerIds} onChange={onChange} />
+      <Ringing ext={ext} onChange={onChange} />
       <Forwarding ext={ext.ext} fwd={fwd} onChange={onChange} />
       <VoicemailEmail ext={ext} me={me} onChange={onChange} />
       <VoicemailAccess ext={ext} me={me} onChange={onChange} />
@@ -108,6 +109,36 @@ function NameAndSwitch({ ext, admin, onChange }) {
           Switched on
         </label>
       )}
+      {a.show}
+    </div>
+  );
+}
+
+// A desk phone and the apps on one extension: how a call rings them.
+const RING_MODES = [
+  ["all", "Ring all my phones at once"],
+  ["desk_first", "Ring my desk phone first, then my apps too (after 10 seconds)"],
+  ["backup", "Ring my apps only when my desk phone isn't connected"],
+];
+
+function Ringing({ ext, onChange }) {
+  const current = ext.ring_mode || "all";
+  const [value, setValue] = useState(current);
+  useEffect(() => { setValue(current); }, [current]);
+  const a = useAction();
+  const save = () => a.run(() => put(`/extensions/${ext.ext}/ring-mode`, { mode: value }), "Saved.")
+    .then((r) => r && onChange());
+  return (
+    <div className="block">
+      <h3>When a call comes in</h3>
+      <p className="small muted">A desk phone and the apps can all be set up on this extension at once (up to 4). The
+        first one answered takes the call; the others stop ringing without showing it as missed.</p>
+      <div className="inline-form">
+        <select value={value} onChange={(e) => setValue(e.target.value)} aria-label="When a call comes in">
+          {RING_MODES.map(([k, label]) => <option key={k} value={k}>{label}</option>)}
+        </select>
+        <Button busy={a.busy} kind="secondary" onClick={save} disabled={value === current}>Save</Button>
+      </div>
       {a.show}
     </div>
   );

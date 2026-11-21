@@ -563,6 +563,30 @@ function VoicemailAccess({ ext, nopin, send, busy, onPin }) {
   );
 }
 
+// A desk phone and the apps on one extension (up to 4 at once): how a call rings them.
+const RING_MODES = [
+  ["all", "Ring all its phones at once"],
+  ["desk_first", "Desk phone first, then the apps too (after 10 s)"],
+  ["backup", "Apps only when the desk phone isn't connected"],
+];
+
+function RingMode({ ext, current, send, busy }) {
+  const [value, setValue] = useState(current || "all");
+  useEffect(() => setValue(current || "all"), [current]);
+  return (
+    <form className="idea-form-row pbx-gap" onSubmit={(ev) => {
+      ev.preventDefault();
+      send("PUT", `/extensions/${ext}/ring-mode`, { mode: value }, `Extension ${ext}: ${RING_MODES.find((m) => m[0] === value)[1].toLowerCase()}.`);
+    }}>
+      <select className="idea-input" value={value} onChange={(e) => setValue(e.target.value)} aria-label="When a call comes in">
+        {RING_MODES.map(([k, label]) => <option key={k} value={k}>{label}</option>)}
+      </select>
+      <button className="ticket-action-btn" disabled={busy || value === (current || "all")}>Save</button>
+      <span className="pbx-hint">A desk phone and the apps can be set up on this extension together. The first one answered takes the call.</span>
+    </form>
+  );
+}
+
 function OutboundCid({ ext, current, fallback, dids, send, busy }) {
   const [value, setValue] = useState(current || "");
   useEffect(() => setValue(current || ""), [current]);
@@ -831,6 +855,7 @@ function ExtensionsSection({ config, status, send, busy, apiBase, reload }) {
                     <VoicemailEmail ext={e.ext} current={e.voicemail_email} send={send} busy={busy} />
                     <OutboundCid ext={e.ext} current={e.outbound_cid} fallback={config.settings.outbound_cid}
                       dids={config.inbound_routes.map((r) => r.did)} send={send} busy={busy} />
+                    <RingMode ext={e.ext} current={e.ring_mode} send={send} busy={busy} />
                     <label className="pbx-toggle pbx-gap">
                       <input type="checkbox" checked={e.record} disabled={busy}
                         onChange={(ev) => send("PUT", `/extensions/${e.ext}/recording`, { always: ev.target.checked },
