@@ -1432,8 +1432,12 @@ def _features_context(t: TenantNames) -> List[str]:
         " same => n,Hangup()",
         " same => n(none),Playback(invalid)",
         " same => n,Hangup()"]
-    out += ["exten => *8,1,Pickup()", " same => n,Hangup()",
-            f"exten => _**{t.ext_pattern[1:]},1,PickupChan(PJSIP/{t.login_prefix}${{EXTEN:2}}-,p)", " same => n,Hangup()"]
+    # Nothing to answer (nothing ringing, or only phones of another site for
+    # *8): a short "invalid" rather than the phone showing "Forbidden". A
+    # pickup that works ends the dialplan here, so this only plays then.
+    nothing = [" same => n,Answer()", " same => n,Playback(invalid)", " same => n,Hangup()"]
+    out += ["exten => *8,1,Pickup()", *nothing,
+            f"exten => _**{t.ext_pattern[1:]},1,PickupChan(PJSIP/{t.login_prefix}${{EXTEN:2}}-,p)", *nothing]
     return out
 
 
