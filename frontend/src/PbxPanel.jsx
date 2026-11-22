@@ -361,6 +361,8 @@ function StatusSection({ config, status, send, busy }) {
                       <div key={i} className="pbx-hint">
                         <StatusDot status={d.online ? "Avail" : "Unavail"} /> {d.label}
                         {d.address ? ` · ${d.address}` : ""}{d.rtt_ms != null ? ` · ${d.rtt_ms} ms` : ""}
+                        {d.mac ? ` · MAC ${d.mac}` : ""}
+                        {d.lan_ip ? <> · office <a href={`http://${d.lan_ip}`} target="_blank" rel="noreferrer">{d.lan_ip}</a></> : ""}
                         {d.user_agent ? <span title={d.user_agent}> ⓘ</span> : null}
                       </div>
                     ))}

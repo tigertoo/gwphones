@@ -528,6 +528,11 @@ and address, by its id `aor;@hash`), and `device_label` names it ("Yealink
 T46G desk phone", "Groundwire app (through its push server)", "Linphone
 app", else the User-Agent). The portal gets the name, desk or app, and
 online only; the console also the address, round trip and User-Agent.
+For a desk phone, admins (portal) and the console also get its **MAC**
+(from Desk phones) and its **office address** (`lan_ip`: the
+`x-ast-orig-host` Asterisk keeps when it rewrites a contact behind NAT,
+only a private address), linked to its web page, which opens only from a
+computer on that office network.
 
 **Call pull, `*11`:** on a call on one of the extension's devices, dial
 `*11` on another: the call moves there and the first device drops out.

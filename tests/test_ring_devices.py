@@ -74,7 +74,7 @@ CONTACTS = """  Contact:  1002201/sips:1002201@194.125.12.215:61209;tra 9f3c2a1b
   Contact:  1002202/sip:1002202@10.0.0.9:5060;ob             0a9b8c7d6e Unavail         nan
   Contact:  201/sips:201@167.99.119.244:24653;transport=TL 4556be3b39 Avail        91.842
 """
-REGISTRAR = """/registrar/contact/1002201;@9f3c2a1b7e5d4c3b2a1f0e9d8c7b6a59: {"user_agent":"Yealink SIP-T46G 28.83.0.120","uri":"sips:1002201@194.125.12.215:61209;transport=TLS","via_addr":"192.168.178.40"}
+REGISTRAR = """/registrar/contact/1002201;@9f3c2a1b7e5d4c3b2a1f0e9d8c7b6a59: {"user_agent":"Yealink SIP-T46G 28.83.0.120","uri":"sips:1002201@194.125.12.215:61209;transport=TLS;rinstance=8727;x-ast-orig-host=192.168.178.40:49281","via_addr":"194.125.12.215"}
 /registrar/contact/1002201;@1dc4fb0daf00000000000000000000aa: {"user_agent":"Acrobits SIPIS","uri":"sips:1002201@165.227.210.221:15405;transport=TLS"}
 /registrar/contact/1002202;@0a9b8c7d6e00000000000000000000bb: {"user_agent":"Linphone-Desktop/5.2 (belle-sip/5.2)","uri":"sip:1002202@10.0.0.9:5060"}
 3 results found.
@@ -93,3 +93,23 @@ def test_each_device_listed_with_what_it_is(env, monkeypatch):
     assert pbx.device_label("Cisco-CP-6851-3PCC/12.0.1 (00562b043615)") == ("Cisco 6851 desk phone", "desk")
     assert pbx.device_label("Panasonic_KX-HDV130/16.009 (0080f0b5b001)") == ("Panasonic HDV130 desk phone", "desk")
     assert pbx.device_label("Groundwire/26.1.21 (build 2549327; iOS 27.2.1)")[0] == "Groundwire app"
+
+
+def test_desk_phone_office_address_and_mac(world, monkeypatch):
+    pbx = world["pbx"]
+    monkeypatch.setattr(pbx, "asterisk_cli", lambda cmd, timeout=8: REGISTRAR if cmd.startswith("database")
+                        else (CONTACTS if "contacts" in cmd else "Asterisk 20.6.0"))
+    conn = pbx.get_db()
+    conn.execute("INSERT INTO desk_phones (mac, ext, prov_pass, admin_pass, created_at, tenant_id) "
+                 "VALUES ('001565b04147', '201', 'p', 'a', '2026-11-22', ?)", (world["acme"]["id"],))
+    conn.commit()
+    d = pbx.extension_devices(pbx.TenantNames(world["acme"]["id"], world["acme"]["code"]))["201"]
+    desk = d[0]
+    assert desk["lan_ip"] == "192.168.178.40" and desk["mac"] == "00:15:65:B0:41:47"
+    assert d[1]["mac"] == "" and d[1]["lan_ip"] == ""  # the app through its push server: neither
+    world["phone"]._status.clear()
+    admin = world["client"]("admin").get("/api/status").json()["phones"]["201"]["devices"][0]
+    assert admin["mac"] == "00:15:65:B0:41:47" and admin["lan_ip"] == "192.168.178.40"
+    world["phone"]._status.clear()
+    ann = world["client"]("ann").get("/api/status").json()["phones"]["201"]["devices"][0]
+    assert "mac" not in ann and "lan_ip" not in ann  # staff: the name and whether it's online only

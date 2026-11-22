@@ -2199,6 +2199,13 @@ def parse_contact_rows(output: str) -> List[dict]:
     return rows
 
 
+def _private(ip: str) -> bool:
+    """An office network's own address (10/8, 172.16/12, 192.168/16)."""
+    m = re.fullmatch(r"(\d+)\.(\d+)\.\d+\.\d+", ip or "")
+    return bool(m) and (m.group(1) == "10" or (m.group(1), m.group(2)) == ("192", "168")
+                        or (m.group(1) == "172" and 16 <= int(m.group(2)) <= 31))
+
+
 def device_label(user_agent: str) -> tuple:
     """(what it is, desk or app), from the User-Agent it registered with."""
     ua = (user_agent or "").strip()
@@ -2230,11 +2237,23 @@ def extension_devices(t: TenantNames = MAIN_NAMES, contacts_out: Optional[str] =
         info = next((v for k, v in reg.items() if k.startswith(f"{r['aor']};@{r['hash']}")), {}) if r["hash"] else {}
         label, kind = device_label(info.get("user_agent", ""))
         via = info.get("via_addr") or ""
-        addr = re.search(r"@(\[[^\]]+\]|[^:;>]+)", info.get("uri", ""))
+        uri = info.get("uri", "")
+        addr = re.search(r"@(\[[^\]]+\]|[^:;>]+)", uri)
+        # Behind the office router, the phone's own address there: Asterisk
+        # keeps it in the contact (x-ast-orig-host) when it rewrites it.
+        orig = re.search(r"x-ast-orig-host=([0-9.]+)", uri)
+        lan = orig.group(1) if orig else (via if _private(via) else "")
         out.setdefault(ext, []).append({
             "label": label, "kind": kind, "online": r["status"] in ("Avail", "Reachable", "NonQual"),
             "status": r["status"], "rtt_ms": r["rtt_ms"], "user_agent": (info.get("user_agent") or "")[:80],
-            "address": addr.group(1).strip("[]") if addr else (via or None)})
+            "address": addr.group(1).strip("[]") if addr else (via or None), "lan_ip": lan if _private(lan) else ""})
+    # A desk phone's MAC, from Desk phones (one per extension).
+    with get_db() as conn:
+        macs = {r["ext"]: r["mac"] for r in conn.execute("SELECT ext, mac FROM desk_phones WHERE tenant_id = ?", (t.id,))}
+    for ext, ds in out.items():
+        for d in ds:
+            d["mac"] = (":".join(macs[ext][i:i + 2] for i in range(0, 12, 2)).upper()
+                        if d["kind"] == "desk" and ext in macs else "")
     for ds in out.values():
         ds.sort(key=lambda d: (d["kind"] != "desk", not d["online"], d["label"]))
     return out
@@ -2816,7 +2835,7 @@ def api_tenant_status():
     return {"asterisk_running": s["asterisk_running"], "checked_at": s["checked_at"],
             "phones": {ext: {"status": v.get("status"),
                              # each device: what it is and whether it's online (no addresses for the portal)
-                             "devices": [{k: d[k] for k in ("label", "kind", "online")}
+                             "devices": [{k: d[k] for k in ("label", "kind", "online", "lan_ip", "mac")}
                                          for d in s.get("devices", {}).get(ext, [])]}
                        for ext, v in s["extensions"].items()}, "calls": calls}
 

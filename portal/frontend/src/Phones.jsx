@@ -79,7 +79,7 @@ function ExtensionEditor({ ext, me, fwd, callerIds, onChange }) {
     <div className="editor">
       <NameAndSwitch ext={ext} admin={admin} onChange={onChange} />
       <CallerId ext={ext} callerIds={callerIds} onChange={onChange} />
-      <Devices ext={ext.ext} />
+      <Devices ext={ext.ext} admin={me.role === "admin"} />
       <Ringing ext={ext} onChange={onChange} />
       <Forwarding ext={ext.ext} fwd={fwd} onChange={onChange} />
       <VoicemailEmail ext={ext} me={me} onChange={onChange} />
@@ -116,7 +116,7 @@ function NameAndSwitch({ ext, admin, onChange }) {
 }
 
 // What's signed in on this extension right now: a desk phone, the apps.
-function Devices({ ext }) {
+function Devices({ ext, admin }) {
   const [devices, setDevices] = useState(null);
   useEffect(() => {
     let live = true;
@@ -135,7 +135,12 @@ function Devices({ ext }) {
           {devices.map((d, i) => (
             <li key={i} className="row-head static">
               <span className={`dot ${d.online ? "dot-ok" : "dot-off"}`} />
-              <span className="grow">{d.label}</span>
+              <span className="grow">{d.label}
+                {admin && (d.mac || d.lan_ip) && <span className="small muted block">
+                  {d.mac && `MAC ${d.mac}`}{d.mac && d.lan_ip && " · "}
+                  {d.lan_ip && <>Office address <a href={`http://${d.lan_ip}`} target="_blank" rel="noreferrer">{d.lan_ip}</a>
+                    {" "}(its web page, from a computer on the same office network: login in Desk phones)</>}
+                </span>}</span>
               <span className="muted">{d.online ? "Online" : "Offline"}</span>
             </li>
           ))}
