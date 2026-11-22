@@ -94,7 +94,7 @@ MODELS = ["T41P", "T46G", "T31P", "T31G", "T33G", "T34W", "T43U", "T44U", "T46U"
 REPEAT_MINUTES = 60
 VOICEMAIL_NUMBER = "*97"
 MAX_LINE_KEYS = 27  # a T46G/T46U/T54W's 27 (3 pages of 9 or 10); more models have fewer
-PICKUP_PREFIX = "**"  # **2XX answers that extension's ringing call (pbx.py, feature codes)
+PICKUP_PREFIX = "**"  # ** + extension answers that extension's ringing call (pbx.py, feature codes)
 DESKPHONE_BASE_URL = os.environ.get("PBX_DESKPHONE_BASE_URL", "").rstrip("/") or PROVISION_BASE_URL
 
 FIRMWARE_DIR = os.environ.get("PBX_FIRMWARE_DIR") or os.path.join(os.path.dirname(PBX_DB_PATH) or ".", "firmware")
@@ -223,14 +223,17 @@ def _line_keys(conn, own: str, tenant: int) -> list:
     while it rings."""
     others = [r for r in conn.execute("SELECT ext, name FROM extensions WHERE enabled = 1 AND ext != ? AND tenant_id = ? "
                                       "ORDER BY ext", (own, tenant))][:MAX_LINE_KEYS - 1]
-    lines = ["features.pickup.blf_visual_enable = 1", ""]
+    lines = ["features.pickup.blf_visual_enable = 1",
+             # its Pick Up for a ringing busy lamp: ** and the extension (pbx.py's **<ext>)
+             f"features.pickup.direct_pickup_code = {PICKUP_PREFIX}", ""]
     for n, r in enumerate(others, start=2):
         name = re.sub(r"[\r\n]", " ", r["name"])
         lines += [f"linekey.{n}.type = 16",  # BLF
                   f"linekey.{n}.line = 1",
                   f"linekey.{n}.value = {r['ext']}",
                   f"linekey.{n}.label = {r['ext']} {name}",
-                  f"linekey.{n}.pickup_value = {PICKUP_PREFIX}{r['ext']}"]
+                  # the code only: the phone adds the extension itself (**2000 for 2000)
+                  f"linekey.{n}.pickup_value = {PICKUP_PREFIX}"]
     for n in range(len(others) + 2, MAX_LINE_KEYS + 1):
         lines += [f"linekey.{n}.type = 0", f"linekey.{n}.value = ", f"linekey.{n}.label = "]
     return lines + [""]

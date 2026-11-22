@@ -428,7 +428,7 @@ FreePBX uses them), so the phones' feature codes and the service
 | `*90<number>` / `*91` | Forward when busy / stop |
 | `*52<number>` / `*53` | Forward when unanswered or offline / stop |
 | `*8` | Answer any ringing extension (every extension is in pickup group `portal`) |
-| `**2XX` | Answer that extension's ringing call |
+| `**`+extension (`**202`, `**2001`) | Answer that extension's ringing call (a Yealink's busy-lamp Pick Up sends it: its `pickup_value` is just `**`, the phone adds the extension) |
 
 Forwards go only to other extensions or Irish landlines and mobiles in
 national format, checked in the service and again in the dialplan:

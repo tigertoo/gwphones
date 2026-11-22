@@ -44,7 +44,8 @@ def test_challenge_then_config(phones):
     assert "account.1.sip_server.1.transport_type = 2" in cfg and "account.1.srtp_encryption = 2" in cfg
     # busy lamps: the main tenant's other extensions only
     assert "linekey.2.value = 202" in cfg and "linekey.3.value = 203" in cfg and "linekey.4.type = 0" in cfg
-    assert "linekey.2.pickup_value = **202" in cfg
+    # the code only: the phone adds the extension (it sent **20002000 with **2000 here)
+    assert "linekey.2.pickup_value = **\n" in cfg and "features.pickup.direct_pickup_code = **" in cfg
     assert "static.security.trust_certificates = 1" in cfg
     assert "static.security.cn_validation = 1" in cfg
 
