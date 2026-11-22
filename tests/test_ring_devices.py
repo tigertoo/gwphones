@@ -65,5 +65,5 @@ def test_call_pull_only_takes_the_extensions_own_call(world):
     assert "Set(ME=${PBX_EXT})" in main_block and "CHANNELS(^PJSIP/${ME}-)" in main_block
     assert f"CHANNELS(^PJSIP/{code}${{ME}}-)" in acme_block
     for b in (main_block, acme_block):
-        assert "Bridge(${peer},x)" in b and '"${c}" = "${CHANNEL}"' in b  # never its own channel
-        assert "ExecIf" not in b
+        assert "Bridge(${PULL_PEER},x)" in b and '"${PULL_C}" = "${CHANNEL}"' in b  # never its own channel
+        assert "ExecIf" not in b and "LOCAL(" not in b  # LOCAL() works only in a Gosub
