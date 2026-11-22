@@ -53,3 +53,17 @@ def test_status_shows_the_best_of_several_devices(env):
     c = pbx.parse_contacts(out)
     assert c["201"]["status"] == "Avail" and c["201"]["devices"] == 2 and c["201"]["rtt_ms"] == 31.2
     assert c["202"]["devices"] == 1
+
+
+def test_call_pull_only_takes_the_extensions_own_call(world):
+    dial = conf(world, "extensions_portal.conf")
+    code = world["acme"]["code"]
+    blocks = dial.split("exten => *11,1,Answer()")
+    assert len(blocks) == 3  # once per tenant
+    main_block, acme_block = blocks[1].split("\nexten => ")[0], blocks[2].split("\nexten => ")[0]
+    # each looks only at its own extension's channels, from its endpoint (PBX_EXT), never the caller ID
+    assert "Set(ME=${PBX_EXT})" in main_block and "CHANNELS(^PJSIP/${ME}-)" in main_block
+    assert f"CHANNELS(^PJSIP/{code}${{ME}}-)" in acme_block
+    for b in (main_block, acme_block):
+        assert "Bridge(${peer},x)" in b and '"${c}" = "${CHANNEL}"' in b  # never its own channel
+        assert "ExecIf" not in b

@@ -582,7 +582,7 @@ function RingMode({ ext, current, send, busy }) {
         {RING_MODES.map(([k, label]) => <option key={k} value={k}>{label}</option>)}
       </select>
       <button className="ticket-action-btn" disabled={busy || value === (current || "all")}>Save</button>
-      <span className="pbx-hint">A desk phone and the apps can be set up on this extension together. The first one answered takes the call.</span>
+      <span className="pbx-hint">A desk phone and the apps can be set up on this extension together. The first one answered takes the call. *11 on one of them takes over the call from the other.</span>
     </form>
   );
 }

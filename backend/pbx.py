@@ -141,6 +141,7 @@ RING_MODES = {"all": "Ring all my phones at once",
               "backup": "Ring my apps only when my desk phone isn't connected"}
 DESK_FIRST_SECONDS = 10
 DESK_UA_RE = "^(Yealink|Cisco|Panasonic|Grandstream|Snom|Polycom|Poly|Fanvil|Gigaset|Htek|Alcatel)"
+PULL_CODE = "*11"  # take over the extension's call from its other device (_features_context)
 MAX_FORWARD_HOPS = 3  # 201 -> 202 -> 201 ... stops here, at voicemail
 # Where calls may be forwarded: other extensions and Irish landlines and
 # mobiles (national format). Never abroad, 1800/premium or 112/999: anyone
@@ -1338,6 +1339,7 @@ def _features_context(t: TenantNames) -> List[str]:
            "; *78/*79 do not disturb on/off; *72<number>/*73 forward always;",
            "; *90<number>/*91 forward when busy; *52<number>/*53 forward when",
            "; unanswered; *8 answer any ringing extension; **2XX answer that one;",
+           f"; {PULL_CODE} take over this extension's call from its other phone (desk phone to app or back);",
            f"; {PARK_EXT} park (transfer a call to it), {PARK_SLOTS[0]}-{PARK_SLOTS[-1]} pick a parked call up.",
            f"[{t.features}]",
            # Phones only: browsers and menus never reach this context.
@@ -1366,6 +1368,29 @@ def _features_context(t: TenantNames) -> List[str]:
         out += [f"exten => {off},1,Answer()"] + me + [
             f" same => n,NoOp(${{DB_DELETE({fam}/{db_key})}})",
             f" same => n,Playback({sound}&de-activated)"] + end
+    # Call pull: the extension's own answered call on another of its devices
+    # (a channel of its own login, other than this one, bridged to someone)
+    # moves here; that device is left out of it and hangs up. Only its own
+    # login's channels are looked at, so nobody can take another's call.
+    login = f"{t.login_prefix}${{ME}}"
+    out += [f"exten => {PULL_CODE},1,Answer()"] + me + [
+        f" same => n,Set(LOCAL(mine)=${{CHANNELS(^PJSIP/{login}-)}})",
+        " same => n,Set(LOCAL(i)=1)",
+        " same => n,Set(LOCAL(peer)=)",
+        ' same => n,While($["${CUT(mine, ,${i})}" != ""])',
+        " same => n,Set(LOCAL(c)=${CUT(mine, ,${i})})",
+        ' same => n,GotoIf($["${c}" = "${CHANNEL}"]?skip)',
+        " same => n,Set(LOCAL(p)=${IMPORT(${c},BRIDGEPEER)})",
+        ' same => n,GotoIf($["${p}" = "" | "${p}" = "${CHANNEL}"]?skip)',
+        " same => n,Set(LOCAL(peer)=${p})",
+        " same => n,ExitWhile()",
+        " same => n(skip),Set(i=$[${i} + 1])",
+        " same => n,EndWhile()",
+        ' same => n,GotoIf($["${peer}" = ""]?none)',
+        " same => n,Bridge(${peer},x)  ; x: when this ends, the other party is hung up too",
+        " same => n,Hangup()",
+        " same => n(none),Playback(invalid)",
+        " same => n,Hangup()"]
     out += ["exten => *8,1,Pickup()", " same => n,Hangup()",
             f"exten => _**2XX,1,PickupChan(PJSIP/{t.login_prefix}${{EXTEN:2}}-,p)", " same => n,Hangup()"]
     return out

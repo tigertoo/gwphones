@@ -520,6 +520,16 @@ is told from an app by the User-Agent it registered with (`DESK_UA_RE`:
 Yealink, Cisco, Panasonic, ...). Ring groups ring every device of each
 member. Admins set it for any extension, a user for their own.
 
+**Call pull, `*11`:** on a call on one of the extension's devices, dial
+`*11` on another: the call moves there and the first device drops out.
+`[t…-features]` looks only at channels of the dialling extension's own
+login (from its endpoint's `PBX_EXT`, never the caller ID), skips its own
+channel, takes the first one bridged to someone (`BRIDGEPEER`) and
+`Bridge()`s that party in (option `x`: hung up when this call ends, not
+sent back to the dialplan). Nothing to take over: "invalid". A call
+being recorded stops recording at the move (the recording is on the
+first device's channel).
+
 Not ExecIf around a device list: it splits on `:`, and every contact's
 address has one (`sip:`), so the dialplan uses GotoIf and Set instead.
 

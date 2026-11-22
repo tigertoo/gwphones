@@ -132,7 +132,8 @@ function Ringing({ ext, onChange }) {
     <div className="block">
       <h3>When a call comes in</h3>
       <p className="small muted">A desk phone and the apps can all be set up on this extension at once (up to 4). The
-        first one answered takes the call; the others stop ringing without showing it as missed.</p>
+        first one answered takes the call; the others stop ringing without showing it as missed. On a call, dial
+        <strong> *11</strong> on another of them to move the call there (say, from the desk phone to your mobile).</p>
       <div className="inline-form">
         <select value={value} onChange={(e) => setValue(e.target.value)} aria-label="When a call comes in">
           {RING_MODES.map(([k, label]) => <option key={k} value={k}>{label}</option>)}
