@@ -2,6 +2,7 @@ import React, { useCallback, useEffect, useState } from "react";
 import { get, post } from "./api";
 import { Account } from "./Account";
 import { Billing } from "./Billing";
+import { Contacts } from "./Contacts";
 import { DeskPhones } from "./DeskPhones";
 import { Extensions, Recordings, Status } from "./Phones";
 import { Routing } from "./Routing";
@@ -16,7 +17,7 @@ import { takeMicrosoftResult } from "./microsoft";
 
 const TABS = {
   admin: [["extensions", "Extensions"], ["routing", "Call routing"], ["desk", "Desk phones"], ["status", "Status"],
-    ["recordings", "Recordings"], ["billing", "Billing"],
+    ["recordings", "Recordings"], ["contacts", "Contacts"], ["billing", "Billing"],
     ["staff", "Staff"], ["account", "Account"]],
   user: [["extensions", "My phone"], ["status", "Status"], ["recordings", "Recordings"], ["account", "Account"]],
 };
@@ -91,6 +92,7 @@ function Portal() {
       {tab === "routing" && me.role === "admin" && <Routing />}
       {tab === "desk" && me.role === "admin" && <DeskPhones />}
       {tab === "billing" && me.role === "admin" && <Billing />}
+      {tab === "contacts" && me.role === "admin" && <Contacts />}
       {tab === "status" && <Status />}
       {tab === "recordings" && <Recordings me={me} />}
       {tab === "staff" && me.role === "admin" && <Staff me={me} notice={notice} />}

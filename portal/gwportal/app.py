@@ -357,3 +357,4 @@ from . import deskphones  # noqa: E402,F401
 from . import microsoft  # noqa: E402,F401
 from . import gone  # noqa: E402,F401
 from . import internal  # noqa: E402,F401
+from . import contacts  # noqa: E402,F401

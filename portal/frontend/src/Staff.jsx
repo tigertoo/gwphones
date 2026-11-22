@@ -146,13 +146,14 @@ function Person({ u, me, exts, onChange }) {
 // group. Extensions come from an Exchange custom attribute (1-15).
 function Microsoft365({ onSynced }) {
   const [s, setS] = useState(null);
-  const [f, setF] = useState({ group: "", admin_group: "", attribute: 1, create_exts: false, sites_from_office: false });
+  const [f, setF] = useState({ group: "", admin_group: "", attribute: 1, create_exts: false, sites_from_office: false,
+    org_contacts: false });
   const [result, setResult] = useState(null);
   const a = useAction();
   const load = useCallback(() => get("/microsoft").then((r) => {
     setS(r);
     if (r.linked) setF({ group: r.group || "", admin_group: r.admin_group || "", attribute: r.attribute || 1,
-      create_exts: !!r.create_exts, sites_from_office: !!r.sites_from_office });
+      create_exts: !!r.create_exts, sites_from_office: !!r.sites_from_office, org_contacts: !!r.org_contacts });
     if (r.last_result) setResult(r.last_result);
   }).catch(() => setS({ available: false })), []);
   useEffect(() => { load(); }, [load]);
@@ -204,6 +205,11 @@ function Microsoft365({ onSynced }) {
           onChange={(e) => setF({ ...f, sites_from_office: e.target.checked })} />
         Put each person's extension on the site named by their Office (Microsoft 365 admin centre: the user, Contact
         information, Office), e.g. Dublin or Cork
+      </label>
+      <label className="check">
+        <input type="checkbox" checked={f.org_contacts} onChange={(e) => setF({ ...f, org_contacts: e.target.checked })} />
+        Add your organisation's contacts from Microsoft 365 to the phones' Contacts (Exchange admin centre, Recipients,
+        Contacts). Your Microsoft 365 admin approves this once more (Approve in Microsoft 365).
       </label>
       <p className="small muted">Each person's extension is named after them, its voicemail is emailed to them (unless
         it's already set), and calls out show their Office phone if it's one of your numbers. A leaver's extension is
@@ -264,6 +270,7 @@ function SyncResult({ r }) {
       {r.actions?.length > 0 && <ul>{r.actions.map((x, i) => (
         <li key={i}>{DOING[x.do]}: {x.email}{x.role === "admin" ? " (admin)" : x.ext ? ` (ext ${x.ext})` : ""}
           {x.changes ? `: ${x.changes.join(", ")}` : ""}</li>))}</ul>}
+      {r.contacts != null && <p>Contacts from Microsoft 365: {r.contacts}.</p>}
       {r.directory && <p>Company directory on the phones: {r.directory.length} people with department, mobile or
         direct number{r.directory.length ? "" : " (after Sync now)"}.</p>}
       {r.extensions?.length > 0 && <><p><strong>Extensions:</strong></p>

@@ -1,6 +1,6 @@
 """A tenant's company directory: on its desk phones (a Yealink remote
-phone book, one per site, the phone's own site first) and as names for
-its incoming calls.
+phone book, one per site, the phone's own site first, then its outside
+Contacts) and as names for its incoming calls.
 
 Each entry is an extension: its name and, from Microsoft 365 (the
 portal's sync, PUT /api/pbx/directory), the person's department, mobile
@@ -20,11 +20,13 @@ from xml.sax.saxutils import escape
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
-from pbx import (CID_RE, MAIN_TENANT, TenantNames, _lock, apply_config, current_tenant, e164, get_db, tenant_names)
+from pbx import (CID_RE, MAIN_TENANT, TenantNames, _lock, _now, apply_config, current_tenant, e164, get_db,
+                 tenant_names)
 
 router = APIRouter(prefix="/api/pbx")
 MAX_BOOKS = 5  # Yealink's remote phone books (remote_phonebook.data.1-5)
 DEPT_MAX = 40
+MAX_CONTACTS = 2000  # a tenant's outside contacts
 
 
 def national(number: str) -> str:
@@ -58,16 +60,43 @@ def books(conn, tenant: int, own_site: Optional[int]) -> List[dict]:
     sites = conn.execute("SELECT id, name FROM sites WHERE tenant_id = ? ORDER BY name", (tenant,)).fetchall()
     all_e = entries(conn, tenant)
     unsited = any(e["site_id"] is None for e in all_e)
+    has_contacts = bool(conn.execute("SELECT 1 FROM contacts WHERE tenant_id = ?", (tenant,)).fetchone())
     out = [{"name": s["name"], "site": s["id"]} for s in sites]
     out.sort(key=lambda b: b["site"] != own_site)
     if unsited and sites:
         out.append({"name": "Others", "site": None})
-    if not sites or len(out) > MAX_BOOKS:
-        return [{"name": "Everyone", "site": "all"}]
-    return out
+    room = MAX_BOOKS - (1 if has_contacts else 0)
+    if not sites or len(out) > room:
+        out = [{"name": "Everyone", "site": "all"}]
+    return out + ([{"name": "Contacts", "site": "contacts"}] if has_contacts else [])
+
+
+def contacts(conn, tenant: int) -> List[dict]:
+    return [dict(r) for r in conn.execute("SELECT id, name, company, work, mobile, other, source FROM contacts "
+                                          "WHERE tenant_id = ? ORDER BY lower(name || company), id", (tenant,))]
+
+
+def contact_label(c: dict) -> str:
+    """John Smith (Acme), John Smith, or Acme."""
+    if c["name"] and c["company"]:
+        return f"{c['name']} ({c['company']})"
+    return c["name"] or c["company"]
+
+
+def contacts_xml(conn, tenant: int) -> str:
+    out = ['<?xml version="1.0" encoding="UTF-8"?>', "<YealinkIPPhoneDirectory>"]
+    for c in contacts(conn, tenant):
+        out += ["  <DirectoryEntry>", f"    <Name>{escape(contact_label(c))}</Name>"]
+        for key, label in (("work", "Work"), ("mobile", "Mobile"), ("other", "Other")):
+            if c[key]:
+                out.append(f'    <Telephone label="{label}">{escape(c[key])}</Telephone>')
+        out.append("  </DirectoryEntry>")
+    return "\n".join(out + ["</YealinkIPPhoneDirectory>", ""])
 
 
 def book_xml(conn, tenant: int, book: dict) -> str:
+    if book["site"] == "contacts":
+        return contacts_xml(conn, tenant)
     show_site = book["site"] == "all" and conn.execute("SELECT 1 FROM sites WHERE tenant_id = ?", (tenant,)).fetchone()
     sites = {r["id"]: r["name"] for r in conn.execute("SELECT id, name FROM sites WHERE tenant_id = ?", (tenant,))}
     out = ['<?xml version="1.0" encoding="UTF-8"?>', "<YealinkIPPhoneDirectory>"]
@@ -95,6 +124,11 @@ def caller_names(conn, tenant: int) -> Dict[str, str]:
             d = e164(number)
             if d and d not in out:
                 out[d] = clean_text(f"{e['name']} ({what})", 50)
+    for c in contacts(conn, tenant):  # the tenant's own people first: a contact never renames one of them
+        for key in ("work", "mobile", "other"):
+            d = e164(c[key])
+            if d and d not in out:
+                out[d] = clean_text(contact_label(c), 50)
     return out
 
 
@@ -159,6 +193,113 @@ def api_set_directory(req: DirectoryRequest):
             return {"ok": True, "changed": False, "entries": len(rows)}
         result = apply_config(conn, f"Directory: {len(rows)} entries from Microsoft 365")
     return {**result, "changed": True, "entries": len(rows)}
+
+
+# -- outside contacts ---------------------------------------------------------------------------
+
+class ContactRequest(BaseModel):
+    name: str = ""
+    company: str = ""
+    work: str = ""
+    mobile: str = ""
+    other: str = ""
+
+
+def _clean_contact(req: ContactRequest) -> dict:
+    v = {"name": clean_text(req.name), "company": clean_text(req.company)}
+    if not (v["name"] or v["company"]):
+        raise HTTPException(400, "Give the contact a name or a company.")
+    for key in ("work", "mobile", "other"):
+        raw = getattr(req, key).strip()
+        n = national(raw) if raw else ""
+        if raw and (not n or not CID_RE.match(n)):
+            raise HTTPException(400, f"{raw} isn't a phone number.")
+        v[key] = n
+    if not (v["work"] or v["mobile"] or v["other"]):
+        raise HTTPException(400, "Give the contact at least one number.")
+    return v
+
+
+def _contacts_changed(conn, why: str):
+    conn.commit()
+    return apply_config(conn, why)  # the names for incoming calls
+
+
+@router.get("/contacts")
+def api_contacts():
+    with get_db() as conn:
+        return {"contacts": contacts(conn, current_tenant())}
+
+
+@router.post("/contacts")
+def api_add_contact(req: ContactRequest):
+    v = _clean_contact(req)
+    tid = current_tenant()
+    with _lock, get_db() as conn:
+        if conn.execute("SELECT COUNT(*) FROM contacts WHERE tenant_id = ?", (tid,)).fetchone()[0] >= MAX_CONTACTS:
+            raise HTTPException(409, f"That's {MAX_CONTACTS} contacts already.")
+        cid = conn.execute("INSERT INTO contacts (tenant_id, name, company, work, mobile, other, source, updated_at) "
+                           "VALUES (?, ?, ?, ?, ?, ?, 'portal', ?)", (tid, v["name"], v["company"], v["work"],
+                                                                     v["mobile"], v["other"], _now())).lastrowid
+        result = _contacts_changed(conn, f"Contact added: {contact_label(v)}")
+    return {"id": cid, **result}
+
+
+def _own_contact(conn, contact_id: int):
+    r = conn.execute("SELECT * FROM contacts WHERE id = ? AND tenant_id = ?", (contact_id, current_tenant())).fetchone()
+    if not r:
+        raise HTTPException(404, "Contact not found.")
+    if r["source"] != "portal":
+        raise HTTPException(409, "This contact comes from Microsoft 365: change it there.")
+    return r
+
+
+class MicrosoftContacts(BaseModel):
+    contacts: List[ContactRequest]
+
+
+@router.put("/contacts/microsoft")
+def api_microsoft_contacts(req: MicrosoftContacts):
+    """Replaces the tenant's contacts from Microsoft 365 (Exchange's
+    organisation contacts, the portal's sync). Its own (portal) ones stay.
+    A contact without a usable number is left out."""
+    tid = current_tenant()
+    rows = []
+    for c in req.contacts[:MAX_CONTACTS]:
+        try:
+            rows.append(_clean_contact(c))
+        except HTTPException:
+            continue
+    with _lock, get_db() as conn:
+        key = lambda x: (x["name"], x["company"], x["work"], x["mobile"], x["other"])  # noqa: E731
+        before = sorted(key(dict(r)) for r in conn.execute(
+            "SELECT * FROM contacts WHERE tenant_id = ? AND source = 'microsoft'", (tid,)))
+        if before == sorted(key(r) for r in rows):
+            return {"ok": True, "changed": False, "contacts": len(rows)}
+        conn.execute("DELETE FROM contacts WHERE tenant_id = ? AND source = 'microsoft'", (tid,))
+        conn.executemany("INSERT INTO contacts (tenant_id, name, company, work, mobile, other, source, updated_at) "
+                         "VALUES (?, ?, ?, ?, ?, ?, 'microsoft', ?)",
+                         [(tid, r["name"], r["company"], r["work"], r["mobile"], r["other"], _now()) for r in rows])
+        result = _contacts_changed(conn, f"Contacts from Microsoft 365: {len(rows)}")
+    return {**result, "changed": True, "contacts": len(rows)}
+
+
+@router.put("/contacts/{contact_id}")
+def api_change_contact(contact_id: int, req: ContactRequest):
+    v = _clean_contact(req)
+    with _lock, get_db() as conn:
+        _own_contact(conn, contact_id)
+        conn.execute("UPDATE contacts SET name = ?, company = ?, work = ?, mobile = ?, other = ?, updated_at = ? "
+                     "WHERE id = ?", (v["name"], v["company"], v["work"], v["mobile"], v["other"], _now(), contact_id))
+        return _contacts_changed(conn, f"Contact changed: {contact_label(v)}")
+
+
+@router.delete("/contacts/{contact_id}")
+def api_delete_contact(contact_id: int):
+    with _lock, get_db() as conn:
+        r = _own_contact(conn, contact_id)
+        conn.execute("DELETE FROM contacts WHERE id = ?", (contact_id,))
+        return _contacts_changed(conn, f"Contact removed: {contact_label(dict(r))}")
 
 
 @router.get("/directory")

@@ -75,6 +75,12 @@ PORTAL_ROUTES = {
     # The company directory's details from Microsoft 365 (the portal's sync).
     ("GET", "/api/pbx/directory"),
     ("PUT", "/api/pbx/directory"),
+    # Outside contacts (directory.py): admins only in the portal; Exchange's from its sync.
+    ("GET", "/api/pbx/contacts"),
+    ("POST", "/api/pbx/contacts"),
+    ("PUT", "/api/pbx/contacts/microsoft"),
+    ("PUT", "/api/pbx/contacts/{contact_id}"),
+    ("DELETE", "/api/pbx/contacts/{contact_id}"),
     # Sites (offices): their number and block of extensions; admins only in the portal.
     ("GET", "/api/pbx/sites"),
     ("POST", "/api/pbx/sites"),

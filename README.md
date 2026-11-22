@@ -527,6 +527,16 @@ The department, mobile and direct number come from **Microsoft 365**
 now (and the 15-minute sync) sends them for its synced people (`PUT
 /api/pbx/directory`, `directory_extras`), replacing the tenant's last.
 
+**Outside contacts** (suppliers, customers; `contacts`): admins add them
+in the portal (Contacts tab: name, company, work, mobile, other), or the
+Microsoft 365 sync brings in the organisation's **Exchange contacts**
+("Add your organisation's contacts", Graph `/contacts`, needing the app's
+**`OrgContact.Read.All`** application permission: add it in Entra, then
+the organisation's admin approves it again). Synced ones replace only
+synced ones and are changed in Microsoft 365. They're the phones' last
+book, **Contacts**, and name their incoming calls ("John Smith (Acme
+Supplies)"); a contact never renames one of the tenant's own people.
+
 **Names for incoming calls:** a call from one of those numbers shows
 "Cara Murphy (mobile)" or "(direct)": `[<prefix>-cnam]` knows each number
 in the forms a carrier may send (353..., 0..., +353..., 00353...), and

@@ -638,6 +638,20 @@ def get_db() -> sqlite3.Connection:
                ddi TEXT NOT NULL DEFAULT '',
                department TEXT NOT NULL DEFAULT '',
                PRIMARY KEY (tenant_id, ext));
+           -- A tenant's outside contacts (suppliers, customers): on its phones'
+           -- Contacts book and as names for its incoming calls (directory.py).
+           -- source: 'portal' (an admin's) or 'microsoft' (Exchange's, synced).
+           CREATE TABLE IF NOT EXISTS contacts (
+               id INTEGER PRIMARY KEY AUTOINCREMENT,
+               tenant_id INTEGER NOT NULL,
+               name TEXT NOT NULL DEFAULT '',
+               company TEXT NOT NULL DEFAULT '',
+               work TEXT NOT NULL DEFAULT '',
+               mobile TEXT NOT NULL DEFAULT '',
+               other TEXT NOT NULL DEFAULT '',
+               source TEXT NOT NULL DEFAULT 'portal',
+               updated_at TEXT NOT NULL);
+           CREATE INDEX IF NOT EXISTS contacts_tenant ON contacts (tenant_id);
            CREATE TABLE IF NOT EXISTS sites (
                id INTEGER PRIMARY KEY AUTOINCREMENT,
                tenant_id INTEGER NOT NULL,
@@ -2647,7 +2661,7 @@ def api_delete_tenant(tenant_id: int, req: TenantDelete):
         t = tenant_names(conn, tenant_id)
         logins = [t.login(x["ext"]) for x in conn.execute("SELECT ext FROM extensions WHERE tenant_id = ?", (tenant_id,))]
         phones = conn.execute("SELECT mac, rps_id FROM desk_phones WHERE tenant_id = ?", (tenant_id,)).fetchall()
-        for table in (*TENANT_TABLES, "sites", "tenant_settings", "apply_pending"):
+        for table in (*TENANT_TABLES, "sites", "tenant_settings", "apply_pending", "contacts", "directory_extras"):
             conn.execute(f"DELETE FROM {table} WHERE tenant_id = ?", (tenant_id,))
         for p in phones:
             conn.execute("DELETE FROM desk_firmware_attempts WHERE mac = ?", (p["mac"],))

@@ -86,3 +86,46 @@ def test_bad_numbers_and_unchanged_directory(env, monkeypatch):
     again = [{"ext": "2000", "mobile": "+353 87 123 4567", "ddi": "061 555 200", "department": "Accounts"}]
     op.put("/api/pbx/directory", json={"entries": again})
     assert op.put("/api/pbx/directory", json={"entries": again}).json()["changed"] is False
+
+
+def test_outside_contacts_on_the_phones_and_for_incoming_calls(env, monkeypatch):
+    op, pbx, tid, code, o, k = tenant_with_people(env, monkeypatch)
+    assert op.post("/api/pbx/contacts", json={"name": "John Smith", "company": "Acme Supplies",
+                                              "work": "061 555 1234"}).status_code == 200
+    assert op.post("/api/pbx/contacts", json={"company": "The Bakery", "mobile": "+353 86 999 8888"}).status_code == 200
+    assert op.post("/api/pbx/contacts", json={"name": "No number"}).status_code == 400
+    assert op.post("/api/pbx/contacts", json={"name": "Bad", "work": "call me"}).status_code == 400
+    # a contact with a staff member's number doesn't rename them
+    op.post("/api/pbx/contacts", json={"name": "Imposter", "mobile": "087 123 4567"})
+    import directory
+    with pbx.get_db() as conn:
+        books = directory.books(conn, tid, o)
+        assert [b["name"] for b in books] == ["Ogonnolloe", "Killaloe", "Contacts"]
+        xml = directory.book_xml(conn, tid, books[2])
+        names = directory.caller_names(conn, tid)
+    assert "<Name>John Smith (Acme Supplies)</Name>" in xml
+    assert '<Telephone label="Work">0615551234</Telephone>' in xml and "<Name>The Bakery</Name>" in xml
+    assert names["353615551234"] == "John Smith (Acme Supplies)" and names["353869998888"] == "The Bakery"
+    assert names["353871234567"] == "Cara Murphy (mobile)"  # the person, not the contact
+    dial = open(os.path.join(pbx.GENERATED_DIR, "extensions_portal.conf")).read()
+    assert "exten => 0615551234,1,Set(CALLERID(name)=John Smith (Acme Supplies))" in dial
+    # edit and remove
+    cid = next(c["id"] for c in op.get("/api/pbx/contacts").json()["contacts"] if c["company"] == "The Bakery")
+    assert op.put(f"/api/pbx/contacts/{cid}", json={"company": "The Bakery", "mobile": "0869990000"}).status_code == 200
+    assert op.delete(f"/api/pbx/contacts/{cid}").status_code == 200
+    assert all(c["company"] != "The Bakery" for c in op.get("/api/pbx/contacts").json()["contacts"])
+
+
+def test_microsoft_contacts_replace_only_their_own(env, monkeypatch):
+    op, pbx, tid, code, o, k = tenant_with_people(env, monkeypatch)
+    op.post("/api/pbx/contacts", json={"name": "Mine", "work": "061 555 0001"})
+    r = op.put("/api/pbx/contacts/microsoft", json={"contacts": [
+        {"name": "Ann Lee", "company": "Lee Ltd", "work": "+353 1 555 2000"},
+        {"name": "Nobody", "company": "", "work": ""}]})  # no number: left out
+    assert r.json()["contacts"] == 1
+    listed = op.get("/api/pbx/contacts").json()["contacts"]
+    assert {(c["name"], c["source"]) for c in listed} == {("Mine", "portal"), ("Ann Lee", "microsoft")}
+    ms_id = next(c["id"] for c in listed if c["source"] == "microsoft")
+    assert op.put(f"/api/pbx/contacts/{ms_id}", json={"name": "Changed", "work": "015552000"}).status_code == 409
+    assert op.put("/api/pbx/contacts/microsoft", json={"contacts": []}).json()["changed"] is True
+    assert [c["name"] for c in op.get("/api/pbx/contacts").json()["contacts"]] == ["Mine"]

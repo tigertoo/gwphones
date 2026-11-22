@@ -528,3 +528,38 @@ def test_sync_fills_the_company_directory(world, ms):
     import os
     dial = open(os.path.join(world["pbx"].GENERATED_DIR, "extensions_portal.conf")).read()
     assert "exten => 0871234567,1,Set(CALLERID(name)=Cara Murphy (mobile))" in dial
+
+
+def test_sync_brings_in_organisation_contacts(world, ms):
+    admin = link(world, ms)
+    ms.members[GROUP] = [member("oid-cara", "cara@acme.example", "203")]
+    real = ms.__call__
+
+    def with_contacts(method, url, data=None, params=None, headers=None):
+        if url.endswith("/contacts"):
+            return Answer({"value": [{"displayName": "Ann Lee", "companyName": "Lee Ltd",
+                                      "phones": [{"type": "business", "number": "+353 1 555 2000"},
+                                                 {"type": "businessFax", "number": "01 555 2001"}]}]})
+        return real(method, url, data, params, headers)
+    from gwportal import microsoft
+    microsoft._send = with_contacts
+    assert admin.put("/api/microsoft", json={"group": "Phone users", "attribute": 1, "org_contacts": True}).status_code == 200
+    r = admin.post("/api/microsoft/sync").json()
+    assert r["contacts"] == 1
+    c = admin.get("/api/contacts").json()["contacts"]
+    assert c == [{"id": c[0]["id"], "name": "Ann Lee", "company": "Lee Ltd", "work": "015552000", "mobile": "",
+                  "other": "", "source": "microsoft"}]
+    # without the permission: said so, nothing else stops
+    def refused(method, url, data=None, params=None, headers=None):
+        if url.endswith("/contacts"):
+            return Answer({"error": {"code": "Authorization_RequestDenied"}}, 403)
+        return real(method, url, data, params, headers)
+    microsoft._send = refused
+    r = admin.post("/api/microsoft/sync").json()
+    assert "OrgContact.Read.All" in json.dumps(r["problems"]) and r["counts"] is not None
+
+
+def test_contacts_for_admins_only(world):
+    ann = world["client"]("ann")
+    assert ann.get("/api/contacts").status_code == 403
+    assert ann.post("/api/contacts", json={"name": "X", "work": "015550000"}).status_code == 403

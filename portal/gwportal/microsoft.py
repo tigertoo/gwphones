@@ -289,7 +289,8 @@ def _link_json(link) -> dict:
             "admin_group": link["admin_group_name"], "attribute": link["attribute"],
             "last_sync_at": link["last_sync_at"], "last_result": json.loads(link["last_result"] or "null"),
             "consent_url": consent_url(link["ms_tenant"]), "linked_by": link["linked_by"],
-            "create_exts": bool(link["create_exts"]), "sites_from_office": bool(link["sites_from_office"])}
+            "create_exts": bool(link["create_exts"]), "sites_from_office": bool(link["sites_from_office"]),
+            "org_contacts": bool(link["org_contacts"])}
 
 
 @app.get("/api/microsoft")
@@ -305,6 +306,7 @@ class Settings(BaseModel):
     attribute: int = 1       # Exchange custom attribute 1-15: the extension
     create_exts: bool = False  # create an extension that doesn't exist yet
     sites_from_office: bool = False  # each extension on the site named by its person's Office
+    org_contacts: bool = False  # Exchange's organisation contacts onto the phones (OrgContact.Read.All)
 
 
 @app.put("/api/microsoft")
@@ -325,13 +327,15 @@ def api_save_settings(req: Settings, request: Request, me: Signed = Depends(sign
         raise auth.Refused("Choose the group whose members use the phone system.", 400)
     with db.connect() as conn:
         conn.execute("UPDATE ms_links SET group_id = ?, group_name = ?, admin_group_id = ?, admin_group_name = ?, "
-                     "attribute = ?, create_exts = ?, sites_from_office = ? WHERE tenant_code = ?",
+                     "attribute = ?, create_exts = ?, sites_from_office = ?, org_contacts = ? WHERE tenant_code = ?",
                      (g["id"], g["name"], a["id"] if a else "", a["name"] if a else "", req.attribute,
-                      int(req.create_exts), int(req.sites_from_office), me.user["tenant_code"]))
+                      int(req.create_exts), int(req.sites_from_office), int(req.org_contacts),
+                      me.user["tenant_code"]))
         db.audit(conn, "Microsoft 365 sync settings", me.user, client_ip(request),
                  f"group {g['name']}, admins {a['name'] if a else 'none'}, custom attribute {req.attribute}, "
                  f"create extensions {'on' if req.create_exts else 'off'}, "
-                 f"sites from Office {'on' if req.sites_from_office else 'off'}")
+                 f"sites from Office {'on' if req.sites_from_office else 'off'}, "
+                 f"organisation contacts {'on' if req.org_contacts else 'off'}")
     return {"ok": True}
 
 
@@ -563,6 +567,36 @@ def plan_extensions(conn, link, result: dict, members: List[dict], info: Dict[st
     return out
 
 
+PHONE_KIND = {"business": "work", "mobile": "mobile", "home": "other", "other": "other"}
+
+
+def org_contacts(ms_tenant: str) -> List[dict]:
+    """Exchange's organisation contacts (mail contacts, made in the Exchange
+    admin centre), with their numbers: Graph's /contacts, which needs the
+    app's OrgContact.Read.All, approved by the organisation's admin."""
+    url, params = f"{GRAPH}/contacts", {"$select": "displayName,companyName,phones", "$top": "999"}
+    out = []
+    try:
+        while url and len(out) < 2000:
+            data = _graph(ms_tenant, url, params)
+            for c in data.get("value", []):
+                nums = {"work": "", "mobile": "", "other": ""}
+                for p in c.get("phones") or []:
+                    kind = PHONE_KIND.get(str(p.get("type", "")).lower())
+                    if kind and p.get("number") and not nums[kind]:
+                        nums[kind] = str(p["number"])[:30]
+                if any(nums.values()):
+                    out.append({"name": (c.get("displayName") or "")[:80], "company": (c.get("companyName") or "")[:80],
+                                **nums})
+            url, params = data.get("@odata.nextLink"), None
+    except MsError as e:
+        if "approve" in str(e) or "allowed" in str(e):
+            raise MsError("Microsoft 365 hasn't allowed the phone portal to read your organisation's contacts: the app "
+                          "needs OrgContact.Read.All, approved by your Microsoft 365 admin (Approve in Microsoft 365).")
+        raise
+    return out
+
+
 def directory_entries(conn, link, members: List[dict]) -> List[dict]:
     """For the company directory: each synced person on an extension, with
     their department, mobile and direct number (Office phone)."""
@@ -680,6 +714,14 @@ def _run(tenant_code: str, apply: bool) -> dict:
                 gw.call(caller, "PUT", "/directory", json={"entries": result["directory"]})
             except auth.Refused as e:
                 result["problems"].append({"who": "the company directory", "problem": str(e)})
+        if link["org_contacts"]:
+            try:
+                found = org_contacts(link["ms_tenant"])
+                result["contacts"] = len(found)
+                if apply:
+                    gw.call(caller, "PUT", "/contacts/microsoft", json={"contacts": found})
+            except (MsError, auth.Refused) as e:
+                result["problems"].append({"who": "your organisation's contacts", "problem": str(e)})
             conn.execute("UPDATE ms_links SET last_sync_at = ?, last_result = ? WHERE tenant_code = ?",
                          (result["at"], json.dumps(result), tenant_code))
     return result
