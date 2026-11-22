@@ -133,6 +133,8 @@ def connect() -> sqlite3.Connection:
                       "ALTER TABLE users ADD COLUMN disabled_by TEXT",
                       # Microsoft 365 sync may create missing extensions (per tenant, off by default)
                       "ALTER TABLE ms_links ADD COLUMN create_exts INTEGER NOT NULL DEFAULT 0",
+                      # Microsoft 365 sync puts each extension on the site named by its person's Office
+                      "ALTER TABLE ms_links ADD COLUMN sites_from_office INTEGER NOT NULL DEFAULT 0",
                       # extensions sync switched off for a leaver: only these does it switch on again
                       "CREATE TABLE IF NOT EXISTS ms_switched_off (tenant_code TEXT NOT NULL, ext TEXT NOT NULL, "
                       "PRIMARY KEY (tenant_code, ext))",

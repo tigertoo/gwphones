@@ -289,7 +289,7 @@ def _link_json(link) -> dict:
             "admin_group": link["admin_group_name"], "attribute": link["attribute"],
             "last_sync_at": link["last_sync_at"], "last_result": json.loads(link["last_result"] or "null"),
             "consent_url": consent_url(link["ms_tenant"]), "linked_by": link["linked_by"],
-            "create_exts": bool(link["create_exts"])}
+            "create_exts": bool(link["create_exts"]), "sites_from_office": bool(link["sites_from_office"])}
 
 
 @app.get("/api/microsoft")
@@ -304,6 +304,7 @@ class Settings(BaseModel):
     admin_group: str = ""    # optional: its members are admins
     attribute: int = 1       # Exchange custom attribute 1-15: the extension
     create_exts: bool = False  # create an extension that doesn't exist yet
+    sites_from_office: bool = False  # each extension on the site named by its person's Office
 
 
 @app.put("/api/microsoft")
@@ -324,12 +325,13 @@ def api_save_settings(req: Settings, request: Request, me: Signed = Depends(sign
         raise auth.Refused("Choose the group whose members use the phone system.", 400)
     with db.connect() as conn:
         conn.execute("UPDATE ms_links SET group_id = ?, group_name = ?, admin_group_id = ?, admin_group_name = ?, "
-                     "attribute = ?, create_exts = ? WHERE tenant_code = ?",
+                     "attribute = ?, create_exts = ?, sites_from_office = ? WHERE tenant_code = ?",
                      (g["id"], g["name"], a["id"] if a else "", a["name"] if a else "", req.attribute,
-                      int(req.create_exts), me.user["tenant_code"]))
+                      int(req.create_exts), int(req.sites_from_office), me.user["tenant_code"]))
         db.audit(conn, "Microsoft 365 sync settings", me.user, client_ip(request),
                  f"group {g['name']}, admins {a['name'] if a else 'none'}, custom attribute {req.attribute}, "
-                 f"create extensions {'on' if req.create_exts else 'off'}")
+                 f"create extensions {'on' if req.create_exts else 'off'}, "
+                 f"sites from Office {'on' if req.sites_from_office else 'off'}")
     return {"ok": True}
 
 
@@ -439,7 +441,7 @@ def _find_group(ms_tenant: str, name_or_id: str) -> dict:
 def _members(ms_tenant: str, group_id: str, attribute: int) -> List[dict]:
     url = f"{GRAPH}/groups/{group_id}/transitiveMembers/microsoft.graph.user"
     params = {"$select": "id,displayName,mail,userPrincipalName,accountEnabled,userType,businessPhones,"
-                         "onPremisesExtensionAttributes",
+                         "officeLocation,onPremisesExtensionAttributes",
               "$top": "999"}
     out = []
     while url:
@@ -450,7 +452,8 @@ def _members(ms_tenant: str, group_id: str, attribute: int) -> List[dict]:
                         "email": auth.normal_email(u.get("mail") or u.get("userPrincipalName") or ""),
                         "enabled": bool(u.get("accountEnabled")), "guest": u.get("userType") == "Guest",
                         "ext": str(attrs.get(f"extensionAttribute{attribute}") or "").strip(),
-                        "phone": e164((u.get("businessPhones") or [""])[0])})
+                        "phone": e164((u.get("businessPhones") or [""])[0]),
+                        "office": (u.get("officeLocation") or "").strip()[:80]})
         url, params = data.get("@odata.nextLink"), None
     return out
 
@@ -481,15 +484,19 @@ def ext_name(display_name: str) -> str:
     return re.sub(r"\s+", " ", NAME_KEEP.sub("", plain)).strip()[:40]
 
 
-def plan_extensions(conn, link, result: dict, members: List[dict], info: Dict[str, dict], caller_ids: dict) -> list:
+def plan_extensions(conn, link, result: dict, members: List[dict], info: Dict[str, dict], caller_ids: dict,
+                    sites: Optional[list] = None) -> list:
     """What sync does to the tenant's extensions, for the people it keeps:
     create a missing one (if the tenant chose that), name it after them,
     send its voicemail to their own email if nothing is set, show their
     Office phone as its caller ID (only one of the tenant's own numbers),
     switch a leaver's off and a returner's back on (only one sync switched
-    off). Writes nothing."""
+    off), and with sites_from_office, put it on the site its person's
+    Office names (by name, any case; one that isn't a site is reported,
+    and an empty Office leaves it as it is). Writes nothing."""
     tenant = link["tenant_code"]
     by_oid = {m["oid"]: m for m in members}
+    by_site = {x["name"].strip().lower(): x for x in (sites or [])} if link["sites_from_office"] else {}
     allowed = set(caller_ids.get("numbers") or []) | ({caller_ids["default"]} if caller_ids.get("default") else set())
     switched = {r["ext"] for r in conn.execute("SELECT ext FROM ms_switched_off WHERE tenant_code = ?", (tenant,))}
     out = []
@@ -514,8 +521,13 @@ def plan_extensions(conn, link, result: dict, members: List[dict], info: Dict[st
             continue
         name = ext_name(m["name"])
         if e is None:
-            out.append({"do": "create", "ext": ext, "name": name or f"Extension {ext}", "who": m["email"]})
-            e = {"name": name, "vm_email": "", "outbound_cid": "", "enabled": True}
+            site = by_site.get(m.get("office", "").lower())
+            if site and site.get("ext_min") is not None and not site["ext_min"] <= int(ext) <= site["ext_max"]:
+                site = None  # made without a site; the check below reports why
+            out.append({"do": "create", "ext": ext, "name": name or f"Extension {ext}", "who": m["email"],
+                        "site_id": site["id"] if site else None, "site": site["name"] if site else ""})
+            e = {"name": name, "vm_email": "", "outbound_cid": "", "enabled": True,
+                 "site_id": site["id"] if site else None}
         elif name and e["name"] != name:
             out.append({"do": "rename", "ext": ext, "name": name, "enabled": bool(e.get("enabled", True)),
                         "who": m["email"]})
@@ -528,6 +540,17 @@ def plan_extensions(conn, link, result: dict, members: List[dict], info: Dict[st
                             "who": m["email"]})
         if not e.get("enabled", True) and ext in switched:
             out.append({"do": "switch_on", "ext": ext, "name": name or e["name"], "who": m["email"]})
+        if link["sites_from_office"] and m.get("office"):
+            site = by_site.get(m["office"].lower())
+            if not site:
+                result["problems"].append({"who": m["email"], "problem": f"their Office, “{m['office']}”, isn't one of "
+                                                                         "your sites: their site is left as it is"})
+            elif e.get("site_id") != site["id"]:
+                if site.get("ext_min") is not None and not site["ext_min"] <= int(ext) <= site["ext_max"]:
+                    result["problems"].append({"who": m["email"], "problem": f"extension {ext} is outside {site['name']}'s "
+                                                                             f"numbers ({site['ext_min']}-{site['ext_max']})"})
+                else:
+                    out.append({"do": "site", "ext": ext, "site_id": site["id"], "site": site["name"], "who": m["email"]})
     leavers = {a["id"] for a in result["actions"] if a["do"] in ("disable", "change")}
     for ext in sorted(leaving - set(people.values())):
         e = info.get(ext)
@@ -553,7 +576,7 @@ def _apply_extensions_first(caller, result: dict):
     real created_at (what a portal login is bound to)."""
     made = [x for x in result["extensions"] if x["do"] == "create"]
     failed = {x["ext"] for x in made if not _gw_try(caller, result, x, "POST", "/extensions",
-                                                     {"ext": x["ext"], "name": x["name"]})}
+                                                     {"ext": x["ext"], "name": x["name"], "site_id": x.get("site_id")})}
     if not made:
         return
     created = {e["ext"]: e["created_at"] for e in gw.call(caller, "GET", "/extensions")["extensions"]}
@@ -582,6 +605,8 @@ def _apply_extensions_after(conn, caller, link, result: dict):
             _gw_try(caller, result, x, "PUT", f"/extensions/{ext}/voicemail-email", {"email": x["email"]})
         elif x["do"] == "caller_id":
             _gw_try(caller, result, x, "PUT", f"/extensions/{ext}/outbound-cid", {"outbound_cid": x["cid"]})
+        elif x["do"] == "site":
+            _gw_try(caller, result, x, "PUT", f"/extensions/{ext}/site", {"site_id": x["site_id"]})
         if x["do"] != "create":
             db.audit(conn, f"Microsoft 365 sync: extension {x['do']}", {"id": None, "email": "microsoft-365-sync",
                                                                         "tenant_code": tenant}, "", f"{ext} {x.get('who', '')}")
@@ -627,7 +652,8 @@ def _run(tenant_code: str, apply: bool) -> dict:
                 exts[m["ext"]] = NEW
     with db.connect() as conn:
         result = plan(conn, link, members, admins, exts)
-        result["extensions"] = plan_extensions(conn, link, result, members, info, listed.get("caller_ids") or {})
+        result["extensions"] = plan_extensions(conn, link, result, members, info, listed.get("caller_ids") or {},
+                                               listed.get("sites") or [])
         if apply:
             _apply_extensions_first(caller, result)
             _apply(conn, link, result)

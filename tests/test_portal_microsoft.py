@@ -399,7 +399,7 @@ def test_missing_extension_created_when_chosen(world, ms):
     assert admin.put("/api/microsoft", json={"group": "Phone users", "admin_group": "Phone admins", "attribute": 1,
                                              "create_exts": True}).status_code == 200
     preview = admin.post("/api/microsoft/preview").json()
-    assert {"do": "create", "ext": "205", "name": "Dan", "who": "dan@acme.example"} in preview["extensions"]
+    assert any(x["do"] == "create" and x["ext"] == "205" and x["name"] == "Dan" for x in preview["extensions"])
     assert "no extension 999" in json.dumps(preview["problems"])  # not an extension number: never made
     r = admin.post("/api/microsoft/sync").json()
     assert r["counts"]["added"] == 1
@@ -462,3 +462,51 @@ def test_moved_to_another_number_frees_the_old_one(world, ms):
     assert ext_of(world, "205")["enabled"] and not ext_of(world, "203")["enabled"]
     cara = next(u for u in admin.get("/api/users").json()["users"] if u["email"] == "cara@acme.example")
     assert cara["ext"] == "205" and not cara["disabled"]
+
+
+def sites_for(world, *specs):
+    pbx = world["pbx"]
+    token = pbx._current_tenant.set(world["acme"]["id"])
+    try:
+        ids = {}
+        for name, lo, hi in specs:
+            r = pbx.api_create_site(pbx.SiteRequest(name=name, ext_min=lo, ext_max=hi))
+            ids[name] = r["id"]
+        return ids
+    finally:
+        pbx._current_tenant.reset(token)
+
+
+def with_office(m, office):
+    m["officeLocation"] = office
+    return m
+
+
+def test_site_from_office_location(world, ms):
+    admin = link(world, ms)
+    ids = sites_for(world, ("Dublin", 201, 209), ("Cork", 210, 219))
+    assert admin.put("/api/microsoft", json={"group": "Phone users", "admin_group": "Phone admins", "attribute": 1,
+                                             "create_exts": True, "sites_from_office": True}).status_code == 200
+    ms.members[GROUP] = [with_office(member("oid-cara", "cara@acme.example", "203"), " dublin "),
+                         with_office(member("oid-dan", "dan@acme.example", "211"), "Cork"),
+                         with_office(member("oid-eve", "eve@acme.example", "204"), "Galway"),
+                         with_office(member("oid-fay", "fay@acme.example", "205"), "Cork")]
+    preview = admin.post("/api/microsoft/preview").json()
+    text = json.dumps(preview)
+    assert {"do": "site", "ext": "203", "site_id": ids["Dublin"], "site": "Dublin", "who": "cara@acme.example"} \
+        in preview["extensions"]
+    assert any(x["do"] == "create" and x["ext"] == "211" and x["site"] == "Cork" for x in preview["extensions"])
+    assert "Galway" in text and "isn't one of your sites" in text and "205 is outside Cork's numbers" in text
+    admin.post("/api/microsoft/sync")
+    assert ext_of(world, "203")["site_id"] == ids["Dublin"] and ext_of(world, "211")["site_id"] == ids["Cork"]
+    assert ext_of(world, "204")["site_id"] is None and ext_of(world, "205")["site_id"] is None
+    # nothing to do the second time (apart from the same problems)
+    assert all(x["do"] != "site" for x in admin.post("/api/microsoft/preview").json()["extensions"])
+
+
+def test_office_ignored_unless_chosen(world, ms):
+    admin = link(world, ms)
+    sites_for(world, ("Dublin", 201, 209))
+    ms.members[GROUP] = [with_office(member("oid-cara", "cara@acme.example", "203"), "Dublin")]
+    r = admin.post("/api/microsoft/preview").json()
+    assert all(x["do"] != "site" for x in r["extensions"]) and "Office" not in json.dumps(r["problems"])

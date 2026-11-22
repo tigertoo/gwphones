@@ -146,13 +146,13 @@ function Person({ u, me, exts, onChange }) {
 // group. Extensions come from an Exchange custom attribute (1-15).
 function Microsoft365({ onSynced }) {
   const [s, setS] = useState(null);
-  const [f, setF] = useState({ group: "", admin_group: "", attribute: 1, create_exts: false });
+  const [f, setF] = useState({ group: "", admin_group: "", attribute: 1, create_exts: false, sites_from_office: false });
   const [result, setResult] = useState(null);
   const a = useAction();
   const load = useCallback(() => get("/microsoft").then((r) => {
     setS(r);
     if (r.linked) setF({ group: r.group || "", admin_group: r.admin_group || "", attribute: r.attribute || 1,
-      create_exts: !!r.create_exts });
+      create_exts: !!r.create_exts, sites_from_office: !!r.sites_from_office });
     if (r.last_result) setResult(r.last_result);
   }).catch(() => setS({ available: false })), []);
   useEffect(() => { load(); }, [load]);
@@ -199,6 +199,12 @@ function Microsoft365({ onSynced }) {
         <input type="checkbox" checked={f.create_exts} onChange={(e) => setF({ ...f, create_exts: e.target.checked })} />
         Create an extension that doesn't exist yet (one of your extension numbers), named after the person
       </label>
+      <label className="check">
+        <input type="checkbox" checked={f.sites_from_office}
+          onChange={(e) => setF({ ...f, sites_from_office: e.target.checked })} />
+        Put each person's extension on the site named by their Office (Microsoft 365 admin centre: the user, Contact
+        information, Office), e.g. Dublin or Cork
+      </label>
       <p className="small muted">Each person's extension is named after them, its voicemail is emailed to them (unless
         it's already set), and calls out show their Office phone if it's one of your numbers. A leaver's extension is
         switched off, and back on if they return.</p>
@@ -240,7 +246,8 @@ function MicrosoftAdminLinks() {
 
 const DOING = { add: "Add", link: "Link", change: "Update", enable: "Enable", disable: "Disable" };
 const EXT_DOING = {
-  create: (x) => `Create extension ${x.ext} (${x.name})`,
+  create: (x) => `Create extension ${x.ext} (${x.name})${x.site ? ` at ${x.site}` : ""}`,
+  site: (x) => `Put extension ${x.ext} on ${x.site}`,
   rename: (x) => `Name extension ${x.ext} “${x.name}”`,
   voicemail_email: (x) => `Email extension ${x.ext}'s voicemail to ${x.email}`,
   caller_id: (x) => `Extension ${x.ext} shows ${x.number || "the main number"} on calls out`,

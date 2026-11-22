@@ -278,6 +278,15 @@ again when they return; one an admin switched off stays off
 (`ms_switched_off` keeps which ones sync switched off). Nothing is ever
 deleted.
 
+With **Put each person's extension on the site named by their Office**
+(off by default), each extension goes on the site whose name matches
+the person's Office in Microsoft 365 (`officeLocation`: admin centre,
+the user, Contact information, Office; any case, spaces trimmed). An
+Office that isn't one of the tenant's sites is reported and the site
+left as it is, as it is with an empty Office; a number outside the
+site's block is reported, not moved. New extensions are made on their
+site.
+
 **Preview** shows what a sync would do without doing it; **Sync now**
 does it, and it also runs every 15 minutes. Staff need an extension that
 exists in the tenant, one person each: not one another active person
