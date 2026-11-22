@@ -123,21 +123,26 @@ def api_extensions(request: Request, me: Signed = Depends(signed_in())):
     data = gw.call(me.user, "GET", "/extensions")
     exts = data["extensions"]
     mine = _bound(me, request, exts)
-    keep = ("ext", "name", "enabled", "vm_email", "record", "vm_nopin", "outbound_cid", "ring_mode")
+    keep = ("ext", "name", "enabled", "vm_email", "record", "vm_nopin", "outbound_cid", "ring_mode", "site_id",
+            "default_cid")
     return {"extensions": [{k: e.get(k) for k in keep} for e in exts if mine is None or e["ext"] == mine],
             # what an extension may show on calls out: the organisation's own numbers
-            "caller_ids": data.get("caller_ids") or {"default": "", "numbers": []}}
+            "caller_ids": data.get("caller_ids") or {"default": "", "numbers": []},
+            "sites": [{k: x.get(k) for k in ("id", "name", "number", "ext_min", "ext_max", "extensions")}
+                      for x in data.get("sites") or []],
+            "limits": data.get("limits") or {}}
 
 
 class NewExtension(BaseModel):
     name: str
+    site_id: Optional[int] = None
 
 
 @app.post("/api/extensions")
 def api_new_extension(req: NewExtension, request: Request, me: Signed = Depends(signed_in())):
     _admin(me)
     _saving(me.user)
-    r = gw.call(me.user, "POST", "/extensions", json={"name": req.name})
+    r = gw.call(me.user, "POST", "/extensions", json={"name": req.name, "site_id": req.site_id})
     ext = (r.data if isinstance(r, gw.Pending) else r).get("ext")
     _audit(me, request, "extension created", f"{ext} {req.name}")
     return _done(r, {"ext": ext} if ext else None)
@@ -288,6 +293,55 @@ def api_ring_mode(ext: str, req: RingMode, request: Request, me: Signed = Depend
     return _done(r)
 
 
+# -- sites (admins) -------------------------------------------------------------------------------
+
+class Site(BaseModel):
+    name: str
+    number: str = ""
+    ext_min: Optional[int] = None
+    ext_max: Optional[int] = None
+
+
+class ExtensionSite(BaseModel):
+    site_id: Optional[int] = None
+
+
+@app.post("/api/sites")
+def api_new_site(req: Site, request: Request, me: Signed = Depends(signed_in())):
+    _admin(me)
+    _saving(me.user)
+    r = gw.call(me.user, "POST", "/sites", json=req.dict())
+    _audit(me, request, "site added", f"{req.name} {req.number} {req.ext_min or ''}-{req.ext_max or ''}")
+    return _done(r)
+
+
+@app.put("/api/sites/{site_id}")
+def api_change_site(site_id: int, req: Site, request: Request, me: Signed = Depends(signed_in())):
+    _admin(me)
+    _saving(me.user)
+    r = gw.call(me.user, "PUT", f"/sites/{site_id}", json=req.dict())
+    _audit(me, request, "site changed", f"{site_id}: {req.name} {req.number} {req.ext_min or ''}-{req.ext_max or ''}")
+    return _done(r)
+
+
+@app.delete("/api/sites/{site_id}")
+def api_remove_site(site_id: int, request: Request, me: Signed = Depends(signed_in())):
+    _admin(me)
+    _saving(me.user)
+    r = gw.call(me.user, "DELETE", f"/sites/{site_id}")
+    _audit(me, request, "site removed", str(site_id))
+    return _done(r)
+
+
+@app.put("/api/extensions/{ext}/site")
+def api_extension_site(ext: str, req: ExtensionSite, request: Request, me: Signed = Depends(signed_in())):
+    _admin(me)
+    _saving(me.user)
+    r = gw.call(me.user, "PUT", f"/extensions/{ext}/site", json={"site_id": req.site_id})
+    _audit(me, request, "extension site changed", f"{ext}: {req.site_id or 'none'}")
+    return _done(r)
+
+
 # -- forwarding and do not disturb ----------------------------------------------------------------
 
 @app.get("/api/forwarding")
@@ -359,7 +413,7 @@ def _recordings(me: Signed, request: Request, q: str = "") -> List[dict]:
 
 # A recording's file name says whose it is: started_ext_other_direction_id.
 # (The same pattern as gwphones' REC_NAME_RE.)
-_REC_NAME = re.compile(r"[0-9]{8}-[0-9]{6}_([0-9]{3})_([0-9]{0,20}|unknown)_(in|out|int|req)_([0-9.]{1,40})\.ulaw")
+_REC_NAME = re.compile(r"[0-9]{8}-[0-9]{6}_([0-9]{3,4})_([0-9]{0,20}|unknown)_(in|out|int|req)_([0-9.]{1,40})\.ulaw")
 
 
 def _one_recording(me: Signed, request: Request, name: str):

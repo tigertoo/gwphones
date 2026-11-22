@@ -8,6 +8,7 @@
  "settings": {
   "cap_default": "0.06",
   "cap_mobile": "0.08",
+  "ext_digits": "3",
   "imported": "1",
   "inbound_default": "600",
   "lcr_allow_irishvoip": "1",

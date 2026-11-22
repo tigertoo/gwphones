@@ -72,6 +72,12 @@ PORTAL_ROUTES = {
     ("PUT", "/api/pbx/extensions/{ext}/outbound-cid"),
     # How an extension's devices ring (a desk phone and its apps).
     ("PUT", "/api/pbx/extensions/{ext}/ring-mode"),
+    # Sites (offices): their number and block of extensions; admins only in the portal.
+    ("GET", "/api/pbx/sites"),
+    ("POST", "/api/pbx/sites"),
+    ("PUT", "/api/pbx/sites/{site_id}"),
+    ("DELETE", "/api/pbx/sites/{site_id}"),
+    ("PUT", "/api/pbx/extensions/{ext}/site"),
     ("GET", "/api/pbx/forwarding"),
     ("PUT", "/api/pbx/extensions/{ext}/forwarding"),
     ("GET", "/api/pbx/status/tenant"),

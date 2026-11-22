@@ -4,7 +4,7 @@ import React, { useCallback, useEffect, useState } from "react";
 // main tenant is today's system; every other has its own extensions,
 // numbering, voicemail, recordings, park lot, caller ID and call limit.
 
-const EMPTY = { name: "", outbound_cid: "", max_calls: 4, sip_host: "", web_max: 10, video: false, video_price: "5.00" };
+const EMPTY = { name: "", outbound_cid: "", max_calls: 4, sip_host: "", web_max: 10, video: false, video_price: "5.00", ext_digits: "4" };
 
 export default function TenantsSection({ config, send, busy, apiBase, switchTo }) {
   const [tenants, setTenants] = useState(null);
@@ -53,7 +53,7 @@ export default function TenantsSection({ config, send, busy, apiBase, switchTo }
               <td>{t.code}</td>
               <td><input className="idea-input pbx-name-input" maxLength={40} value={edit.name}
                 onChange={(e) => setEdit({ ...edit, name: e.target.value })} /></td>
-              <td>{t.extensions}</td>
+              <td>{t.extensions}<span className="pbx-hint"> · {t.settings.ext_digits || "3"} digits</span></td>
               <td colSpan={2} className="pbx-hint">Set under Trunks &amp; Outbound while working on it</td>
               <td><input className="idea-input pbx-num-input" type="number" min={1} max={50} value={edit.web_max}
                 onChange={(e) => setEdit({ ...edit, web_max: e.target.value })} /></td>
@@ -76,7 +76,7 @@ export default function TenantsSection({ config, send, busy, apiBase, switchTo }
               <td>{t.code}</td>
               <td>{t.name}{t.main && <span className="pbx-hint"> (main)</span>}
                 {t.id === config.tenant.id && <span className="pbx-chip">working on it</span>}</td>
-              <td>{t.extensions}</td>
+              <td>{t.extensions}<span className="pbx-hint"> · {t.settings.ext_digits || "3"} digits</span></td>
               <td>{t.settings.outbound_cid || <span className="pbx-hint">none</span>}</td>
               <td>{t.settings.max_outbound}{t.main && <span className="pbx-hint"> out</span>}</td>
               <td>{t.settings.web_max}</td>
@@ -110,6 +110,13 @@ export default function TenantsSection({ config, send, busy, apiBase, switchTo }
               onChange={(e) => setForm({ ...form, name: e.target.value })} />
             <input className="idea-input" placeholder="Caller ID, e.g. +35312345678" value={form.outbound_cid}
               onChange={(e) => setForm({ ...form, outbound_cid: e.target.value })} />
+            <label className="idea-field">
+              Extensions
+              <select className="idea-input" value={form.ext_digits} onChange={(e) => setForm({ ...form, ext_digits: e.target.value })}>
+                <option value="4">4 digits (2000–8999, room for sites)</option>
+                <option value="3">3 digits (200–299, a small office)</option>
+              </select>
+            </label>
             <label className="idea-field">
               Calls at once
               <input className="idea-input pbx-num-input" type="number" min={1} max={30} value={form.max_calls}

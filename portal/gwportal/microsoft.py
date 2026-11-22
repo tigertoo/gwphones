@@ -458,7 +458,6 @@ def _members(ms_tenant: str, group_id: str, attribute: int) -> List[dict]:
 # -- sync ----------------------------------------------------------------------------------------------------
 
 NEW = "new"  # an extension this sync is about to create (its created_at once it exists)
-EXT_RE = re.compile(r"2[0-9][0-9]")  # gwphones' extension numbers (pbx.EXT_MIN..EXT_MAX)
 NAME_KEEP = re.compile(r"[^A-Za-z0-9 .'_-]")  # gwphones' extension names (pbx.NAME_RE)
 
 
@@ -618,10 +617,13 @@ def _run(tenant_code: str, apply: bool) -> dict:
     info = {e["ext"]: e for e in listed["extensions"]}
     exts = {e: i["created_at"] for e, i in info.items()}
     if link["create_exts"]:
-        # A staff member's number that isn't an extension yet: made by this sync (NEW until then).
+        # A staff member's number that isn't an extension yet: made by this sync (NEW until then),
+        # if it's one of the tenant's extension numbers (3 or 4 digits: gwphones says which).
+        lim = listed.get("limits") or {"ext_min": 200, "ext_max": 299}
         for m in members:
             if (m["enabled"] and not m.get("guest") and m["oid"] not in admins and m["ext"] not in exts
-                    and EXT_RE.fullmatch(m["ext"])):
+                    and m["ext"].isdigit() and len(m["ext"]) == len(str(lim["ext_max"]))
+                    and lim["ext_min"] <= int(m["ext"]) <= lim["ext_max"]):
                 exts[m["ext"]] = NEW
     with db.connect() as conn:
         result = plan(conn, link, members, admins, exts)

@@ -146,7 +146,7 @@ MAX_FORWARD_HOPS = 3  # 201 -> 202 -> 201 ... stops here, at voicemail
 # Where calls may be forwarded: other extensions and Irish landlines and
 # mobiles (national format). Never abroad, 1800/premium or 112/999: anyone
 # who rings your number can set a forward going, at your cost.
-FORWARD_TARGET_DIALPLAN_RE = "^(2[0-9][0-9]|0[1-9][0-9]{7}[0-9]?)$"
+FORWARD_TARGET_DIALPLAN_RE = "^(2[0-9][0-9]|0[1-9][0-9]{7}[0-9]?)$"  # a 3-digit tenant's (TenantNames.forward_re)
 VOICEMAIL_NUMBER = "*97"  # check your own voicemail (static dialplan)
 # Asterisk hands each "new voicemail" email to asterisk/vm-mail.sh (mailcmd
 # in voicemail.conf), which drops it here; the dashboard sends it on
@@ -161,6 +161,13 @@ STATIC_DIALPLAN = os.path.join(ASTERISK_DIR, "extensions.conf")
 # Must line up with the static dialplan: _2XX dials extensions, and ring
 # groups live in their own 6XX range so the two can never collide.
 EXT_MIN, EXT_MAX = 200, 299
+# A tenant's extensions are 3 digits (200-299: a small business) or 4
+# (2000-8999: room for sites, e.g. Dublin 2000-2999, Cork 3000-3999), its
+# ext_digits setting: 4 for a new tenant, 3 for those from before. Both
+# fit around ring groups (6XX), menus (5XX), hours (4XX), park (700) and
+# outside numbers (0..., 00, +, 1800...): a phone sends the whole number.
+EXT_PLANS = {"3": {"min": 200, "max": 299, "pattern": "_2XX", "regex": "2[0-9][0-9]"},
+             "4": {"min": 2000, "max": 8999, "pattern": "_[2-8]XXX", "regex": "[2-8][0-9]{3}"}}
 GROUP_MIN, GROUP_MAX = 600, 699
 # IVR menus: 5XX (7XX is Asterisk's default parking lot).
 MENU_MIN, MENU_MAX = 500, 599
@@ -179,7 +186,7 @@ PARK_SLOTS = [str(n) for n in range(701, 721)]
 # dashboard lists, plays (as WAV), deletes and expires them. A folder of
 # its own, mode 2770 asterisk:asterisk (README, "Call recording").
 REC_DIR = os.environ.get("PBX_RECORDINGS_DIR", "/var/spool/asterisk/monitor/portal")
-REC_NAME_RE = re.compile(r"(\d{8}-\d{6})_(\d{3})_(\d{0,20}|unknown)_(in|out|int|req)_([0-9.]{1,40})\.ulaw")
+REC_NAME_RE = re.compile(r"(\d{8}-\d{6})_(\d{3,4})_(\d{0,20}|unknown)_(in|out|int|req)_([0-9.]{1,40})\.ulaw")
 # Told to outside callers when calls may be recorded (an IVR-style greeting).
 REC_NOTICE = os.path.join(IVR_DIR, "recording-notice.ulaw")
 # Business hours schedules: 4XX. Open or closed by the clock in PBX_TIMEZONE
@@ -231,7 +238,9 @@ TENANT_SETTINGS = ("outbound_cid", "max_outbound", "rec_days", "cap_default", *[
                    "main_mailbox", "web_max",
                    # video calls (extensions and call links): a paid add-on, so each tenant's own,
                    # and its monthly price on statements (billing.py; never the main tenant's)
-                   "video", "video_price")
+                   "video", "video_price",
+                   # extensions: 3 or 4 digits (EXT_PLANS)
+                   "ext_digits")
 
 
 C2C_RING = "portal-c2c-ring"
@@ -245,8 +254,15 @@ class TenantNames:
     tenants (portal-..., voicemail "portal", park lot "default"); any other
     gets t<code>-... and folders of its own."""
 
-    def __init__(self, tenant_id: int, code: str):
+    def __init__(self, tenant_id: int, code: str, digits: str = "3"):
         self.id, self.code = tenant_id, code
+        self.digits = digits if digits in EXT_PLANS else "3"
+        plan = EXT_PLANS[self.digits]
+        self.ext_min, self.ext_max = plan["min"], plan["max"]
+        self.ext_pattern, self.ext_regex = plan["pattern"], plan["regex"]  # _2XX / 2[0-9]{2}
+        self.ext_len = int(self.digits)
+        # forward targets: its own extensions, or Irish landlines and mobiles
+        self.forward_re = f"^({self.ext_regex}|0[1-9][0-9]{{7}}[0-9]?)$"
         main = tenant_id == MAIN_TENANT
         self.prefix = "portal" if main else f"t{code}"
         self.vm = VM_CONTEXT if main else self.prefix
@@ -316,12 +332,12 @@ def tenant_names(conn, tenant: int) -> TenantNames:
     r = conn.execute("SELECT code FROM tenants WHERE id = ?", (tenant,)).fetchone()
     if not r:
         raise HTTPException(404, "Tenant not found.")
-    return TenantNames(tenant, r["code"])
+    return TenantNames(tenant, r["code"], get_settings(conn, tenant)["ext_digits"])
 
 
 def all_tenant_names(conn) -> List[TenantNames]:
     """Every tenant, the main one first."""
-    return [TenantNames(r["id"], r["code"]) for r in conn.execute("SELECT id, code FROM tenants ORDER BY id")]
+    return [tenant_names(conn, r["id"]) for r in conn.execute("SELECT id FROM tenants ORDER BY id")]
 
 
 # Phones' logins (endpoint names) and the extensions they are. Today a
@@ -332,9 +348,11 @@ def all_tenant_names(conn) -> List[TenantNames]:
 def parse_login(login: str) -> Optional[Tuple[str, str]]:
     """(tenant code, extension) of a phone login: 201 is the main tenant's,
     1002201 tenant 1002's. None for anything else (a trunk, webguest)."""
-    if re.fullmatch(r"2[0-9]{2}", login or ""):
+    # 3 or 4 digits (EXT_PLANS): the login's length tells which, so phones
+    # set up before 4 digits keep their logins.
+    if re.fullmatch(r"2[0-9]{2}|[2-8][0-9]{3}", login or ""):
         return MAIN_TENANT_CODE, login
-    m = re.fullmatch(r"([0-9]{4})(2[0-9]{2})", login or "")
+    m = re.fullmatch(r"([0-9]{4})(2[0-9]{2}|[2-8][0-9]{3})", login or "")
     return (m.group(1), m.group(2)) if m else None
 
 
@@ -398,6 +416,7 @@ DEFAULT_SETTINGS = {
     # Video between extensions: Asterisk passes it through untouched (no
     # transcoding), so both phones must share a codec. Off until tested.
     "video": "0",
+    "ext_digits": "3",  # tenants from before 4 digits; a new one is given 4 (api_create_tenant)
     "video_price": "5.00",  # € a month, on the tenant's statement while video is on (billing.mark_addons)
     **{f"lcr_allow_{t}{r}": "1" for t, r in ALL_ROUTES},  # usable for "cheapest"
 }
@@ -605,7 +624,18 @@ def get_db() -> sqlite3.Connection:
                tenant_id INTEGER NOT NULL,
                key TEXT NOT NULL,
                value TEXT NOT NULL,
-               PRIMARY KEY (tenant_id, key));"""
+               PRIMARY KEY (tenant_id, key));
+           -- A tenant's sites (offices): their own number (caller ID and 112/999
+           -- for their extensions without one of their own) and optionally a
+           -- block of extension numbers (Dublin 2000-2999).
+           CREATE TABLE IF NOT EXISTS sites (
+               id INTEGER PRIMARY KEY AUTOINCREMENT,
+               tenant_id INTEGER NOT NULL,
+               name TEXT NOT NULL,
+               number TEXT NOT NULL DEFAULT '',
+               ext_min INTEGER,
+               ext_max INTEGER,
+               created_at TEXT NOT NULL);"""
     )
     if fresh:
         os.chmod(PBX_DB_PATH, 0o600)  # holds SIP passwords
@@ -619,6 +649,8 @@ def get_db() -> sqlite3.Connection:
                    "extensions ADD COLUMN vm_nopin INTEGER NOT NULL DEFAULT 0",
                    # how its devices ring (RING_MODES): all at once, desk phone first, app as backup
                    "extensions ADD COLUMN ring_mode TEXT NOT NULL DEFAULT 'all'",
+                   # its site (sites.id), or none
+                   "extensions ADD COLUMN site_id INTEGER",
                    # Yealink RPS (rps.py): the phone's entry there, and how its last sync went
                    "desk_phones ADD COLUMN rps_id TEXT",
                    "desk_phones ADD COLUMN rps_status TEXT NOT NULL DEFAULT ''",
@@ -696,7 +728,7 @@ TENANT_KEYED = {
         enabled INTEGER NOT NULL DEFAULT 1, created_at TEXT NOT NULL, updated_at TEXT NOT NULL, vm_pin TEXT,
         vm_email TEXT NOT NULL DEFAULT '', setup_email TEXT NOT NULL DEFAULT '', outbound_cid TEXT NOT NULL DEFAULT '',
         record INTEGER NOT NULL DEFAULT 0, vm_nopin INTEGER NOT NULL DEFAULT 0, ring_mode TEXT NOT NULL DEFAULT 'all',
-        tenant_id INTEGER NOT NULL DEFAULT 1,
+        site_id INTEGER, tenant_id INTEGER NOT NULL DEFAULT 1,
         PRIMARY KEY (tenant_id, ext))"""),
     "ring_groups": ("number", """(number TEXT NOT NULL, name TEXT NOT NULL, strategy TEXT NOT NULL DEFAULT 'ringall',
         ring_time INTEGER NOT NULL DEFAULT 25, members TEXT NOT NULL DEFAULT '', voicemail TEXT NOT NULL DEFAULT '',
@@ -945,17 +977,21 @@ def build_extensions_conf(conn) -> str:
     settings = get_settings(conn)
     names = {t.id: t for t in all_tenant_names(conn)}
     video = {tid: get_settings(conn, tid)["video"] == "1" for tid in names}  # the add-on, per tenant
+    sites = {r["id"]: r for r in conn.execute("SELECT * FROM sites")}
     for r in conn.execute("SELECT * FROM extensions WHERE enabled = 1 ORDER BY ext"):
         t = names[r["tenant_id"]]
         login = t.login(r["ext"])
+        site = sites.get(r["site_id"])
+        # *8 answers a ringing phone of the same site only (its own pickup group)
+        group = f"{t.pickup}-site{site['id']}" if site else t.pickup
         out += [f"[{login}](endpoint-ext)",
                 f"auth={login}",
                 f"aors={login}",
                 f"callerid=\"{r['name']}\" <{r['ext']}>",
                 f"mailboxes={r['ext']}@{t.vm}",
                 f"subscribe_context={t.hints}",
-                f"named_call_group={t.pickup}",
-                f"named_pickup_group={t.pickup}",
+                f"named_call_group={group}",
+                f"named_pickup_group={group}",
                 f"set_var=PBX_EXT={r['ext']}",
                 f"set_var=PBX_TENANT={t.code}"]
         if t.id != MAIN_TENANT:
@@ -963,11 +999,13 @@ def build_extensions_conf(conn) -> str:
             out.append(f"accountcode={t.code}")  # its calls' CDRs, for billing (the main tenant's: empty)
         if video[t.id]:
             out.append(f"allow={VIDEO_CODECS}")  # added to the template's audio codecs
-        if r["outbound_cid"]:
-            # Its own outbound caller ID; [sub-outbound] and 112/999 fall
-            # back to OUTBOUND_CID without it.
-            out.append(f"set_var=EXT_CID={r['outbound_cid']}")
-            if emergency_needs_main_number(settings, r["outbound_cid"]):
+        cid = effective_cid(r, site)
+        if cid:
+            # Its own outbound caller ID, else its site's number (so 112/999
+            # from Cork shows Cork's); [sub-outbound] and 112/999 fall back
+            # to OUTBOUND_CID without either.
+            out.append(f"set_var=EXT_CID={cid}")
+            if emergency_needs_main_number(settings, cid):
                 out.append("set_var=EMERG_OWN_CID=0")  # Irish VoIP can't show it: 112/999 show the main number
         if r["vm_nopin"]:
             # Its own phones signed in with its password (TLS): *97 from
@@ -1204,7 +1242,7 @@ def _call_ext_context(t: TenantNames) -> List[str]:
     return [
         "; ---- Calls for an extension: do not disturb, forwarding, voicemail ----",
         f"[{t.call_ext}]",
-        "exten => _2XX,1,Set(HOPS=$[0${HOPS} + 1])",
+        f"exten => {t.ext_pattern},1,Set(HOPS=$[0${{HOPS}} + 1])",
         f" same => n,GotoIf($[${{HOPS}} > {MAX_FORWARD_HOPS}]?vm-u)  ; forwarded round in a loop",
         f" same => n,Set(FWD=${{DB({cf}/{me})}})",
         ' same => n,GotoIf($["${FWD}" != ""]?fwd)',
@@ -1222,7 +1260,7 @@ def _call_ext_context(t: TenantNames) -> List[str]:
         f" same => n,VoiceMail(${{EXTEN}}@{t.vm},b)",
         " same => n,Hangup()",
         ' same => n(fwd),GotoIf($["${FWD}" = "${EXTEN}"]?vm-u)',
-        f' same => n,GotoIf($[${{REGEX("{FORWARD_TARGET_DIALPLAN_RE}" ${{FWD}})}}]?:vm-u)  ; set by hand to somewhere not allowed',
+        f' same => n,GotoIf($[${{REGEX("{t.forward_re}" ${{FWD}})}}]?:vm-u)  ; set by hand to somewhere not allowed',
         ' same => n,ExecIf($["${CDR(userfield)}" = ""]?Set(CDR(userfield)=fwd:${EXTEN}))',
         f" same => n,Set(EXT_CID=${{EXTCID_{me}}})",
         f" same => n,Goto({t.dial_from},${{FWD}},1)",
@@ -1346,7 +1384,7 @@ def _features_context(t: TenantNames) -> List[str]:
            f"include => {t.park_context}"]
     db_key = f"{t.login_prefix}${{ME}}"  # the dialling extension's login: its AstDB key
     me = [" same => n,Set(ME=${PBX_EXT})",
-          f' same => n,GotoIf($[${{REGEX("^2[0-9][0-9]$" ${{ME}})}}]?:bad)']
+          f' same => n,GotoIf($[${{REGEX("^{t.ext_regex}$" ${{ME}})}}]?:bad)']
     end = [" same => n,Hangup()", " same => n(bad),Playback(invalid)", " same => n,Hangup()"]
     out += ["exten => *78,1,Answer()"] + me + [
         f" same => n,Set(DB({DND_FAMILY}/{db_key})=1)",
@@ -1360,7 +1398,7 @@ def _features_context(t: TenantNames) -> List[str]:
         fam = FORWARD_FAMILIES[key]
         out += [f"exten => _{on}X.,1,Answer()"] + me + [
             " same => n,Set(T=${EXTEN:3})",
-            f' same => n,GotoIf($[${{REGEX("{FORWARD_TARGET_DIALPLAN_RE}" ${{T}})}}]?:bad)',
+            f' same => n,GotoIf($[${{REGEX("{t.forward_re}" ${{T}})}}]?:bad)',
             ' same => n,GotoIf($["${T}" = "${ME}"]?bad)',
             f" same => n,Set(DB({fam}/{db_key})=${{T}})",
             f" same => n,Playback({sound}&activated)",
@@ -1394,7 +1432,7 @@ def _features_context(t: TenantNames) -> List[str]:
         " same => n(none),Playback(invalid)",
         " same => n,Hangup()"]
     out += ["exten => *8,1,Pickup()", " same => n,Hangup()",
-            f"exten => _**2XX,1,PickupChan(PJSIP/{t.login_prefix}${{EXTEN:2}}-,p)", " same => n,Hangup()"]
+            f"exten => _**{t.ext_pattern[1:]},1,PickupChan(PJSIP/{t.login_prefix}${{EXTEN:2}}-,p)", " same => n,Hangup()"]
     return out
 
 
@@ -1546,26 +1584,26 @@ def _click_to_call_contexts(t: TenantNames) -> List[str]:
     other half dials the number from dial as that extension (its caller ID,
     billed to it via CDR userfield c2c:<ext>) through from-internal, so the
     route check, price cap and call limit apply as for a dialled call.
-    Extensions are always 3 digits. Not included anywhere a phone can
+    Extensions are the tenant's 3 or 4 digits. Not included anywhere a phone can
     reach, so a phone can't use these to pass as another extension. The
     ring leg skips do not disturb and forwarding: the user asked for it.
     One pair per tenant, ringing its own logins and dialling out from its
     own internal context."""
-    pre = t.login_prefix
+    pre, n = t.login_prefix, t.ext_len  # the extension, then the number to call
     return ["; ---- Click to call: only started by the dashboard, never dialled ----",
             f"[{t.c2c_ring}]",
-            "exten => _2XXX.,1,Set(CALLERID(name)=Calling ${EXTEN:3})",
-            " same => n,Set(CALLERID(num)=${EXTEN:3})",
-            f" same => n,Gosub(sub-ring-ext,s,1({pre}${{EXTEN:0:3}},30,all,))",
+            f"exten => {t.ext_pattern}X.,1,Set(CALLERID(name)=Calling ${{EXTEN:{n}}})",
+            f" same => n,Set(CALLERID(num)=${{EXTEN:{n}}})",
+            f" same => n,Gosub(sub-ring-ext,s,1({pre}${{EXTEN:0:{n}}},30,all,))",
             " same => n,Hangup()",
             f"[{t.c2c_dial}]",
-            "exten => _2XXX.,1,Set(C2C=${EXTEN:0:3})",
+            f"exten => {t.ext_pattern}X.,1,Set(C2C=${{EXTEN:0:{n}}})",
             " same => n,Set(CDR(userfield)=c2c:${C2C})",
             *t.accountcode(),
             " same => n,Set(__RECEXT=${C2C})",
             f" same => n,Set(__RECTENANT={t.code})",
             f" same => n,Set(EXT_CID=${{EXTCID_{pre}${{C2C}}}})",
-            f" same => n,Goto({t.dial_from},${{EXTEN:3}},1)"]
+            f" same => n,Goto({t.dial_from},${{EXTEN:{n}}},1)"]
 
 
 # What a phone can dial out to, shared by every tenant: numbers sorted by
@@ -1614,7 +1652,7 @@ def _internal_context(t: TenantNames, outbound_cid: str, emergency_opts: str = "
            f"include => {t.ringgroups}",
            f"include => {t.features}",
            "include => portal-outbound",
-           f"exten => _2XX,1,Goto({t.call_ext},${{EXTEN}},1)",
+           f"exten => {t.ext_pattern},1,Goto({t.call_ext},${{EXTEN}},1)",
            # Its own mailbox by the endpoint, not the caller ID a phone sends;
            # without the PIN from its own phones if it chose that (VM_NOPIN
            # on the endpoint).
@@ -1721,9 +1759,10 @@ def build_portal_dialplan(conn) -> str:
            f"LCR_TOKEN={_lcr_token(conn)}"]
     # Each extension's own caller ID, for calls it forwards to outside numbers.
     names = {t.id: t for t in tenants}
-    out += [f"EXTCID_{names[r['tenant_id']].login(r['ext'])}={r['outbound_cid']}"
-            for r in conn.execute("SELECT ext, outbound_cid, tenant_id FROM extensions WHERE enabled = 1 AND outbound_cid != '' "
-                                  "ORDER BY ext")]
+    sites = {r["id"]: r for r in conn.execute("SELECT * FROM sites")}
+    out += [f"EXTCID_{names[r['tenant_id']].login(r['ext'])}={effective_cid(r, sites.get(r['site_id']))}"
+            for r in conn.execute("SELECT ext, outbound_cid, site_id, tenant_id FROM extensions WHERE enabled = 1 "
+                                  "ORDER BY ext") if effective_cid(r, sites.get(r["site_id"]))]
     # Extensions whose devices don't all ring at once (see [sub-ring-ext]).
     out += [f"RINGMODE_{names[r['tenant_id']].login(r['ext'])}={r['ring_mode']}"
             for r in conn.execute("SELECT ext, ring_mode, tenant_id FROM extensions WHERE enabled = 1 "
@@ -2424,6 +2463,7 @@ class TenantCreate(BaseModel):
     web_max: int = 10  # browser calls at once (call links): protection, not its plan
     video: bool = False  # the video add-on
     video_price: Optional[str] = None  # € a month; None = the default
+    ext_digits: str = "4"  # its extensions: 4 digits (2000-8999, room for sites) or 3 (200-299)
 
 
 class TenantUpdate(BaseModel):
@@ -2486,7 +2526,7 @@ def api_tenants():
         counts = {r["tenant_id"]: r["n"] for r in conn.execute(
             "SELECT tenant_id, COUNT(*) AS n FROM extensions GROUP BY tenant_id")}
         return {"host_suffix": TENANT_HOST_SUFFIX, "tenants": [{**_tenant_json(r), "extensions": counts.get(r["id"], 0),
-                             "settings": {k: get_settings(conn, r["id"])[k] for k in ("outbound_cid", "max_outbound", "web_max", "video", "video_price")}}
+                             "settings": {k: get_settings(conn, r["id"])[k] for k in ("outbound_cid", "max_outbound", "web_max", "video", "video_price", "ext_digits")}}
                             for r in conn.execute("SELECT * FROM tenants ORDER BY id")]}
 
 
@@ -2503,6 +2543,8 @@ def api_create_tenant(req: TenantCreate):
         raise HTTPException(400, "Calls at once (in and out) must be 1-30.")
     host = _clean_host(req.sip_host)
     web_max = _web_max(req.web_max)
+    if req.ext_digits not in EXT_PLANS:
+        raise HTTPException(400, "Extensions are 3 or 4 digits.")
     with _lock, get_db() as conn:
         _host_free(conn, host)
         used = max([int(r["code"]) for r in conn.execute("SELECT code FROM tenants")] + [TENANT_CODE_FIRST - 1])
@@ -2516,6 +2558,7 @@ def api_create_tenant(req: TenantCreate):
         _set_setting(conn, "max_outbound", str(req.max_calls), tenant=tid)
         _set_setting(conn, "web_max", str(web_max), tenant=tid)
         _set_setting(conn, "video", "1" if req.video else "0", tenant=tid)
+        _set_setting(conn, "ext_digits", req.ext_digits, tenant=tid)
         if req.video_price is not None:
             _set_setting(conn, "video_price", _video_price(req.video_price), tenant=tid)
         conn.commit()
@@ -2565,7 +2608,7 @@ def api_config():
             "extensions": [{"ext": r["ext"], "name": r["name"], "enabled": bool(r["enabled"]),
                             "voicemail_email": r["vm_email"], "setup_email": r["setup_email"],
                             "outbound_cid": r["outbound_cid"], "record": bool(r["record"]),
-                            "ring_mode": r["ring_mode"],
+                            "ring_mode": r["ring_mode"], "site_id": r["site_id"],
                             "vm_nopin": bool(r["vm_nopin"]),
                             "created_at": r["created_at"], "updated_at": r["updated_at"]}
                            for r in conn.execute("SELECT * FROM extensions WHERE tenant_id = ? ORDER BY ext", (tid,))],
@@ -2608,14 +2651,18 @@ def api_config():
             "trunks": {k: {"label": v["label"], "host": v["host"]} for k, v in TRUNKS.items()},
             "number_types": NUMBER_TYPES,
             "voxbeam_routes": VOXBEAM_ROUTES,
-            "limits": {"ext_min": EXT_MIN, "ext_max": EXT_MAX, "group_min": GROUP_MIN, "group_max": GROUP_MAX,
+            "sites": [_site_json(conn, r) for r in conn.execute("SELECT * FROM sites WHERE tenant_id = ? ORDER BY name",
+                                                                 (tid,))],
+            "limits": {"ext_min": t.ext_min, "ext_max": t.ext_max, "ext_digits": t.digits,
+                       "group_min": GROUP_MIN, "group_max": GROUP_MAX,
                        "menu_min": MENU_MIN, "menu_max": MENU_MAX, "hours_min": HOURS_MIN, "hours_max": HOURS_MAX},
         }
 
 
 class ExtensionCreate(BaseModel):
-    ext: Optional[str] = None  # next free number if omitted
+    ext: Optional[str] = None  # next free number if omitted (in its site's block, if it has one)
     name: str
+    site_id: Optional[int] = None
 
 
 class ExtensionUpdate(BaseModel):
@@ -2629,18 +2676,24 @@ def api_create_extension(req: ExtensionCreate):
     tid = current_tenant()
     with _lock, get_db() as conn:
         taken = {r["ext"] for r in conn.execute("SELECT ext FROM extensions WHERE tenant_id = ?", (tid,))}
+        t = tenant_names(conn, tid)
+        site = _site(conn, req.site_id) if req.site_id else None
+        lo, hi = _site_block(t, site)
         if req.ext:
-            ext = _in_range(req.ext, EXT_MIN, EXT_MAX, "Extension")
+            ext = _in_range(req.ext, t.ext_min, t.ext_max, "Extension")
             if ext in taken:
                 raise HTTPException(409, f"Extension {ext} already exists.")
+            if not lo <= int(ext) <= hi:
+                raise HTTPException(400, f"{site['name']}'s extensions are {lo}-{hi}.")
         else:
-            free = [str(n) for n in range(EXT_MIN + 1, EXT_MAX + 1) if str(n) not in taken]
+            free = [str(n) for n in range(max(lo, t.ext_min + 1), hi + 1) if str(n) not in taken]
             if not free:
                 raise HTTPException(409, "No free extension numbers left.")
             ext = free[0]
         now = _now()
-        conn.execute("INSERT INTO extensions (ext, name, password, vm_pin, enabled, created_at, updated_at, tenant_id) "
-                     "VALUES (?, ?, ?, ?, 1, ?, ?, ?)", (ext, name, secrets.token_urlsafe(24), _new_pin(), now, now, tid))
+        conn.execute("INSERT INTO extensions (ext, name, password, vm_pin, enabled, created_at, updated_at, tenant_id, "
+                     "site_id) VALUES (?, ?, ?, ?, 1, ?, ?, ?, ?)",
+                     (ext, name, secrets.token_urlsafe(24), _new_pin(), now, now, tid, site["id"] if site else None))
         conn.commit()
         result = apply_config(conn, f"Created extension {ext} ({name})")
     return {"ext": ext, **result}
@@ -2674,6 +2727,132 @@ def api_ring_mode(ext: str, req: RingModeRequest):
             raise HTTPException(404, "Extension not found.")
         conn.commit()
         return apply_config(conn, f"Extension {ext}: {RING_MODES[req.mode].lower()}")
+
+
+# -- sites --------------------------------------------------------------------------------------
+
+class SiteRequest(BaseModel):
+    name: str
+    number: str = ""                 # one of the tenant's own numbers, or "" (the main one)
+    ext_min: Optional[int] = None    # its block of extension numbers, both or neither
+    ext_max: Optional[int] = None
+
+
+class ExtensionSiteRequest(BaseModel):
+    site_id: Optional[int] = None
+
+
+def _site(conn, site_id: int):
+    r = conn.execute("SELECT * FROM sites WHERE id = ? AND tenant_id = ?", (site_id, current_tenant())).fetchone()
+    if not r:
+        raise HTTPException(404, "Site not found.")
+    return r
+
+
+def _site_block(t: TenantNames, site) -> Tuple[int, int]:
+    if site and site["ext_min"] is not None:
+        return site["ext_min"], site["ext_max"]
+    return t.ext_min, t.ext_max
+
+
+def _site_json(conn, r) -> dict:
+    n = conn.execute("SELECT COUNT(*) FROM extensions WHERE site_id = ?", (r["id"],)).fetchone()[0]
+    return {"id": r["id"], "name": r["name"], "number": r["number"], "ext_min": r["ext_min"], "ext_max": r["ext_max"],
+            "extensions": n}
+
+
+def _clean_site(conn, req: SiteRequest, site_id: int = 0) -> dict:
+    """A site's name, number (only one of the tenant's own: it's shown on
+    calls and to the emergency services) and block, checked."""
+    tid = current_tenant()
+    t = tenant_names(conn, tid)
+    name = _clean_name(req.name)
+    if conn.execute("SELECT 1 FROM sites WHERE tenant_id = ? AND lower(name) = lower(?) AND id != ?",
+                    (tid, name, site_id)).fetchone():
+        raise HTTPException(409, f"There's already a site called {name}.")
+    number = ""
+    if req.number.strip():
+        number = "+" + e164(req.number)
+        own = tenant_caller_ids(conn, tid)
+        if number not in own["numbers"] + [own["default"]]:
+            raise HTTPException(400, "A site's number must be one of your own numbers: it's what its calls show, "
+                                     "and what the emergency services see.")
+    lo, hi = req.ext_min, req.ext_max
+    if (lo is None) != (hi is None):
+        raise HTTPException(400, "Give both ends of the site's extension numbers, or neither.")
+    if lo is not None:
+        if not (t.ext_min <= lo <= hi <= t.ext_max):
+            raise HTTPException(400, f"A site's extension numbers must be within {t.ext_min}-{t.ext_max}, lowest first.")
+        for o in conn.execute("SELECT * FROM sites WHERE tenant_id = ? AND id != ? AND ext_min IS NOT NULL",
+                              (tid, site_id)).fetchall():
+            if lo <= o["ext_max"] and o["ext_min"] <= hi:
+                raise HTTPException(409, f"Those numbers overlap {o['name']}'s ({o['ext_min']}-{o['ext_max']}).")
+        if site_id:
+            outside = [r["ext"] for r in conn.execute("SELECT ext FROM extensions WHERE site_id = ?", (site_id,))
+                       if not lo <= int(r["ext"]) <= hi]
+            if outside:
+                raise HTTPException(409, f"Extensions {', '.join(outside[:5])} are on this site but outside {lo}-{hi}.")
+    return {"name": name, "number": number, "ext_min": lo, "ext_max": hi}
+
+
+@router.get("/sites")
+def api_sites():
+    with get_db() as conn:
+        return {"sites": [_site_json(conn, r) for r in conn.execute(
+            "SELECT * FROM sites WHERE tenant_id = ? ORDER BY name", (current_tenant(),))]}
+
+
+@router.post("/sites")
+def api_create_site(req: SiteRequest):
+    with _lock, get_db() as conn:
+        v = _clean_site(conn, req)
+        sid = conn.execute("INSERT INTO sites (tenant_id, name, number, ext_min, ext_max, created_at) "
+                           "VALUES (?, ?, ?, ?, ?, ?)", (current_tenant(), v["name"], v["number"], v["ext_min"],
+                                                         v["ext_max"], _now())).lastrowid
+        conn.commit()
+        result = apply_config(conn, f"Site {v['name']} added")
+    return {"id": sid, **result}
+
+
+@router.put("/sites/{site_id}")
+def api_update_site(site_id: int, req: SiteRequest):
+    with _lock, get_db() as conn:
+        _site(conn, site_id)
+        v = _clean_site(conn, req, site_id)
+        conn.execute("UPDATE sites SET name = ?, number = ?, ext_min = ?, ext_max = ? WHERE id = ?",
+                     (v["name"], v["number"], v["ext_min"], v["ext_max"], site_id))
+        conn.commit()
+        return apply_config(conn, f"Site {v['name']} changed")
+
+
+@router.delete("/sites/{site_id}")
+def api_delete_site(site_id: int):
+    with _lock, get_db() as conn:
+        s = _site(conn, site_id)
+        n = conn.execute("SELECT COUNT(*) FROM extensions WHERE site_id = ?", (site_id,)).fetchone()[0]
+        if n:
+            raise HTTPException(409, f"{s['name']} still has {n} extension{'s' if n != 1 else ''}: move them first.")
+        conn.execute("DELETE FROM sites WHERE id = ?", (site_id,))
+        conn.commit()
+        return apply_config(conn, f"Site {s['name']} removed")
+
+
+@router.put("/extensions/{ext}/site")
+def api_extension_site(ext: str, req: ExtensionSiteRequest):
+    """Puts an extension on a site (or none): its number must be in the
+    site's block, if it has one."""
+    with _lock, get_db() as conn:
+        name = "no site"
+        if req.site_id:
+            s = _site(conn, req.site_id)
+            if s["ext_min"] is not None and ext.isdigit() and not s["ext_min"] <= int(ext) <= s["ext_max"]:
+                raise HTTPException(400, f"{s['name']}'s extensions are {s['ext_min']}-{s['ext_max']}.")
+            name = s["name"]
+        if conn.execute("UPDATE extensions SET site_id = ?, updated_at = ? WHERE ext = ? AND tenant_id = ?",
+                        (req.site_id, _now(), ext, current_tenant())).rowcount == 0:
+            raise HTTPException(404, "Extension not found.")
+        conn.commit()
+        return apply_config(conn, f"Extension {ext}: {name}")
 
 
 @router.post("/extensions/{ext}/reset-password")
@@ -2774,7 +2953,7 @@ def forward_target(conn, ext: str, value: str) -> str:
     v = re.sub(r"[\s()-]", "", value or "")
     if not v:
         return ""
-    if re.fullmatch(r"2\d\d", v):
+    if re.fullmatch(tenant_names(conn, current_tenant()).ext_regex, v):
         if v == ext:
             raise HTTPException(400, "An extension can't forward to itself.")
         if not conn.execute("SELECT 1 FROM extensions WHERE ext = ? AND tenant_id = ?", (v, current_tenant())).fetchone():
@@ -2804,14 +2983,27 @@ def api_list_extensions():
     extension from a later one with the same number. caller_ids: the
     numbers its extensions may show on calls out (tenant_caller_ids)."""
     with get_db() as conn:
-        rows = conn.execute("SELECT ext, name, enabled, created_at, vm_email, record, vm_nopin, outbound_cid, ring_mode "
-                            "FROM extensions WHERE tenant_id = ? ORDER BY ext", (current_tenant(),)).fetchall()
+        rows = conn.execute("SELECT ext, name, enabled, created_at, vm_email, record, vm_nopin, outbound_cid, ring_mode, "
+                            "site_id FROM extensions WHERE tenant_id = ? ORDER BY ext", (current_tenant(),)).fetchall()
+        sites = {r["id"]: r for r in conn.execute("SELECT * FROM sites WHERE tenant_id = ?", (current_tenant(),))}
         caller_ids = tenant_caller_ids(conn, current_tenant())
-    return {"extensions": [{"ext": r["ext"], "name": r["name"], "enabled": bool(r["enabled"]),
+        t = tenant_names(conn, current_tenant())
+    return {"limits": {"ext_min": t.ext_min, "ext_max": t.ext_max, "ext_digits": t.digits},
+            "extensions": [{"ext": r["ext"], "name": r["name"], "enabled": bool(r["enabled"]),
                             "created_at": r["created_at"], "vm_email": r["vm_email"], "record": bool(r["record"]),
                             "vm_nopin": bool(r["vm_nopin"]), "outbound_cid": r["outbound_cid"],
-                            "ring_mode": r["ring_mode"]} for r in rows],
+                            "ring_mode": r["ring_mode"], "site_id": r["site_id"],
+                            # what it shows without its own: its site's number, else the main one
+                            "default_cid": (sites[r["site_id"]]["number"] if r["site_id"] in sites else "")
+                            or caller_ids["default"]} for r in rows],
+            "sites": [_site_json(conn, x) for x in sites.values()],
             "caller_ids": caller_ids}
+
+
+def effective_cid(ext_row, site) -> str:
+    """What an extension's calls out show: its own caller ID, else its
+    site's number, else "" (the tenant's main one)."""
+    return ext_row["outbound_cid"] or (site["number"] if site else "") or ""
 
 
 def tenant_caller_ids(conn, tenant: int) -> dict:
@@ -2937,7 +3129,7 @@ def click_to_call_target(conn, ext: str, number: str) -> str:
     """The number as the dialplan will dial it (digits only), or 400. Never
     emergency numbers: a tel: link from any web page can fill this in."""
     v = re.sub(r"[\s().-]", "", number or "")
-    if re.fullmatch(r"2\d\d", v):
+    if re.fullmatch(tenant_names(conn, current_tenant()).ext_regex, v):
         if v == ext:
             raise HTTPException(400, "That's the extension you're calling from.")
         if not conn.execute("SELECT 1 FROM extensions WHERE ext = ? AND enabled = 1 AND tenant_id = ?",

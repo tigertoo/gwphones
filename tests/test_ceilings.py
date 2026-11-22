@@ -38,7 +38,7 @@ def setup(client):
                  "VALUES ('201', 'A', 'pw', 1, 'n', 'n', '1', 1)")
     conn.execute("INSERT INTO inbound_routes (did, target, tenant_id) VALUES ('35315550000', '201', 1)")
     conn.commit()
-    assert client.post("/api/pbx/tenants", json={"name": "Acme", "outbound_cid": "015559999"}).status_code == 200
+    assert client.post("/api/pbx/tenants", json={"ext_digits": "3", "name": "Acme", "outbound_cid": "015559999"}).status_code == 200
     s = client.get("/api/pbx/config").json()["settings"]
 
     def put(**changes):

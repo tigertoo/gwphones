@@ -13,7 +13,7 @@ def links(env):
     import main, pbx, calllinks
     op = TestClient(main.app)
     op.headers.update({"Authorization": "Bearer testtoken", "X-PBX-Tenant": "1"})
-    assert op.post("/api/pbx/tenants", json={"name": "Acme", "outbound_cid": "015559999", "web_max": 4}).status_code == 200
+    assert op.post("/api/pbx/tenants", json={"ext_digits": "3", "name": "Acme", "outbound_cid": "015559999", "web_max": 4}).status_code == 200
     acme = pbx.get_db().execute("SELECT id, code FROM tenants WHERE name = 'Acme'").fetchone()
     for tid in (1, acme["id"]):
         token = pbx._current_tenant.set(tid)
@@ -60,7 +60,7 @@ def test_changing_them(links):
 def test_tenant_limit_checked(links, value):
     pbx, op, acme = links
     assert op.put(f"/api/pbx/tenants/{acme['id']}", json={"name": "Acme", "web_max": value}).status_code == 400
-    assert op.post("/api/pbx/tenants", json={"name": "Other", "outbound_cid": "015558888", "web_max": value}).status_code == 400
+    assert op.post("/api/pbx/tenants", json={"ext_digits": "3", "name": "Other", "outbound_cid": "015558888", "web_max": value}).status_code == 400
 
 
 @pytest.mark.parametrize("value", [0, 201])

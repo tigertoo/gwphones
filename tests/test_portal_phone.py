@@ -29,7 +29,7 @@ def world(env, portal_env, monkeypatch):
     import main, pbx
     op = TestClient(main.app)
     op.headers.update({"Authorization": "Bearer testtoken", "X-PBX-Tenant": "1"})
-    assert op.post("/api/pbx/tenants", json={"name": "Acme", "outbound_cid": "015559999"}).status_code == 200
+    assert op.post("/api/pbx/tenants", json={"ext_digits": "3", "name": "Acme", "outbound_cid": "015559999"}).status_code == 200
     conn = pbx.get_db()
     acme = conn.execute("SELECT id, code FROM tenants WHERE name = 'Acme'").fetchone()
     for tid, exts in ((1, ("201", "202", "203")), (acme["id"], ("201", "202"))):
@@ -83,7 +83,7 @@ def test_admin_sees_the_tenant_only(world):
     a = world["client"]("admin")
     exts = a.get("/api/extensions").json()["extensions"]
     assert [e["ext"] for e in exts] == ["201", "202"] and all(e["name"].startswith(f"T{world['acme']['id']} ") for e in exts)
-    assert set(exts[0]) == {"ext", "name", "enabled", "vm_email", "record", "vm_nopin", "outbound_cid", "ring_mode"}
+    assert set(exts[0]) == {"ext", "name", "enabled", "vm_email", "record", "vm_nopin", "outbound_cid", "ring_mode", "site_id", "default_cid"}
     assert a.get("/api/tenant").json() == {"code": world["acme"]["code"], "name": "Acme", "status": "active"}
 
 

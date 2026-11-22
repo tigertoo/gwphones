@@ -11,6 +11,8 @@ export function Extensions({ me }) {
   const [list, setList] = useState(null);
   const [forwarding, setForwarding] = useState({});
   const [callerIds, setCallerIds] = useState({ default: "", numbers: [] });
+  const [sites, setSites] = useState([]);
+  const [limits, setLimits] = useState({});
   const [error, setError] = useState(null);
   const [open, setOpen] = useState(null);
   const load = useCallback(async () => {
@@ -18,6 +20,8 @@ export function Extensions({ me }) {
       const [e, f] = await Promise.all([get("/extensions"), get("/forwarding").catch(() => ({ extensions: {} }))]);
       setList(e.extensions);
       setCallerIds(e.caller_ids || { default: "", numbers: [] });
+      setSites(e.sites || []);
+      setLimits(e.limits || {});
       setForwarding(f.extensions || {});
       if (me.role !== "admin" && e.extensions[0]) setOpen(e.extensions[0].ext);
     } catch (err) {
@@ -32,10 +36,17 @@ export function Extensions({ me }) {
   return (
     <section>
       <h2>{admin ? "Extensions" : "My phone"}</h2>
-      {admin && <NewExtension onMade={load} />}
+      {admin && <Sites sites={sites} callerIds={callerIds} limits={limits} onChange={load} />}
+      {admin && <NewExtension sites={sites} onMade={load} />}
       {list.length === 0 && <p className="muted">No extensions yet.</p>}
+      {(admin && sites.length > 0 ? [...sites, { id: null, name: "No site" }] : [{ id: undefined }]).map((site) => {
+        const here = site.id === undefined ? list : list.filter((e) => (e.site_id || null) === site.id);
+        if (site.id !== undefined && here.length === 0) return null;
+        return (
+      <React.Fragment key={site.id ?? "all"}>
+      {site.id !== undefined && <h3 className="site-head">{site.name}{site.number ? ` · ${site.number}` : ""}</h3>}
       <ul className="list">
-        {list.map((e) => (
+        {here.map((e) => (
           <li key={e.ext} className={`row ${open === e.ext ? "row-open" : ""}`}>
             <button className="row-head" onClick={() => setOpen(open === e.ext ? null : e.ext)} aria-expanded={open === e.ext}>
               <span className="ext">{e.ext}</span>
@@ -44,20 +55,26 @@ export function Extensions({ me }) {
               {forwarding[e.ext]?.dnd && <span className="tag">Do not disturb</span>}
               {forwarding[e.ext]?.always && <span className="tag">Forwarded</span>}
             </button>
-            {open === e.ext && <ExtensionEditor ext={e} me={me} fwd={forwarding[e.ext]} callerIds={callerIds} onChange={load} />}
+            {open === e.ext && <ExtensionEditor ext={e} me={me} fwd={forwarding[e.ext]} callerIds={callerIds}
+              sites={sites} onChange={load} />}
           </li>
         ))}
       </ul>
+      </React.Fragment>
+        );
+      })}
     </section>
   );
 }
 
-function NewExtension({ onMade }) {
+function NewExtension({ sites, onMade }) {
   const [name, setName] = useState("");
+  const [site, setSite] = useState("");
   const a = useAction();
   const submit = async (ev) => {
     ev.preventDefault();
-    const r = await a.run(() => post("/extensions", { name }), (r) => `Extension ${r.ext} made.`);
+    const r = await a.run(() => post("/extensions", { name, site_id: site ? Number(site) : null }),
+      (r) => `Extension ${r.ext} made.`);
     if (r) {
       setName("");
       onMade();
@@ -67,17 +84,24 @@ function NewExtension({ onMade }) {
     <form className="inline-form" onSubmit={submit}>
       <input placeholder="New extension's name" required maxLength={40} value={name}
         onChange={(e) => setName(e.target.value)} />
+      {sites.length > 0 && (
+        <select value={site} onChange={(e) => setSite(e.target.value)} aria-label="Site">
+          <option value="">No site</option>
+          {sites.map((x) => <option key={x.id} value={x.id}>{x.name}</option>)}
+        </select>
+      )}
       <Button busy={a.busy} type="submit">Add</Button>
       {a.show}
     </form>
   );
 }
 
-function ExtensionEditor({ ext, me, fwd, callerIds, onChange }) {
+function ExtensionEditor({ ext, me, fwd, callerIds, sites, onChange }) {
   const admin = me.role === "admin";
   return (
     <div className="editor">
       <NameAndSwitch ext={ext} admin={admin} onChange={onChange} />
+      {admin && sites.length > 0 && <SiteChoice ext={ext} sites={sites} onChange={onChange} />}
       <CallerId ext={ext} callerIds={callerIds} onChange={onChange} />
       <Devices ext={ext.ext} admin={me.role === "admin"} />
       <Ringing ext={ext} onChange={onChange} />
@@ -110,6 +134,96 @@ function NameAndSwitch({ ext, admin, onChange }) {
           Switched on
         </label>
       )}
+      {a.show}
+    </div>
+  );
+}
+
+// An admin's sites (offices): each its own number (what its extensions show
+// on calls out without their own, and what 112/999 shows) and optionally a
+// block of extension numbers, which new extensions of the site come from.
+function Sites({ sites, callerIds, limits, onChange }) {
+  const [editing, setEditing] = useState(null); // a site, or {} for a new one
+  const numbers = [callerIds.default, ...callerIds.numbers].filter(Boolean);
+  return (
+    <div className="card">
+      <h3>Sites</h3>
+      <p className="small muted">For an organisation with several offices. Each site's number is what its extensions show
+        on calls out (unless they have their own) and what the emergency services see on 112/999 from there, so keep it
+        the number registered to that site's address. "Answer any ringing phone" (*8) answers only phones of the same
+        site.</p>
+      {sites.length > 0 && (
+        <ul className="list compact">
+          {sites.map((x) => (
+            <li key={x.id} className="row-head static">
+              <span className="grow">{x.name}<span className="small muted block">
+                {x.number || "the main number"}{x.ext_min != null ? ` · extensions ${x.ext_min}–${x.ext_max}` : ""}
+                {` · ${x.extensions} extension${x.extensions === 1 ? "" : "s"}`}</span></span>
+              <Button kind="secondary" onClick={() => setEditing(x)}>Edit</Button>
+            </li>
+          ))}
+        </ul>
+      )}
+      {editing ? <SiteForm site={editing} numbers={numbers} limits={limits} onDone={() => { setEditing(null); onChange(); }}
+        onCancel={() => setEditing(null)} /> : <Button kind="secondary" onClick={() => setEditing({})}>Add a site</Button>}
+    </div>
+  );
+}
+
+function SiteForm({ site, numbers, limits, onDone, onCancel }) {
+  const [f, setF] = useState({ name: site.name || "", number: site.number || "",
+    ext_min: site.ext_min ?? "", ext_max: site.ext_max ?? "" });
+  const a = useAction();
+  const body = () => ({ name: f.name, number: f.number, ext_min: f.ext_min === "" ? null : Number(f.ext_min),
+    ext_max: f.ext_max === "" ? null : Number(f.ext_max) });
+  const save = () => a.run(() => (site.id ? put(`/sites/${site.id}`, body()) : post("/sites", body())), "Saved.")
+    .then((r) => r && onDone());
+  const remove = () => window.confirm(`Remove the site ${site.name}? Its extensions must be moved first.`)
+    && a.run(() => api("DELETE", `/sites/${site.id}`), "Removed.").then((r) => r && onDone());
+  return (
+    <div className="block">
+      <Field label="Name"><input maxLength={40} value={f.name} onChange={(e) => setF({ ...f, name: e.target.value })}
+        placeholder="e.g. Dublin" /></Field>
+      <Field label="Its number" hint="One of your numbers: what its calls out and 112/999 show.">
+        <select value={f.number} onChange={(e) => setF({ ...f, number: e.target.value })}>
+          <option value="">The main number</option>
+          {numbers.map((n) => <option key={n} value={n}>{n}</option>)}
+        </select>
+      </Field>
+      <Field label="Its extension numbers (optional)"
+        hint={`A block within ${limits.ext_min ?? ""}–${limits.ext_max ?? ""}, e.g. ${limits.ext_digits === "4" ? "2000–2999" : "200–229"}. New extensions of the site come from it.`}>
+        <div className="inline-form">
+          <input inputMode="numeric" value={f.ext_min} onChange={(e) => setF({ ...f, ext_min: e.target.value })} placeholder="From" />
+          <input inputMode="numeric" value={f.ext_max} onChange={(e) => setF({ ...f, ext_max: e.target.value })} placeholder="To" />
+        </div>
+      </Field>
+      <div className="buttons">
+        <Button busy={a.busy} onClick={save} disabled={!f.name.trim()}>Save</Button>
+        <Button kind="secondary" onClick={onCancel}>Cancel</Button>
+        {site.id && <Button kind="danger" busy={a.busy} onClick={remove}>Remove</Button>}
+      </div>
+      {a.show}
+    </div>
+  );
+}
+
+function SiteChoice({ ext, sites, onChange }) {
+  const current = ext.site_id ? String(ext.site_id) : "";
+  const [value, setValue] = useState(current);
+  useEffect(() => { setValue(current); }, [current]);
+  const a = useAction();
+  const save = () => a.run(() => put(`/extensions/${ext.ext}/site`, { site_id: value ? Number(value) : null }), "Saved.")
+    .then((r) => r && onChange());
+  return (
+    <div className="block">
+      <h3>Site</h3>
+      <div className="inline-form">
+        <select value={value} onChange={(e) => setValue(e.target.value)} aria-label="Site">
+          <option value="">No site</option>
+          {sites.map((x) => <option key={x.id} value={x.id}>{x.name}</option>)}
+        </select>
+        <Button busy={a.busy} kind="secondary" onClick={save} disabled={value === current}>Save</Button>
+      </div>
       {a.show}
     </div>
   );
@@ -184,22 +298,25 @@ function Ringing({ ext, onChange }) {
 // The number this extension shows when it calls out: the organisation's
 // main number, or another of its own numbers (gwphones refuses any other).
 function CallerId({ ext, callerIds, onChange }) {
-  // its own set to the main number is the same as none
-  const current = ext.outbound_cid && ext.outbound_cid !== callerIds.default ? ext.outbound_cid : "";
+  // what it shows without its own: its site's number, else the main one
+  const fallback = ext.default_cid || callerIds.default;
+  const current = ext.outbound_cid && ext.outbound_cid !== fallback ? ext.outbound_cid : "";
   const [value, setValue] = useState(current);
   useEffect(() => { setValue(current); }, [current]);
   const a = useAction();
   const save = () => a.run(() => put(`/extensions/${ext.ext}/caller-id`, { outbound_cid: value }), "Saved.")
     .then((r) => r && onChange());
   const known = [callerIds.default, ...callerIds.numbers].filter(Boolean);
-  const choices = current && !known.includes(current) ? [...callerIds.numbers, current] : callerIds.numbers;
+  const others = known.filter((n) => n !== fallback);
+  const choices = current && !known.includes(current) ? [...others, current] : others;
   return (
     <div className="block">
       <h3>Caller ID</h3>
       <Field label="Calls out show" hint="Which of your organisation's numbers people see when this extension calls them.">
         <div className="inline-form">
           <select value={value} onChange={(e) => setValue(e.target.value)} aria-label="Caller ID">
-            <option value="">{callerIds.default ? `Main number (${callerIds.default})` : "Main number"}</option>
+            <option value="">{fallback ? `${ext.default_cid && ext.default_cid !== callerIds.default ? "Its site's number"
+              : "Main number"} (${fallback})` : "Main number"}</option>
             {choices.map((n) => <option key={n} value={n}>{n}{known.includes(n) ? "" : " (set by your provider)"}</option>)}
           </select>
           <Button busy={a.busy} kind="secondary" onClick={save} disabled={value === current}>Save</Button>
@@ -222,7 +339,7 @@ function Forwarding({ ext, fwd, onChange }) {
       <h3>Forwarding</h3>
       <label className="check"><input type="checkbox" checked={f.dnd} onChange={set("dnd")} /> Do not disturb: this phone doesn't ring</label>
       <Field label="Forward every call to" hint="Another extension or an Irish number. Empty: ring this phone.">
-        <input inputMode="tel" value={f.always} onChange={set("always")} placeholder="e.g. 202 or 0871234567" />
+        <input inputMode="tel" value={f.always} onChange={set("always")} placeholder="An extension or 0871234567" />
       </Field>
       <Field label="When busy, forward to"><input inputMode="tel" value={f.busy} onChange={set("busy")} /></Field>
       <Field label="When not answered, forward to"><input inputMode="tel" value={f.no_answer} onChange={set("no_answer")} /></Field>

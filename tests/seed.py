@@ -49,7 +49,7 @@ def seed():
         inbound_default="600", routes={"landline": "cheapest", "international": "off"},
         caps={"default": "0.06", "mobile": "0.08"}, video=True))
     # A second tenant, with its own 201 and 202, a number and a limit.
-    t = pbx.api_create_tenant(pbx.TenantCreate(name="Acme", outbound_cid="015559999", max_calls=3,
+    t = pbx.api_create_tenant(pbx.TenantCreate(ext_digits="3", name="Acme", outbound_cid="015559999", max_calls=3,
                                                sip_host=""))
     tid = c.execute("SELECT id FROM tenants WHERE name = 'Acme'").fetchone()["id"]
     token = pbx._current_tenant.set(tid)

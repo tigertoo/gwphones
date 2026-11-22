@@ -19,7 +19,7 @@ def two(env, monkeypatch):
     import main, pbx
     op = TestClient(main.app)
     op.headers.update({"Authorization": "Bearer testtoken", "X-PBX-Tenant": "1"})
-    assert op.post("/api/pbx/tenants", json={"name": "Acme", "outbound_cid": "015559999"}).status_code == 200
+    assert op.post("/api/pbx/tenants", json={"ext_digits": "3", "name": "Acme", "outbound_cid": "015559999"}).status_code == 200
     conn = pbx.get_db()
     acme = conn.execute("SELECT id FROM tenants WHERE name = 'Acme'").fetchone()["id"]
     for tid, exts in ((1, ("201", "202", "203")), (acme, ("201", "202"))):
@@ -116,7 +116,7 @@ def test_path_tricks(two, path):
 def test_list_without_secrets(two):
     main, pbx, op, portal, acme = two
     for e in portal.get("/api/pbx/extensions").json()["extensions"]:
-        assert set(e) == {"ext", "name", "enabled", "created_at", "vm_email", "record", "vm_nopin", "outbound_cid", "ring_mode"}
+        assert set(e) == {"ext", "name", "enabled", "created_at", "vm_email", "record", "vm_nopin", "outbound_cid", "ring_mode", "site_id", "default_cid"}
 
 
 # -- the right tenant's 201, never the other's -----------------------------------------

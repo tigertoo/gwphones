@@ -197,7 +197,7 @@ function Microsoft365({ onSynced }) {
       <MicrosoftAdminLinks />
       <label className="check">
         <input type="checkbox" checked={f.create_exts} onChange={(e) => setF({ ...f, create_exts: e.target.checked })} />
-        Create an extension (200–299) that doesn't exist yet, named after the person
+        Create an extension that doesn't exist yet (one of your extension numbers), named after the person
       </label>
       <p className="small muted">Each person's extension is named after them, its voicemail is emailed to them (unless
         it's already set), and calls out show their Office phone if it's one of your numbers. A leaver's extension is

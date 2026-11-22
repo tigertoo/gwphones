@@ -54,7 +54,7 @@ def test_each_tenants_own(two):
 
 def test_new_tenant_with_it(two):
     main, pbx, op, portal, acme = two
-    assert op.post("/api/pbx/tenants", json={"name": "Vid", "outbound_cid": "015557777", "video": True}).status_code == 200
+    assert op.post("/api/pbx/tenants", json={"ext_digits": "3", "name": "Vid", "outbound_cid": "015557777", "video": True}).status_code == 200
     vid = pbx.get_db().execute("SELECT id FROM tenants WHERE name = 'Vid'").fetchone()["id"]
     assert pbx.get_settings(pbx.get_db(), vid)["video"] == "1"
     assert pbx.get_settings(pbx.get_db(), acme)["video"] == "0"  # the default

@@ -572,6 +572,60 @@ function VoicemailAccess({ ext, nopin, send, busy, onPin }) {
   );
 }
 
+// Sites (offices) of the tenant: each its own number (calls out and 112/999
+// of its extensions without their own) and optionally a block of numbers.
+function ConsoleSites({ sites, limits, dids, defaultCid, send, busy }) {
+  const empty = { name: "", number: "", ext_min: "", ext_max: "" };
+  const [f, setF] = useState(null);
+  const body = () => ({ name: f.name, number: f.number, ext_min: f.ext_min === "" ? null : Number(f.ext_min),
+    ext_max: f.ext_max === "" ? null : Number(f.ext_max) });
+  return (
+    <details className="pbx-gap" open={sites.length > 0}>
+      <summary className="pbx-hint">Sites{sites.length ? ` (${sites.length})` : ""}: offices with their own number and extension block</summary>
+      {sites.length > 0 && (
+        <table className="users-table">
+          <thead><tr><th>Site</th><th>Number</th><th>Extensions</th><th></th></tr></thead>
+          <tbody>
+            {sites.map((x) => (
+              <tr key={x.id}>
+                <td>{x.name}</td>
+                <td>{x.number || <span className="pbx-hint">main ({defaultCid || "—"})</span>}</td>
+                <td>{x.ext_min != null ? `${x.ext_min}–${x.ext_max}` : <span className="pbx-hint">any</span>} · {x.extensions}</td>
+                <td className="pbx-actions">
+                  <button className="ticket-action-btn" onClick={() => setF({ id: x.id, name: x.name, number: x.number,
+                    ext_min: x.ext_min ?? "", ext_max: x.ext_max ?? "" })}>Edit</button>
+                  <button className="ticket-action-btn idea-delete-btn" disabled={busy || x.extensions > 0}
+                    title={x.extensions ? "Move its extensions first" : ""}
+                    onClick={() => window.confirm(`Remove the site ${x.name}?`) && send("DELETE", `/sites/${x.id}`, null, `${x.name} removed.`)}>Remove</button>
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      )}
+      {f ? (
+        <form className="idea-form-row pbx-gap" onSubmit={async (ev) => {
+          ev.preventDefault();
+          if (await send(f.id ? "PUT" : "POST", f.id ? `/sites/${f.id}` : "/sites", body(), "Site saved.")) setF(null);
+        }}>
+          <input className="idea-input pbx-name-input" placeholder="Name, e.g. Dublin" maxLength={40} value={f.name}
+            onChange={(e) => setF({ ...f, name: e.target.value })} />
+          <input className="idea-input" placeholder="Its number (one of the tenant's)" list="pbx-site-dids" value={f.number}
+            onChange={(e) => setF({ ...f, number: e.target.value })} />
+          <input className="idea-input pbx-num-input" placeholder={`From ${limits.ext_min}`} value={f.ext_min}
+            onChange={(e) => setF({ ...f, ext_min: e.target.value })} />
+          <input className="idea-input pbx-num-input" placeholder={`To ${limits.ext_max}`} value={f.ext_max}
+            onChange={(e) => setF({ ...f, ext_max: e.target.value })} />
+          <button className="ticket-action-btn ticket-action-btn-primary" disabled={busy || !f.name.trim()}>Save</button>
+          <button type="button" className="ticket-action-btn" onClick={() => setF(null)}>Cancel</button>
+          <datalist id="pbx-site-dids">{dids.map((d) => <option key={d} value={d} />)}</datalist>
+        </form>
+      ) : <button className="ticket-action-btn pbx-gap" onClick={() => setF(empty)}>Add a site</button>}
+      <p className="pbx-hint">A site's number is what its extensions show on calls out without their own, and what 112/999 shows: keep it the one registered to that site's address. *8 answers only phones of the same site.</p>
+    </details>
+  );
+}
+
 // A desk phone and the apps on one extension (up to 4 at once): how a call rings them.
 const RING_MODES = [
   ["all", "Ring all its phones at once"],
@@ -673,7 +727,9 @@ function forwardingBadge(f) {
 }
 
 function ExtensionsSection({ config, status, send, busy, apiBase, reload }) {
-  const [draft, setDraft] = useState({ ext: "", name: "" });
+  const [draft, setDraft] = useState({ ext: "", name: "", site_id: "" });
+  const sites = config.sites || [];
+  const siteName = (id) => sites.find((x) => x.id === id)?.name;
   const [editing, setEditing] = useState(null); // { ext, name }
   const [creds, setCreds] = useState(null); // { ext, ...credentials }
   const [forwarding, setForwarding] = useState({ available: true, extensions: {} });
@@ -689,10 +745,10 @@ function ExtensionsSection({ config, status, send, busy, apiBase, reload }) {
 
   const add = async (e) => {
     e.preventDefault();
-    const data = await send("POST", "/extensions", { ext: draft.ext.trim() || null, name: draft.name },
-      "Extension created.");
+    const data = await send("POST", "/extensions", { ext: draft.ext.trim() || null, name: draft.name,
+      site_id: draft.site_id ? Number(draft.site_id) : null }, "Extension created.");
     if (data) {
-      setDraft({ ext: "", name: "" });
+      setDraft({ ext: "", name: "", site_id: "" });
       showCreds(data.ext);
     }
   };
@@ -725,8 +781,9 @@ function ExtensionsSection({ config, status, send, busy, apiBase, reload }) {
             <tr><td><code>*72</code>number / <code>*73</code></td><td>Forward all calls / stop</td></tr>
             <tr><td><code>*90</code>number / <code>*91</code></td><td>Forward when busy / stop</td></tr>
             <tr><td><code>*52</code>number / <code>*53</code></td><td>Forward when not answered or offline / stop</td></tr>
-            <tr><td><code>*8</code></td><td>Answer any ringing extension</td></tr>
+            <tr><td><code>*8</code></td><td>Answer any ringing extension (of the same site, where there are sites)</td></tr>
             <tr><td><code>**</code>ext, e.g. <code>**202</code></td><td>Answer that extension's ringing call</td></tr>
+            <tr><td><code>*11</code></td><td>Take over this extension's call from its other phone (desk phone to app, or back)</td></tr>
             <tr><td><code>*97</code> / <code>*98</code></td><td>Your voicemail / any mailbox</td></tr>
             <tr><td><code>700</code></td><td>Park a call: transfer it to 700 and note the slot read out (701–720)</td></tr>
             <tr><td><code>701</code>–<code>720</code></td><td>Pick up the call parked in that slot</td></tr>
@@ -736,6 +793,8 @@ function ExtensionsSection({ config, status, send, busy, apiBase, reload }) {
           Transfers use the app's or phone's own transfer button. A parked call nobody picks up rings the phone that
           parked it again after 45 seconds. Add 701, 702… as Quick Dials (BLF) in Groundwire to see which slots are in use.</p>
       </details>
+      <ConsoleSites sites={sites} limits={limits} dids={config.inbound_routes.map((r) => r.did)}
+        defaultCid={config.settings.outbound_cid} send={send} busy={busy} />
       <form className="idea-form-row pbx-add-row" onSubmit={add}>
         <input
           className="idea-input pbx-num-input"
@@ -752,6 +811,13 @@ function ExtensionsSection({ config, status, send, busy, apiBase, reload }) {
           value={draft.name}
           onChange={(e) => setDraft({ ...draft, name: e.target.value })}
         />
+        {sites.length > 0 && (
+          <select className="idea-input" value={draft.site_id} onChange={(e) => setDraft({ ...draft, site_id: e.target.value })}
+            aria-label="Site">
+            <option value="">No site</option>
+            {sites.map((x) => <option key={x.id} value={x.id}>{x.name}</option>)}
+          </select>
+        )}
         <button className="ticket-action-btn ticket-action-btn-primary" disabled={busy || !draft.name.trim()}>
           Add extension
         </button>
@@ -787,7 +853,7 @@ function ExtensionsSection({ config, status, send, busy, apiBase, reload }) {
                       >Save</button>
                       <button className="ticket-action-btn" onClick={() => setEditing(null)}>Cancel</button>
                     </span>
-                  ) : e.name}
+                  ) : <>{e.name}{e.site_id && siteName(e.site_id) ? <span className="pbx-hint"> · {siteName(e.site_id)}</span> : null}</>}
                   {e.outbound_cid && <div className="pbx-hint">Shows {e.outbound_cid}</div>}
                   {forwardingBadge(forwarding.extensions[e.ext]) && (
                     <div className="pbx-hint">{forwardingBadge(forwarding.extensions[e.ext])}</div>
@@ -865,6 +931,16 @@ function ExtensionsSection({ config, status, send, busy, apiBase, reload }) {
                     <OutboundCid ext={e.ext} current={e.outbound_cid} fallback={config.settings.outbound_cid}
                       dids={config.inbound_routes.map((r) => r.did)} send={send} busy={busy} />
                     <RingMode ext={e.ext} current={e.ring_mode} send={send} busy={busy} />
+                    {sites.length > 0 && (
+                      <label className="idea-field pbx-gap">Site{" "}
+                        <select className="idea-input" value={e.site_id || ""} disabled={busy}
+                          onChange={(ev) => send("PUT", `/extensions/${e.ext}/site`, { site_id: ev.target.value ? Number(ev.target.value) : null },
+                            `Extension ${e.ext}: ${ev.target.value ? siteName(Number(ev.target.value)) : "no site"}.`)}>
+                          <option value="">No site</option>
+                          {sites.map((x) => <option key={x.id} value={x.id}>{x.name}</option>)}
+                        </select>
+                      </label>
+                    )}
                     <label className="pbx-toggle pbx-gap">
                       <input type="checkbox" checked={e.record} disabled={busy}
                         onChange={(ev) => send("PUT", `/extensions/${e.ext}/recording`, { always: ev.target.checked },
@@ -1255,13 +1331,13 @@ function ClickToCallSection({ config, send, busy, apiBase, initialNumber }) {
   const [handler, setHandler] = useState("");
   useEffect(() => { if (initialNumber) setNumber(initialNumber); }, [initialNumber]);
   const from = enabled.some((e) => e.ext === ext) ? ext : enabled[0]?.ext || "";
-  const isExt = /^2\d\d$/.test(number.trim());
+  const isExt = /^(2\d\d|[2-8]\d{3})$/.test(number.trim());
 
   // What the call would do, before it's made: the route and price, or why
   // it would be refused. Numbers from tel: links come from any web page.
   useEffect(() => {
     const n = number.trim();
-    if (!n || /^2\d\d$/.test(n)) { setRoute(null); return undefined; }
+    if (!n || /^(2\d\d|[2-8]\d{3})$/.test(n)) { setRoute(null); return undefined; }
     const t = setTimeout(async () => {
       try {
         const res = await fetch(`${apiBase}/api/pbx/route-test?${new URLSearchParams({ number: n })}`);

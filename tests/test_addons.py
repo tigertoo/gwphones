@@ -99,7 +99,7 @@ def test_every_tenant_is_one_account(acme):
     c = op.get("/api/billing/customers").json()["customers"][0]
     assert (c["name"], c["email"], c["markup_pct"], c["tenant"]["name"]) == ("Acme Ltd", "accounts@acme.example", "20", "Acme")
     # a new tenant gets its own at once
-    assert op.post("/api/pbx/tenants", json={"name": "Beta", "outbound_cid": "015558888"}).status_code == 200
+    assert op.post("/api/pbx/tenants", json={"ext_digits": "3", "name": "Beta", "outbound_cid": "015558888"}).status_code == 200
     assert {c["name"] for c in op.get("/api/billing/customers").json()["customers"]} == {"Acme Ltd", "Beta"}
 
 

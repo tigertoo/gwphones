@@ -18,7 +18,7 @@ PAST = "2026-10"
 def bill(world):
     import billing
     op, acme = world["op"], world["acme"]
-    assert op.post("/api/pbx/tenants", json={"name": "Beta", "outbound_cid": "015558888"}).status_code == 200
+    assert op.post("/api/pbx/tenants", json={"ext_digits": "3", "name": "Beta", "outbound_cid": "015558888"}).status_code == 200
     beta = world["pbx"].get_db().execute("SELECT id FROM tenants WHERE name = 'Beta'").fetchone()["id"]
     accounts = {c["tenant_id"]: c["id"] for c in op.get("/api/billing/customers").json()["customers"]}
     r = op.put(f"/api/billing/customers/{accounts[acme['id']]}", json={"name": "Acme Ltd", "markup_pct": MARKUP})

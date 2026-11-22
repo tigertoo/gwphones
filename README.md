@@ -491,6 +491,43 @@ config, the service refuses to create a new, empty one (and says so in
 extensions. That catches a wrong `PBX_DB` path after a move. Set
 `PBX_ALLOW_NEW_DB=1` only when starting afresh is really meant.
 
+### Extension numbers and sites
+
+**3 or 4 digits, per tenant** (`ext_digits`, `pbx.EXT_PLANS`): a new
+tenant gets **4 digits, 2000–8999** (the console's new-tenant form can
+choose 3 for a small office); tenants from before, and the main tenant,
+keep **3 digits, 200–299**. Every pattern follows the tenant's own
+(`TenantNames.ext_pattern`/`ext_regex`): `_[2-8]XXX` for calling, `**`
+pickup, click to call (`EXTEN:0:4`), forwarding targets, the feature
+codes' own-extension check; recording names take 3 or 4 digits. Ring
+groups (6XX), menus (5XX), hours (4XX) and park (700) stay 3 digits for
+everyone: a phone sends the whole number, so 600 and 6000 can't be
+confused. Logins stay tenant code + extension; the length tells the two
+apart (1002201: 3 digits, 10032001: 4), so phones set up before keep
+working. A tenant's digits are chosen when it's made and not changed
+after (renumbering would need every phone set up again).
+
+**Sites** (offices of one tenant; `sites`, `extensions.site_id`): one
+tenant per business, however many offices, so they dial each other by
+extension. Each site has:
+- **its number**, one of the tenant's own: what its extensions show on
+  calls out without their own caller ID (`effective_cid`: own, else the
+  site's, else the tenant's), including **112/999**, so a call from Cork
+  shows Cork's number and the emergency services get the right address
+  (keep each number's address up to date with the carrier);
+- optionally **a block of extension numbers** (Dublin 2000–2999, Cork
+  3000–3999), inside the tenant's range and not overlapping another
+  site's: a new extension of the site takes its next free number, and an
+  extension outside the block can't be put on it;
+- **its own pickup group**: `*8` answers a ringing phone of the same site
+  only (`named_call_group`/`named_pickup_group` `<prefix>-site<id>`);
+  `**<ext>` still answers a given extension anywhere.
+
+Managed in the portal (admins: Extensions → Sites, a Site on each
+extension, extensions grouped by site) and the console (Extensions →
+Sites). A site with extensions can't be removed, and its block can't
+shrink past them.
+
 ### A desk phone and the apps on one extension
 
 An extension takes up to 4 devices at once (`max_contacts=4` on each

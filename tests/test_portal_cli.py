@@ -14,7 +14,7 @@ def setup(env, portal_env, monkeypatch, tmp_path):
     import main, pbx
     op = TestClient(main.app)
     op.headers.update({"Authorization": "Bearer testtoken", "X-PBX-Tenant": "1"})
-    assert op.post("/api/pbx/tenants", json={"name": "Acme", "outbound_cid": "015559999"}).status_code == 200
+    assert op.post("/api/pbx/tenants", json={"ext_digits": "3", "name": "Acme", "outbound_cid": "015559999"}).status_code == 200
     acme = pbx.get_db().execute("SELECT id, code FROM tenants WHERE name = 'Acme'").fetchone()
     from gwportal import cli, gw, mail
     gw.client = TestClient(main.app, base_url="http://gw")

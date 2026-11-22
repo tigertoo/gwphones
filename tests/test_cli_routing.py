@@ -84,7 +84,7 @@ def test_refused_when_not_even_the_main_number_fits(lcr):
 def test_each_tenant_its_own_main_number(lcr):
     pbx, lcr_module, op, save = lcr
     save({"irishvoip": "353", **{k: "61" for k in VOXBEAM_KEYS}})
-    assert op.post("/api/pbx/tenants", json={"name": "Acme", "outbound_cid": "+61291112222"}).status_code == 200
+    assert op.post("/api/pbx/tenants", json={"ext_digits": "3", "name": "Acme", "outbound_cid": "+61291112222"}).status_code == 200
     acme = pbx.get_db().execute("SELECT id FROM tenants WHERE name = 'Acme'").fetchone()["id"]
     d = lcr_module.decide("mobile", "353871234567", acme, UK)
     assert d["cli"] == "+61291112222" and routes(d) == list(VOXBEAM_KEYS)  # Acme's, never the main tenant's
