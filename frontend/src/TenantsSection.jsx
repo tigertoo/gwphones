@@ -25,6 +25,7 @@ export default function TenantsSection({ config, send, busy, apiBase, switchTo }
   const [suffix, setSuffix] = useState(""); // PBX_TENANT_HOST_SUFFIX, e.g. .sip.example.ie
   const [form, setForm] = useState(null); // a new tenant
   const [edit, setEdit] = useState(null); // { id, name, sip_host, status }
+  const [portalFor, setPortalFor] = useState(null); // a tenant id: its portal people shown
 
   const load = useCallback(async () => {
     const res = await fetch(`${apiBase}/api/pbx/tenants`);
@@ -40,10 +41,19 @@ export default function TenantsSection({ config, send, busy, apiBase, switchTo }
   const hostExample = suffix ? `acme${suffix}` : "acme.sip.example.ie";
 
   const create = async () => {
-    const { hostEdited, ...body } = form; // eslint-disable-line no-unused-vars
+    const { hostEdited, admin_email, admin_name, ...body } = form; // eslint-disable-line no-unused-vars
     const data = await send("POST", "/tenants", { ...body, max_calls: Number(body.max_calls), web_max: Number(body.web_max) },
       `Tenant ${form.name} created.`);
-    if (data) { setForm(null); load(); }
+    if (data) {
+      setForm(null);
+      load();
+      // its first portal admin, invited straight away
+      if (admin_email && admin_email.trim()) {
+        await send("POST", `/tenants/${data.id}/portal-admins`, { email: admin_email.trim(), name: admin_name || "" },
+          `${form.name} created, and ${admin_email.trim()} invited to its portal.`);
+        setPortalFor(data.id);
+      }
+    }
   };
   const save = async (t, changes, text) => {
     if (await send("PUT", `/tenants/${t.id}`, { name: t.name, sip_host: t.sip_host, status: t.status, ...changes }, text)) {
@@ -97,7 +107,7 @@ export default function TenantsSection({ config, send, busy, apiBase, switchTo }
               </td>
             </tr>
           ) : (
-            <tr key={t.id}>
+            <React.Fragment key={t.id}><tr>
               <td>{t.code}</td>
               <td>{t.name}{t.main && <span className="pbx-hint"> (main)</span>}
                 {t.id === config.tenant.id && <span className="pbx-chip">working on it</span>}</td>
@@ -112,6 +122,8 @@ export default function TenantsSection({ config, send, busy, apiBase, switchTo }
                 {t.id !== config.tenant.id && (
                   <button className="ticket-action-btn" onClick={() => switchTo(t.id)}>Work on it</button>
                 )}
+                {!t.main && <button className="ticket-action-btn" onClick={() => setPortalFor(portalFor === t.id ? null : t.id)}>
+                  Portal</button>}
                 <button className="ticket-action-btn" onClick={() => setEdit({ id: t.id, name: t.name, sip_host: t.sip_host, web_max: t.settings.web_max,
                   video: t.settings.video === "1", video_price: t.settings.video_price })}>Edit</button>
                 {!t.main && (t.status === "active" ? (
@@ -128,6 +140,10 @@ export default function TenantsSection({ config, send, busy, apiBase, switchTo }
                 ))}
               </td>
             </tr>
+            {portalFor === t.id && (
+              <tr><td colSpan={11}><PortalPeople tenant={t} apiBase={apiBase} send={send} busy={busy} /></td></tr>
+            )}
+            </React.Fragment>
           )))}
         </tbody>
       </table>
@@ -144,6 +160,9 @@ export default function TenantsSection({ config, send, busy, apiBase, switchTo }
               }} />
             <input className="idea-input" placeholder="Caller ID, e.g. +35312345678" value={form.outbound_cid}
               onChange={(e) => setForm({ ...form, outbound_cid: e.target.value })} />
+            <input className="idea-input" type="email" placeholder="Its first portal admin's email (optional)"
+              value={form.admin_email || ""} onChange={(e) => setForm({ ...form, admin_email: e.target.value })}
+              title="Invited by email as soon as the tenant is made: they choose a password and set up two-factor codes" />
             <label className="idea-field">
               Extensions
               <select className="idea-input" value={form.ext_digits} onChange={(e) => setForm({ ...form, ext_digits: e.target.value })}>
@@ -195,5 +214,57 @@ export default function TenantsSection({ config, send, busy, apiBase, switchTo }
         <button className="ticket-action-btn ticket-action-btn-primary pbx-gap" onClick={() => setForm(EMPTY)}>New tenant</button>
       )}
     </section>
+  );
+}
+
+// A tenant's portal people (from the portal, on this server), and inviting
+// an admin: the invitation emailed, or the link shown to pass on by hand.
+function PortalPeople({ tenant, apiBase, send, busy }) {
+  const [data, setData] = useState(null);
+  const [error, setError] = useState(null);
+  const [f, setF] = useState({ email: "", name: "" });
+  const [link, setLink] = useState(null);
+  const load = useCallback(async () => {
+    const res = await fetch(`${apiBase}/api/pbx/tenants/${tenant.id}/portal-people`);
+    const body = await res.json().catch(() => ({}));
+    if (res.ok) { setData(body); setError(null); } else setError(body.detail || "The portal can't be reached.");
+  }, [apiBase, tenant.id]);
+  useEffect(() => { load(); }, [load]);
+  const invite = async (giveLink) => {
+    const r = await send("POST", `/tenants/${tenant.id}/portal-admins`, { ...f, give_link: giveLink },
+      giveLink ? `${f.email} invited: pass the link on.` : `${f.email} invited: the invitation is on its way.`);
+    if (r) { setLink(r.link || null); setF({ email: "", name: "" }); load(); }
+  };
+  return (
+    <div className="pbx-gap">
+      <strong>{tenant.name}&rsquo;s portal</strong>
+      {error && <p className="pbx-hint">{error}</p>}
+      {data && (data.people.length === 0 ? <p className="pbx-hint">Nobody yet: invite its first admin.</p> : (
+        <table className="users-table">
+          <tbody>
+            {data.people.map((p) => (
+              <tr key={p.email}>
+                <td>{p.name || p.email}{p.name && <span className="pbx-hint"> {p.email}</span>}</td>
+                <td>{p.role === "admin" ? "Admin" : `Staff, ext ${p.ext || "—"}`}</td>
+                <td>{p.disabled ? "Disabled" : p.invited ? "Invited, not accepted yet" : p.microsoft ? "Microsoft 365" : "Active"}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      ))}
+      <div className="idea-form-row pbx-gap">
+        <input className="idea-input" type="email" placeholder="Admin's email" value={f.email}
+          onChange={(e) => setF({ ...f, email: e.target.value })} />
+        <input className="idea-input pbx-name-input" placeholder="Name (optional)" value={f.name}
+          onChange={(e) => setF({ ...f, name: e.target.value })} />
+        <button className="ticket-action-btn ticket-action-btn-primary" disabled={busy || !f.email.trim()}
+          onClick={() => invite(false)}>Invite an admin</button>
+        <button className="ticket-action-btn" disabled={busy || !f.email.trim()} onClick={() => invite(true)}
+          title="Don't email it: show the link here to pass on yourself">Get the link instead</button>
+      </div>
+      {link && <p className="pbx-hint">Their invitation link (works once, for 72 hours): <code>{link}</code></p>}
+      <p className="pbx-hint">An admin manages the tenant&rsquo;s phone system in the portal and invites everyone else from its Staff page.
+        They set up two-factor codes when they first sign in.{data && !data.mail_ready && " The portal can't send email: use the link."}</p>
+    </div>
   );
 }

@@ -307,6 +307,11 @@ from pbx import router as pbx_router, public_router as pbx_public_router  # noqa
 app.include_router(pbx_router)
 app.include_router(pbx_public_router)
 
+# A tenant's portal people (first admin invitation), from the console: operator only.
+from portal_admins import router as portal_admins_router  # noqa: E402
+
+app.include_router(portal_admins_router)
+
 # Call links: /api/pbx/call-links and the public /call/ pages.
 from calllinks import router as calllinks_router, public_router as calllinks_public_router  # noqa: E402
 

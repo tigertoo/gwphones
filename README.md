@@ -218,6 +218,17 @@ through this API as the portal caller above. Being built (phase 4).
 - **Limits:** 20 saves a minute per tenant (each one reloads Asterisk for
   the whole server); Status and forwarding cached 5 seconds per tenant.
 
+**From the console** (Tenants → **Portal** on a tenant, or "Its first
+portal admin's email" when making one): its portal people, and **Invite
+an admin** (emailed) or **Get the link instead** (shown, to pass on).
+gwphones asks the portal on the same server (`backend/portal_admins.py`,
+`PBX_PORTAL_INTERNAL_URL`, default `http://127.0.0.1:8020`) at its
+`/internal/` routes (`gwportal/internal.py`), with the secret the two
+already share (`GWPHONES_PORTAL_SECRET` = `PORTAL_GW_SECRET`). Those
+routes aren't on the website: nginx sends only `/api/` to the portal,
+and anything carrying X-Real-IP or X-Forwarded-For (that came through
+nginx) is refused anyway. Operator only.
+
 **The operator's command** (on the server, as the portal's user; it reads
 the portal's `.env` itself):
 
