@@ -75,7 +75,7 @@ CONTACTS = """  Contact:  1002201/sips:1002201@194.125.12.215:61209;tra 9f3c2a1b
   Contact:  201/sips:201@167.99.119.244:24653;transport=TL 4556be3b39 Avail        91.842
 """
 REGISTRAR = """/registrar/contact/1002201;@9f3c2a1b7e5d4c3b2a1f0e9d8c7b6a59: {"user_agent":"Yealink SIP-T46G 28.83.0.120","uri":"sips:1002201@194.125.12.215:61209;transport=TLS;rinstance=8727;x-ast-orig-host=192.168.178.40:49281","via_addr":"194.125.12.215"}
-/registrar/contact/1002201;@1dc4fb0daf00000000000000000000aa: {"user_agent":"Acrobits SIPIS","uri":"sips:1002201@165.227.210.221:15405;transport=TLS"}
+/registrar/contact/1002201;@1dc4fb0daf00000000000000000000aa: {"user_agent":"Acrobits SIPIS","uri":"sips:1002201@165.227.210.221:15405;transport=TLS;x-ast-orig-host=10.65.4.2:15405"}
 /registrar/contact/1002202;@0a9b8c7d6e00000000000000000000bb: {"user_agent":"Linphone-Desktop/5.2 (belle-sip/5.2)","uri":"sip:1002202@10.0.0.9:5060"}
 3 results found.
 """
@@ -106,7 +106,7 @@ def test_desk_phone_office_address_and_mac(world, monkeypatch):
     d = pbx.extension_devices(pbx.TenantNames(world["acme"]["id"], world["acme"]["code"]))["201"]
     desk = d[0]
     assert desk["lan_ip"] == "192.168.178.40" and desk["mac"] == "00:15:65:B0:41:47"
-    assert d[1]["mac"] == "" and d[1]["lan_ip"] == ""  # the app through its push server: neither
+    assert d[1]["mac"] == "" and d[1]["lan_ip"] == "" and d[1]["address"] is None  # an app: its push server's, so none
     world["phone"]._status.clear()
     admin = world["client"]("admin").get("/api/status").json()["phones"]["201"]["devices"][0]
     assert admin["mac"] == "00:15:65:B0:41:47" and admin["lan_ip"] == "192.168.178.40"

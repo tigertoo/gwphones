@@ -2246,7 +2246,9 @@ def extension_devices(t: TenantNames = MAIN_NAMES, contacts_out: Optional[str] =
         out.setdefault(ext, []).append({
             "label": label, "kind": kind, "online": r["status"] in ("Avail", "Reachable", "NonQual"),
             "status": r["status"], "rtt_ms": r["rtt_ms"], "user_agent": (info.get("user_agent") or "")[:80],
-            "address": addr.group(1).strip("[]") if addr else (via or None), "lan_ip": lan if _private(lan) else ""})
+            # An app's addresses are its push server's (Groundwire through Acrobits): no use to anyone.
+            "address": (addr.group(1).strip("[]") if addr else (via or None)) if kind == "desk" else None,
+            "lan_ip": lan if kind == "desk" and _private(lan) else ""})
     # A desk phone's MAC, from Desk phones (one per extension).
     with get_db() as conn:
         macs = {r["ext"]: r["mac"] for r in conn.execute("SELECT ext, mac FROM desk_phones WHERE tenant_id = ?", (t.id,))}
