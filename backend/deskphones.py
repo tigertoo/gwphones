@@ -220,9 +220,14 @@ def build_config(conn, phone, agent: Optional[str] = None, fetching: bool = Fals
 def _line_keys(conn, own: str, tenant: int) -> list:
     """Busy lamps for the other extensions: lit while that one is on a
     call, flashing while it rings; pressing it calls it, or answers it
-    while it rings."""
+    while it rings. On a site, only its own site's extensions and those on
+    no site: so Pick Up on a key never takes another office's call (**<ext>
+    dialled on purpose still can). On no site, every extension."""
+    me = conn.execute("SELECT site_id FROM extensions WHERE ext = ? AND tenant_id = ?", (own, tenant)).fetchone()
+    site = me["site_id"] if me else None
     others = [r for r in conn.execute("SELECT ext, name FROM extensions WHERE enabled = 1 AND ext != ? AND tenant_id = ? "
-                                      "ORDER BY ext", (own, tenant))][:MAX_LINE_KEYS - 1]
+                                      "AND (? IS NULL OR site_id IS NULL OR site_id = ?) ORDER BY ext",
+                                      (own, tenant, site, site))][:MAX_LINE_KEYS - 1]
     lines = ["features.pickup.blf_visual_enable = 1",
              # its Pick Up for a ringing busy lamp: ** and the extension (pbx.py's **<ext>)
              f"features.pickup.direct_pickup_code = {PICKUP_PREFIX}", ""]

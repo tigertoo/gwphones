@@ -65,3 +65,19 @@ def test_site_routes_for_the_portal_and_none_of_another_tenants(env, monkeypatch
     op.headers["X-PBX-Tenant"] = "1"
     assert op.put(f"/api/pbx/sites/{sid}", json={"name": "Mine now"}).status_code == 404
     assert op.delete(f"/api/pbx/sites/{sid}").status_code == 404
+
+
+def test_desk_phone_keys_only_for_its_own_site(env, monkeypatch):
+    op, pbx, tid, code = setup(env, monkeypatch)
+    o = op.post("/api/pbx/sites", json={"name": "Ogonnolloe", "ext_min": 2000, "ext_max": 2999}).json()["id"]
+    k = op.post("/api/pbx/sites", json={"name": "Killaloe", "ext_min": 3000, "ext_max": 3999}).json()["id"]
+    for ext, site in (("2000", o), ("2001", o), ("3000", k), ("4000", None)):
+        assert op.post("/api/pbx/extensions", json={"ext": ext, "name": f"E{ext}", "site_id": site}).status_code == 200
+    import deskphones
+    with pbx.get_db() as conn:
+        def keys(own):
+            return [ln.split(" = ")[1] for ln in deskphones._line_keys(conn, own, tid) if ".value = " in ln and
+                    ln.split(" = ")[1]]
+        assert keys("2001") == ["2000", "4000"]  # its own site and those on none: never Killaloe's
+        assert keys("3000") == ["4000"]
+        assert keys("4000") == ["2000", "2001", "3000"]  # on no site: every extension

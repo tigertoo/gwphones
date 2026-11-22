@@ -568,7 +568,10 @@ extension. Each site has:
   extension outside the block can't be put on it;
 - **its own pickup group**: `*8` answers a ringing phone of the same site
   only (`named_call_group`/`named_pickup_group` `<prefix>-site<id>`);
-  `**<ext>` still answers a given extension anywhere.
+  `**<ext>` still answers a given extension anywhere;
+- **its desk phones' busy-lamp keys** are for its own site's extensions
+  (and those on no site) only, so Pick Up on a key never takes another
+  office's call; a desk phone on no site gets keys for every extension.
 
 Managed in the portal (admins: Extensions → Sites, a Site on each
 extension, extensions grouped by site) and the console (Extensions →
