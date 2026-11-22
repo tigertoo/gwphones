@@ -213,7 +213,8 @@ async def _as_tenant(request: Request, call_next):
     tenant = pbx.MAIN_TENANT
     if raw:
         with pbx.get_db() as conn:
-            known = raw.isdigit() and conn.execute("SELECT 1 FROM tenants WHERE id = ?", (int(raw),)).fetchone()
+            known = raw.isdigit() and conn.execute("SELECT 1 FROM tenants WHERE id = ? AND status != 'deleted'",
+                                                   (int(raw),)).fetchone()
         if not known:
             return JSONResponse({"detail": "The tenant chosen no longer exists: choose one again."}, status_code=400)
         tenant = int(raw)
@@ -242,7 +243,7 @@ async def _as_portal(request: Request, call_next):
     row = None
     if re.fullmatch(r"[0-9]{4}", code):
         with pbx.get_db() as conn:
-            row = conn.execute("SELECT id, status FROM tenants WHERE code = ?", (code,)).fetchone()
+            row = conn.execute("SELECT id, status FROM tenants WHERE code = ? AND status != 'deleted'", (code,)).fetchone()
     if not row:
         return JSONResponse({"detail": "Unknown tenant."}, status_code=400)
     if row["status"] != "active" and request.method not in ("GET", "HEAD"):
@@ -275,6 +276,8 @@ async def startup():
     from recordings import recordings_expiry_loop
     from billing import billing_loop
     asyncio.create_task(apply_on_startup())
+    from pbx import purge_deleted_loop
+    asyncio.create_task(purge_deleted_loop())
     asyncio.create_task(voicemail_mail_loop())
     asyncio.create_task(vm_pin_loop())
     asyncio.create_task(apply_retry_loop())

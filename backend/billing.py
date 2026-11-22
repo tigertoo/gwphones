@@ -136,6 +136,7 @@ def get_db() -> sqlite3.Connection:
                    "rate_sheets ADD COLUMN vat_pct TEXT NOT NULL DEFAULT '0'",
                    "mappings ADD COLUMN defaults TEXT",
                    "customers ADD COLUMN bills_addons INTEGER NOT NULL DEFAULT 0",  # its tenant's add-ons
+                   "customers ADD COLUMN closed_at TEXT",  # its tenant was deleted (pbx.api_delete_tenant)
                    # Multi-tenant groundwork: everything so far is the main tenant's (pbx.MAIN_TENANT).
                    *[f"{t} ADD COLUMN tenant_id INTEGER NOT NULL DEFAULT 1" for t in ("customers", "customer_exts", "calls")]):
         try:
@@ -226,7 +227,8 @@ def ensure_tenant_customers(conn) -> Dict[int, int]:
     have = {r["tenant_id"]: r["id"] for r in conn.execute(
         "SELECT tenant_id, MIN(id) AS id FROM customers WHERE tenant_id != ? GROUP BY tenant_id", (MAIN_TENANT,))}
     with get_pbx_db() as pconn:
-        tenants = pconn.execute("SELECT id, name FROM tenants WHERE id != ?", (MAIN_TENANT,)).fetchall()
+        tenants = pconn.execute("SELECT id, name FROM tenants WHERE id != ? AND status != 'deleted'",
+                                (MAIN_TENANT,)).fetchall()
     for t in tenants:
         if t["id"] not in have:
             if conn.execute("INSERT OR IGNORE INTO customers (name, created_at, tenant_id) VALUES (?, ?, ?)",
@@ -592,7 +594,7 @@ def mark_addons(month: Optional[str] = None):
     month = month or datetime.now(LOCAL_TZ).strftime("%Y-%m")
     on = {}
     with get_pbx_db() as pconn:
-        for r in pconn.execute("SELECT id FROM tenants WHERE id != ?", (MAIN_TENANT,)):
+        for r in pconn.execute("SELECT id FROM tenants WHERE id != ? AND status != 'deleted'", (MAIN_TENANT,)):
             s = get_settings(pconn, r["id"])
             if s.get("video") == "1":
                 on[r["id"]] = to_micro(Decimal(s.get("video_price") or "5.00"))
@@ -1173,7 +1175,8 @@ def api_customers():
         tenants = {r["id"]: {"code": r["code"], "name": r["name"]} for r in pconn.execute("SELECT id, code, name FROM tenants")}
         inbound = [{"did": r["did"], "label": r["label"], "tenant_id": r["tenant_id"]}
                    for r in pconn.execute("SELECT did, label, tenant_id FROM inbound_routes ORDER BY did")]
-    customers = [{**{k: c[k] for k in ("id", "name", "email", "markup_pct", "notes", "created_at", "tenant_id")},
+    customers = [{**{k: c[k] for k in ("id", "name", "email", "markup_pct", "notes", "created_at", "tenant_id",
+                                       "closed_at")},
                   "tenant": tenants.get(c["tenant_id"], {"code": "?", "name": "(removed tenant)"}),
                   "ddis": ddis.get(c["id"], [])} for c in rows]
     return {"customers": customers, "ddis": ddi_rows, "default_markup_pct": markup, "inbound_numbers": inbound}

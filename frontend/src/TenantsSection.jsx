@@ -37,6 +37,16 @@ export default function TenantsSection({ config, send, busy, apiBase, switchTo }
     }
   };
 
+  // Deleting: only a suspended tenant with no numbers left, its code typed again.
+  const remove = async (t) => {
+    const typed = window.prompt(`Delete ${t.name} (${t.code})? Its extensions, groups, menus, desk phones, sites and settings `
+      + "are removed, and its portal logins. Its recordings, voicemail and greetings are kept 30 days, then removed. "
+      + "Its billing statements and call records are kept. This can't be undone.\n\nType its code to delete it:");
+    if (typed === null) return;
+    const data = await send("DELETE", `/tenants/${t.id}`, { confirm: typed.trim() }, `${t.name} deleted.`);
+    if (data) load();
+  };
+
   return (
     <section className="panel">
       <h2>Tenants</h2>
@@ -94,8 +104,12 @@ export default function TenantsSection({ config, send, busy, apiBase, switchTo }
                     onClick={() => window.confirm(`Suspend ${t.name}? Its calls out stop (112 and 999 still work) and calls in go to its main mailbox.`)
                       && save(t, { status: "suspended" }, `${t.name} suspended.`)}>Suspend</button>
                 ) : (
-                  <button className="ticket-action-btn" disabled={busy}
-                    onClick={() => save(t, { status: "active" }, `${t.name} active again.`)}>Reactivate</button>
+                  <>
+                    <button className="ticket-action-btn" disabled={busy}
+                      onClick={() => save(t, { status: "active" }, `${t.name} active again.`)}>Reactivate</button>
+                    <button className="ticket-action-btn idea-delete-btn" disabled={busy} onClick={() => remove(t)}
+                      title="Remove its numbers first">Delete</button>
+                  </>
                 ))}
               </td>
             </tr>

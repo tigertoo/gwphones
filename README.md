@@ -491,6 +491,33 @@ config, the service refuses to create a new, empty one (and says so in
 extensions. That catches a wrong `PBX_DB` path after a move. Set
 `PBX_ALLOW_NEW_DB=1` only when starting afresh is really meant.
 
+### Deleting a tenant
+
+Console → Tenants: **Delete** shows on a **suspended** tenant, and asks
+for its code to be typed again (`DELETE /api/pbx/tenants/{id}`, never the
+main tenant). It's refused while the tenant still has numbers: remove or
+move them first, or calls to them would fall to the main tenant's
+default route.
+
+It removes the tenant's extensions, ring groups, menus, hours, call
+links, provisioning links, desk phones (and their Yealink RPS entries),
+sites, settings and unapplied saves, and its phones' forwarding and do
+not disturb (AstDB). Its **recordings, voicemail and greetings** are
+moved aside (`<folder>/deleted/t<code>-<date>`, next to where they were)
+and removed after **30 days** (`purge_deleted`, every 6 hours). Its row
+stays with status `deleted`: its code is never used again, and billing
+still knows whose its calls were; its **billing account is marked
+closed** (`customers.closed_at`) and its statements and call records are
+kept. The **portal** asks gwphones about each tenant it has people for,
+hourly and at start (`gwportal/gone.py`); only on "Unknown tenant." does
+it remove that tenant's logins, sessions, passkeys, devices and Microsoft
+365 link. The change log says what was moved where.
+
+The voicemail spool (`PBX_VM_SPOOL`, `/var/spool/asterisk/voicemail`)
+may not let the service move a folder: then the change log says "left
+at …", and it can be moved by hand as root
+(`mv /var/spool/asterisk/voicemail/t<code> /var/spool/asterisk/voicemail/deleted/t<code>-<date>`).
+
 ### Extension numbers and sites
 
 **3 or 4 digits, per tenant** (`ext_digits`, `pbx.EXT_PLANS`): a new

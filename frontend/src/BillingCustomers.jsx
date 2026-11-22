@@ -157,7 +157,7 @@ export function CustomersAndNumbers({ api, run, busy, version }) {
           <tbody>
             {data.customers.map((c) => (
               <tr key={c.id}>
-                <td>{c.tenant.code} {c.tenant.name}</td>
+                <td>{c.tenant.code} {c.tenant.name}{c.closed_at && <span className="pbx-hint"> (closed: tenant deleted)</span>}</td>
                 <td>{c.name}</td>
                 <td>{c.email || "—"}</td>
                 <td>{c.markup_pct == null ? `${data.default_markup_pct}% (default)` : `${c.markup_pct}%`}</td>

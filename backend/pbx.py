@@ -337,7 +337,8 @@ def tenant_names(conn, tenant: int) -> TenantNames:
 
 def all_tenant_names(conn) -> List[TenantNames]:
     """Every tenant, the main one first."""
-    return [tenant_names(conn, r["id"]) for r in conn.execute("SELECT id FROM tenants ORDER BY id")]
+    return [tenant_names(conn, r["id"]) for r in conn.execute("SELECT id FROM tenants WHERE status != 'deleted' "
+                                                               "ORDER BY id")]
 
 
 # Phones' logins (endpoint names) and the extensions they are. Today a
@@ -2527,7 +2528,7 @@ def api_tenants():
             "SELECT tenant_id, COUNT(*) AS n FROM extensions GROUP BY tenant_id")}
         return {"host_suffix": TENANT_HOST_SUFFIX, "tenants": [{**_tenant_json(r), "extensions": counts.get(r["id"], 0),
                              "settings": {k: get_settings(conn, r["id"])[k] for k in ("outbound_cid", "max_outbound", "web_max", "video", "video_price", "ext_digits")}}
-                            for r in conn.execute("SELECT * FROM tenants ORDER BY id")]}
+                            for r in conn.execute("SELECT * FROM tenants WHERE status != 'deleted' ORDER BY id")]}
 
 
 @router.post("/tenants")
@@ -2566,6 +2567,135 @@ def api_create_tenant(req: TenantCreate):
                                     + (", video" if req.video else ""))
     _mark_addons()
     return {"id": tid, "code": str(code), **result}
+
+
+# -- deleting a tenant ---------------------------------------------------------------------------
+
+DELETED_KEEP_DAYS = 30  # its recordings, voicemail and greetings are kept this long, then removed
+VM_SPOOL = os.environ.get("PBX_VM_SPOOL", "/var/spool/asterisk/voicemail")
+
+
+def _trash(path: str, code: str) -> str:
+    """Moves a deleted tenant's folder aside, next to where it was:
+    deleted/t<code>-<date>, removed after DELETED_KEEP_DAYS (purge_deleted).
+    "" if there was nothing, else where it went or why it stayed."""
+    if not os.path.isdir(path):
+        return ""
+    dest_dir = os.path.join(os.path.dirname(path.rstrip("/")), "deleted")
+    dest = os.path.join(dest_dir, f"t{code}-{datetime.now(timezone.utc).strftime('%Y%m%d')}")
+    try:
+        os.makedirs(dest_dir, exist_ok=True)
+        n = 1
+        while os.path.exists(dest + (f"-{n}" if n > 1 else "")):
+            n += 1
+        dest += f"-{n}" if n > 1 else ""
+        os.rename(path, dest)
+        return dest
+    except OSError as e:
+        return f"left at {path} ({e.strerror})"
+
+
+class TenantDelete(BaseModel):
+    confirm: str  # its code, typed again
+
+
+@router.delete("/tenants/{tenant_id}")
+def api_delete_tenant(tenant_id: int, req: TenantDelete):
+    """Deletes a tenant: suspended first, its numbers gone (or calls to them
+    would reach the main tenant's default), its code typed again. Its phone
+    system goes (extensions, groups, menus, hours, call links, desk phones,
+    sites, settings, forwarding), its recordings, voicemail and greetings
+    are moved aside for DELETED_KEEP_DAYS, its desk phones leave Yealink
+    RPS, and the portal removes its people (it finds the tenant gone). Its
+    row stays, as 'deleted': its code is never used again, and billing
+    still knows whose its calls were (its account is marked closed; its
+    statements and call records are kept)."""
+    if tenant_id == MAIN_TENANT:
+        raise HTTPException(400, "The main tenant can't be deleted.")
+    with _lock, get_db() as conn:
+        r = conn.execute("SELECT * FROM tenants WHERE id = ? AND status != 'deleted'", (tenant_id,)).fetchone()
+        if not r:
+            raise HTTPException(404, "Tenant not found.")
+        if r["status"] != "suspended":
+            raise HTTPException(409, "Suspend the tenant first.")
+        if req.confirm.strip() != r["code"]:
+            raise HTTPException(400, f"Type the tenant's code, {r['code']}, to delete it.")
+        dids = [x["did"] for x in conn.execute("SELECT did FROM inbound_routes WHERE tenant_id = ?", (tenant_id,))]
+        if dids:
+            raise HTTPException(409, f"It still has {len(dids)} number{'s' if len(dids) != 1 else ''} "
+                                     f"({', '.join(dids[:3])}{'...' if len(dids) > 3 else ''}): remove or move them first, "
+                                     "or calls to them would reach the main tenant.")
+        t = tenant_names(conn, tenant_id)
+        logins = [t.login(x["ext"]) for x in conn.execute("SELECT ext FROM extensions WHERE tenant_id = ?", (tenant_id,))]
+        phones = conn.execute("SELECT mac, rps_id FROM desk_phones WHERE tenant_id = ?", (tenant_id,)).fetchall()
+        for table in (*TENANT_TABLES, "sites", "tenant_settings", "apply_pending"):
+            conn.execute(f"DELETE FROM {table} WHERE tenant_id = ?", (tenant_id,))
+        for p in phones:
+            conn.execute("DELETE FROM desk_firmware_attempts WHERE mac = ?", (p["mac"],))
+        conn.execute("UPDATE tenants SET status = 'deleted', sip_host = '' WHERE id = ?", (tenant_id,))
+        conn.commit()
+        result = apply_config(conn, f"Deleted tenant {r['code']} ({r['name']})")
+    # Outside the lock: Asterisk, Yealink, files and billing, each best effort.
+    for login in logins:
+        for fam in (*FORWARD_FAMILIES.values(), DND_FAMILY):
+            asterisk_cli(f"database del {fam} {login}", timeout=4)
+    rps_left = 0
+    try:
+        import rps
+        for p in phones:
+            if p["rps_id"] and rps.ready():
+                try:
+                    rps.unregister(p["rps_id"])
+                except rps.RpsError:
+                    rps_left += 1
+    except ImportError:
+        pass
+    moved = {what: _trash(path, r["code"]) for what, path in (("recordings", t.rec_dir), ("greetings", t.ivr_dir),
+                                                              ("voicemail", os.path.join(VM_SPOOL, t.vm)))}
+    try:
+        import billing
+        with billing.get_db() as bconn:
+            bconn.execute("UPDATE customers SET closed_at = ? WHERE tenant_id = ? AND closed_at IS NULL",
+                          (_now(), tenant_id))
+            bconn.commit()
+    except Exception as e:  # billing's own database: never undoes the delete
+        changes_log.info(f"Billing account of deleted tenant {r['code']} not marked closed: {type(e).__name__}")
+    notes = [f"{k} {v}" for k, v in moved.items() if v]
+    changes_log.info(f"Tenant {r['code']} deleted: " + ("; ".join(notes) or "no files")
+                     + (f"; {rps_left} desk phone(s) still in Yealink RPS" if rps_left else ""))
+    return {**result, "files": moved, "rps_left": rps_left, "keep_days": DELETED_KEEP_DAYS}
+
+
+def purge_deleted(now: Optional[datetime] = None) -> List[str]:
+    """Removes deleted tenants' folders (in each base's deleted/, see
+    _trash) older than DELETED_KEEP_DAYS."""
+    now = now or datetime.now(timezone.utc)
+    gone = []
+    for base in (REC_DIR, IVR_DIR, VM_SPOOL):
+        parent = os.path.join(base, "deleted")
+        if not os.path.isdir(parent):
+            continue
+        for name in os.listdir(parent):
+            m = re.fullmatch(r"t\d{4}-(\d{8})(-\d+)?", name)
+            if not m:
+                continue
+            when = datetime.strptime(m.group(1), "%Y%m%d").replace(tzinfo=timezone.utc)
+            if (now - when).days >= DELETED_KEEP_DAYS:
+                shutil.rmtree(os.path.join(parent, name), ignore_errors=True)
+                gone.append(os.path.join(parent, name))
+    for g in gone:
+        changes_log.info(f"Removed {g}: a deleted tenant's, kept {DELETED_KEEP_DAYS} days")
+    return gone
+
+
+async def purge_deleted_loop():
+    import asyncio
+    while True:
+        try:
+            await asyncio.to_thread(purge_deleted)
+        except Exception:
+            pass
+        await asyncio.sleep(6 * 3600)
 
 
 @router.put("/tenants/{tenant_id}")
@@ -2628,7 +2758,8 @@ def api_config():
                                for r in conn.execute("SELECT * FROM business_hours WHERE tenant_id = ? ORDER BY number",
                                                      (tid,))],
             "tenant": _tenant_json(conn.execute("SELECT * FROM tenants WHERE id = ?", (tid,)).fetchone()),
-            "tenants": [_tenant_json(r) for r in conn.execute("SELECT * FROM tenants ORDER BY id")],
+            "tenants": [_tenant_json(r) for r in conn.execute("SELECT * FROM tenants WHERE status != 'deleted' "
+                                                              "ORDER BY id")],
             "timezone": PBX_TIMEZONE,
             "settings": {
                 "outbound_cid": s["outbound_cid"],

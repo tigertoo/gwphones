@@ -23,6 +23,7 @@ def env_for(d: str) -> dict:
         "PBX_RECORDINGS_DIR": os.path.join(d, "rec"),
         "PBX_ASTERISK_DIR": os.path.join(d, "ast"),
         "PBX_VM_OUTBOX": os.path.join(d, "vm-outbox"),
+        "PBX_VM_SPOOL": os.path.join(d, "vm-spool"),
         "PBX_CHANGES_LOG": os.path.join(d, "changes.log"),
         "PBX_CDR_CSV": os.path.join(d, "none.csv"),
         "PBX_ASTERISK_BIN": "/bin/false",  # every reload "fails": files are still written
