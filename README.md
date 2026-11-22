@@ -271,8 +271,12 @@ redirect) is linked to the tenant, one organisation per tenant, audited.
 The admin chooses:
 - the **group** whose members use the phone system (name or object id),
   and optionally an **admins group** (members of both are admins);
-- which **Exchange custom attribute** (1–15, `extensionAttributeN` in
-  Graph) holds each person's extension. Set it in the Exchange admin
+- where **each person's extension** comes from (`ext_source`): the
+  extension written in their **Office phone** ("061 555 1234 ext 2001",
+  "x2001", ";ext=2001"; the number before it stays their caller ID), the
+  Office phone's **last digits** (a direct number ending in the
+  extension: 061 555 2001 is 2001), or an **Exchange custom attribute**
+  (1–15, `extensionAttributeN` in Graph), which holds each person's extension. Set it in the Exchange admin
   centre: Recipients → Mailboxes → the mailbox → Custom attributes. With
   on-premises AD synced by Entra Connect, set the AD `extensionAttributeN`
   instead (it syncs up). Microsoft doesn't expose `ipPhone` to Graph.

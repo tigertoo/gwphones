@@ -147,13 +147,14 @@ function Person({ u, me, exts, onChange }) {
 function Microsoft365({ onSynced }) {
   const [s, setS] = useState(null);
   const [f, setF] = useState({ group: "", admin_group: "", attribute: 1, create_exts: false, sites_from_office: false,
-    org_contacts: false });
+    org_contacts: false, ext_source: "attribute" });
   const [result, setResult] = useState(null);
   const a = useAction();
   const load = useCallback(() => get("/microsoft").then((r) => {
     setS(r);
     if (r.linked) setF({ group: r.group || "", admin_group: r.admin_group || "", attribute: r.attribute || 1,
-      create_exts: !!r.create_exts, sites_from_office: !!r.sites_from_office, org_contacts: !!r.org_contacts });
+      create_exts: !!r.create_exts, sites_from_office: !!r.sites_from_office, org_contacts: !!r.org_contacts,
+      ext_source: r.ext_source || "attribute" });
     if (r.last_result) setResult(r.last_result);
   }).catch(() => setS({ available: false })), []);
   useEffect(() => { load(); }, [load]);
@@ -180,8 +181,10 @@ function Microsoft365({ onSynced }) {
       <h3>Microsoft 365</h3>
       <p className="small muted">Connected{s.linked_by ? ` by ${s.linked_by}` : ""}. Staff sign in with Microsoft;
         admins still give their two-factor code. The group's members are synced every 15 minutes: people who leave it
-        are disabled. Each person's extension is their Exchange <strong>custom attribute {f.attribute}</strong>
-        (Exchange admin centre, Recipients, Mailboxes, their mailbox, Custom attributes).</p>
+        are disabled. Each person's extension comes from{" "}
+        <strong>{f.ext_source === "office_ext" ? "the extension written in their Office phone"
+          : f.ext_source === "office_last" ? "the last digits of their Office phone"
+          : `their Exchange custom attribute ${f.attribute}`}</strong> (chosen below).</p>
       <p className="small">First, your Microsoft 365 admin must approve the phone portal reading your groups, once:{" "}
         <a href={s.consent_url} rel="noreferrer">Approve in Microsoft 365</a>.</p>
       <Field label="Group to sync" hint="Its name or object id. Its members use the phone system.">
@@ -190,11 +193,23 @@ function Microsoft365({ onSynced }) {
       <Field label="Admins group (optional)" hint="Members of both groups are admins here. Everyone else is staff.">
         <input value={f.admin_group} onChange={(e) => setF({ ...f, admin_group: e.target.value })} />
       </Field>
-      <Field label="Extension is in custom attribute">
-        <select value={f.attribute} onChange={(e) => setF({ ...f, attribute: Number(e.target.value) })}>
-          {Array.from({ length: 15 }, (_, i) => i + 1).map((n) => <option key={n} value={n}>{n}</option>)}
+      <Field label="Each person's extension comes from"
+        hint={f.ext_source === "office_ext" ? "Their Office phone with the extension after it, e.g. 061 555 1234 ext 2001 (or x2001): the number before it is their caller ID."
+          : f.ext_source === "office_last" ? "Their Office phone's last digits: for direct numbers that end in the extension, e.g. 061 555 2001 is 2001."
+          : "Exchange admin centre: their mailbox, Others, Custom attributes."}>
+        <select value={f.ext_source} onChange={(e) => setF({ ...f, ext_source: e.target.value })}>
+          <option value="office_ext">Their Office phone: the extension written after it</option>
+          <option value="office_last">Their Office phone: its last digits</option>
+          <option value="attribute">An Exchange custom attribute</option>
         </select>
       </Field>
+      {f.ext_source === "attribute" && (
+        <Field label="Custom attribute">
+          <select value={f.attribute} onChange={(e) => setF({ ...f, attribute: Number(e.target.value) })}>
+            {Array.from({ length: 15 }, (_, i) => i + 1).map((n) => <option key={n} value={n}>{n}</option>)}
+          </select>
+        </Field>
+      )}
       <MicrosoftAdminLinks />
       <label className="check">
         <input type="checkbox" checked={f.create_exts} onChange={(e) => setF({ ...f, create_exts: e.target.checked })} />

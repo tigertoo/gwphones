@@ -290,7 +290,7 @@ def _link_json(link) -> dict:
             "last_sync_at": link["last_sync_at"], "last_result": json.loads(link["last_result"] or "null"),
             "consent_url": consent_url(link["ms_tenant"]), "linked_by": link["linked_by"],
             "create_exts": bool(link["create_exts"]), "sites_from_office": bool(link["sites_from_office"]),
-            "org_contacts": bool(link["org_contacts"])}
+            "org_contacts": bool(link["org_contacts"]), "ext_source": link["ext_source"] or "attribute"}
 
 
 @app.get("/api/microsoft")
@@ -307,6 +307,7 @@ class Settings(BaseModel):
     create_exts: bool = False  # create an extension that doesn't exist yet
     sites_from_office: bool = False  # each extension on the site named by its person's Office
     org_contacts: bool = False  # Exchange's organisation contacts onto the phones (OrgContact.Read.All)
+    ext_source: str = "attribute"  # where each person's extension is read from (EXT_SOURCES)
 
 
 @app.put("/api/microsoft")
@@ -314,6 +315,8 @@ def api_save_settings(req: Settings, request: Request, me: Signed = Depends(sign
     _admin(me)
     if not 1 <= req.attribute <= 15:
         raise auth.Refused("Choose a custom attribute from 1 to 15.", 400)
+    if req.ext_source not in EXT_SOURCES:
+        raise auth.Refused("Choose where each person's extension comes from.", 400)
     with db.connect() as conn:
         link = _link(conn, me.user["tenant_code"])
     if not link:
@@ -327,15 +330,16 @@ def api_save_settings(req: Settings, request: Request, me: Signed = Depends(sign
         raise auth.Refused("Choose the group whose members use the phone system.", 400)
     with db.connect() as conn:
         conn.execute("UPDATE ms_links SET group_id = ?, group_name = ?, admin_group_id = ?, admin_group_name = ?, "
-                     "attribute = ?, create_exts = ?, sites_from_office = ?, org_contacts = ? WHERE tenant_code = ?",
+                     "attribute = ?, create_exts = ?, sites_from_office = ?, org_contacts = ?, ext_source = ? "
+                     "WHERE tenant_code = ?",
                      (g["id"], g["name"], a["id"] if a else "", a["name"] if a else "", req.attribute,
-                      int(req.create_exts), int(req.sites_from_office), int(req.org_contacts),
+                      int(req.create_exts), int(req.sites_from_office), int(req.org_contacts), req.ext_source,
                       me.user["tenant_code"]))
         db.audit(conn, "Microsoft 365 sync settings", me.user, client_ip(request),
                  f"group {g['name']}, admins {a['name'] if a else 'none'}, custom attribute {req.attribute}, "
                  f"create extensions {'on' if req.create_exts else 'off'}, "
                  f"sites from Office {'on' if req.sites_from_office else 'off'}, "
-                 f"organisation contacts {'on' if req.org_contacts else 'off'}")
+                 f"organisation contacts {'on' if req.org_contacts else 'off'}, extension from {req.ext_source}")
     return {"ok": True}
 
 
@@ -456,7 +460,8 @@ def _members(ms_tenant: str, group_id: str, attribute: int) -> List[dict]:
                         "email": auth.normal_email(u.get("mail") or u.get("userPrincipalName") or ""),
                         "enabled": bool(u.get("accountEnabled")), "guest": u.get("userType") == "Guest",
                         "ext": str(attrs.get(f"extensionAttribute{attribute}") or "").strip(),
-                        "phone": e164((u.get("businessPhones") or [""])[0]),
+                        "office_phone": str((u.get("businessPhones") or [""])[0] or "")[:60],
+                        "phone": e164(office_number((u.get("businessPhones") or [""])[0])),
                         "office": (u.get("officeLocation") or "").strip()[:80],
                         "mobile": e164(u.get("mobilePhone") or ""),
                         "department": (u.get("department") or "").strip()[:40]})
@@ -568,6 +573,29 @@ def plan_extensions(conn, link, result: dict, members: List[dict], info: Dict[st
 
 
 PHONE_KIND = {"business": "work", "mobile": "mobile", "home": "other", "other": "other"}
+
+# Where each person's extension is read from: Exchange's custom attribute N
+# (the default), the extension written in their Office phone ("061 555
+# 1234 ext 2001", "x2001", ";ext=2001"), or the Office phone's last digits
+# (a direct number ending in the extension: 061 555 2001 is 2001).
+EXT_SOURCES = {"attribute": "custom attribute", "office_ext": "the extension in their Office phone",
+               "office_last": "the last digits of their Office phone"}
+_EXT_IN_PHONE = re.compile(r"(?:;\s*ext\s*=|\bext(?:ension)?\.?|\bx|#)\s*(\d{3,4})\s*$", re.I)
+
+
+def office_number(phone: str) -> str:
+    """The Office phone without an extension written after it."""
+    return _EXT_IN_PHONE.sub("", phone or "").strip(" ,;")
+
+
+def ext_from(m: dict, source: str, digits: int) -> str:
+    if source == "office_ext":
+        x = _EXT_IN_PHONE.search(m.get("office_phone") or "")
+        return x.group(1) if x else ""
+    if source == "office_last":
+        d = re.sub(r"\D", "", office_number(m.get("office_phone") or ""))
+        return d[-digits:] if len(d) > digits else ""
+    return m["ext"]
 
 
 def org_contacts(ms_tenant: str) -> List[dict]:
@@ -691,6 +719,10 @@ def _run(tenant_code: str, apply: bool) -> dict:
         return result
     info = {e["ext"]: e for e in listed["extensions"]}
     exts = {e: i["created_at"] for e, i in info.items()}
+    source = link["ext_source"] if link["ext_source"] in EXT_SOURCES else "attribute"
+    digits = len(str((listed.get("limits") or {}).get("ext_max", 299)))
+    for m in members:
+        m["ext"] = ext_from(m, source, digits)
     if link["create_exts"]:
         # A staff member's number that isn't an extension yet: made by this sync (NEW until then),
         # if it's one of the tenant's extension numbers (3 or 4 digits: gwphones says which).
@@ -746,8 +778,11 @@ def plan(conn, link, members: List[dict], admins: set, exts: Dict[str, str]) -> 
         elif r == "user" and not m["ext"]:
             # Emptied on purpose: no phone any more. Like a leaver (below).
             cleared.add(m["oid"])
-            problems.append({"who": m["email"], "problem": f"custom attribute {attr} (their extension) is empty: "
-                                                           "no phone, so their login and extension are switched off"})
+            where = (f"custom attribute {attr} (their extension) is empty" if link["ext_source"] in (None, "", "attribute")
+                     else "their Office phone has no extension" if link["ext_source"] == "office_ext"
+                     else "they have no Office phone")
+            problems.append({"who": m["email"], "problem": f"{where}: no phone, so their login and extension are "
+                                                           "switched off"})
         elif r == "user" and m["ext"] not in exts:
             problems.append({"who": m["email"], "problem": f"there's no extension {m['ext']}"})
         else:

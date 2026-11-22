@@ -563,3 +563,28 @@ def test_contacts_for_admins_only(world):
     ann = world["client"]("ann")
     assert ann.get("/api/contacts").status_code == 403
     assert ann.post("/api/contacts", json={"name": "X", "work": "015550000"}).status_code == 403
+
+
+def test_extension_from_the_office_phone(world, ms):
+    from gwportal import microsoft
+    assert microsoft.ext_from({"office_phone": "061 555 1234 ext 203", "ext": ""}, "office_ext", 3) == "203"
+    assert microsoft.ext_from({"office_phone": "+353 61 555 1234 x203", "ext": ""}, "office_ext", 3) == "203"
+    assert microsoft.ext_from({"office_phone": "tel:+35361555123;ext=2003", "ext": ""}, "office_ext", 4) == "2003"
+    assert microsoft.ext_from({"office_phone": "061 555 1234", "ext": ""}, "office_ext", 3) == ""
+    assert microsoft.ext_from({"office_phone": "061 555 2203", "ext": ""}, "office_last", 3) == "203"
+    assert microsoft.ext_from({"office_phone": "", "ext": "203"}, "office_last", 3) == ""
+    assert microsoft.office_number("061 555 1234 ext 203") == "061 555 1234"
+    admin = link(world, ms)
+    acme_number(world, "35315557777")
+    assert admin.put("/api/microsoft", json={"group": "Phone users", "admin_group": "Phone admins", "attribute": 1,
+                                             "ext_source": "office_ext"}).status_code == 200
+    ms.members[GROUP] = [with_phone(member("oid-cara", "cara@acme.example", "", name="Cara"), "01 555 7777 ext 203"),
+                         with_phone(member("oid-dev", "dev@acme.example", "203"), "01 555 8888")]
+    r = admin.post("/api/microsoft/sync").json()
+    assert r["counts"]["added"] == 1
+    cara = next(u for u in admin.get("/api/users").json()["users"] if u["email"] == "cara@acme.example")
+    assert cara["ext"] == "203"
+    assert "their Office phone has no extension" in json.dumps(r["problems"])  # dev: the attribute is ignored now
+    # the Office phone without its extension is still the caller ID
+    assert ext_of(world, "203")["outbound_cid"] == "+35315557777"
+    assert admin.put("/api/microsoft", json={"group": "Phone users", "attribute": 1, "ext_source": "nope"}).status_code == 400

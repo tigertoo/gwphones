@@ -137,6 +137,8 @@ def connect() -> sqlite3.Connection:
                       "ALTER TABLE ms_links ADD COLUMN sites_from_office INTEGER NOT NULL DEFAULT 0",
                       # and brings in Exchange's organisation contacts (needs OrgContact.Read.All)
                       "ALTER TABLE ms_links ADD COLUMN org_contacts INTEGER NOT NULL DEFAULT 0",
+                      # where each person's extension is read from (microsoft.EXT_SOURCES)
+                      "ALTER TABLE ms_links ADD COLUMN ext_source TEXT NOT NULL DEFAULT 'attribute'",
                       # extensions sync switched off for a leaver: only these does it switch on again
                       "CREATE TABLE IF NOT EXISTS ms_switched_off (tenant_code TEXT NOT NULL, ext TEXT NOT NULL, "
                       "PRIMARY KEY (tenant_code, ext))",
