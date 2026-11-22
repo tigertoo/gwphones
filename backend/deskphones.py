@@ -228,7 +228,12 @@ def _phonebook_lines(conn, phone, e) -> list:
         return []
     scheme, rest = base.split("://", 1)
     books = directory.books(conn, phone["tenant_id"], e["site_id"])
-    lines = ["features.remote_phonebook.enable = 1", f"features.remote_phonebook.flash_time = {PHONEBOOK_SECONDS}"]
+    lines = ["features.remote_phonebook.enable = 1", f"features.remote_phonebook.flash_time = {PHONEBOOK_SECONDS}",
+             # the Directory key lists them too (Directory -> Setting on the phone), after its own contacts
+             "directory_setting.remote_phone_book.enable = 1",
+             "directory_setting.remote_phone_book.priority = 2",
+             "directory_setting.local_directory.enable = 1",
+             "directory_setting.local_directory.priority = 1"]
     for n in range(1, directory.MAX_BOOKS + 1):
         if n <= len(books):
             label = re.sub(r"[\r\n]", " ", books[n - 1]["name"])

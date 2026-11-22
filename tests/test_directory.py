@@ -46,6 +46,7 @@ def test_desk_phone_fetches_its_books_with_its_own_credentials(env, monkeypatch)
     assert "remote_phonebook.data.1.name = Ogonnolloe" in cfg and "remote_phonebook.data.2.name = Killaloe" in cfg
     assert f"remote_phonebook.data.1.url = https://{mac}:{pw}@pbx.example/prov/yealink/phonebook/1.xml" in cfg
     assert "remote_phonebook.data.3.url = \n" in cfg and "features.remote_phonebook.flash_time = 3600" in cfg
+    assert "directory_setting.remote_phone_book.enable = 1" in cfg  # on the Directory key, not only in the menu
     r = phone.get("/prov/yealink/phonebook/1.xml", auth=(mac, pw))
     assert r.status_code == 200 and "Cara Murphy - Accounts" in r.text and r.headers["cache-control"] == "no-store"
     assert "Brien" in phone.get("/prov/yealink/phonebook/2.xml", auth=(mac, pw)).text
