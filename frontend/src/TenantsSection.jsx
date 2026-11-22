@@ -4,6 +4,20 @@ import React, { useCallback, useEffect, useState } from "react";
 // main tenant is today's system; every other has its own extensions,
 // numbering, voicemail, recordings, park lot, caller ID and call limit.
 
+// A tenant's own SIP hostname, suggested from its name: "Acme Plumbing Ltd"
+// is acme-plumbing-ltd.sip.example.ie, with -2, -3... if another tenant has it.
+function suggestHost(name, suffix, taken) {
+  if (!suffix) return "";
+  const slug = name.toLowerCase().normalize("NFKD").replace(/[\u0300-\u036f]/g, "")
+    .replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 30).replace(/-+$/, "");
+  if (!slug) return "";
+  for (let n = 1; n < 100; n += 1) {
+    const host = `${slug}${n > 1 ? `-${n}` : ""}${suffix}`;
+    if (!taken.has(host)) return host;
+  }
+  return "";
+}
+
 const EMPTY = { name: "", outbound_cid: "", max_calls: 4, sip_host: "", web_max: 10, video: false, video_price: "5.00", ext_digits: "4" };
 
 export default function TenantsSection({ config, send, busy, apiBase, switchTo }) {
@@ -26,7 +40,8 @@ export default function TenantsSection({ config, send, busy, apiBase, switchTo }
   const hostExample = suffix ? `acme${suffix}` : "acme.sip.example.ie";
 
   const create = async () => {
-    const data = await send("POST", "/tenants", { ...form, max_calls: Number(form.max_calls), web_max: Number(form.web_max) },
+    const { hostEdited, ...body } = form; // eslint-disable-line no-unused-vars
+    const data = await send("POST", "/tenants", { ...body, max_calls: Number(body.max_calls), web_max: Number(body.web_max) },
       `Tenant ${form.name} created.`);
     if (data) { setForm(null); load(); }
   };
@@ -121,7 +136,12 @@ export default function TenantsSection({ config, send, busy, apiBase, switchTo }
         <div className="idea-item idea-item-editing pbx-gap">
           <div className="idea-form-row">
             <input className="idea-input pbx-name-input" placeholder="Name, e.g. Acme Ltd" maxLength={40} value={form.name}
-              onChange={(e) => setForm({ ...form, name: e.target.value })} />
+              onChange={(e) => {
+                const name = e.target.value;
+                // the suggestion follows the name until the address is edited by hand
+                const taken = new Set(tenants.map((t) => t.sip_host).filter(Boolean));
+                setForm({ ...form, name, ...(form.hostEdited ? {} : { sip_host: suggestHost(name, suffix, taken) }) });
+              }} />
             <input className="idea-input" placeholder="Caller ID, e.g. +35312345678" value={form.outbound_cid}
               onChange={(e) => setForm({ ...form, outbound_cid: e.target.value })} />
             <label className="idea-field">
@@ -153,7 +173,8 @@ export default function TenantsSection({ config, send, busy, apiBase, switchTo }
               </label>
             )}
             <input className="idea-input" placeholder={`SIP hostname, e.g. ${hostExample}`} value={form.sip_host}
-              onChange={(e) => setForm({ ...form, sip_host: e.target.value })} />
+              onChange={(e) => setForm({ ...form, sip_host: e.target.value, hostEdited: true })}
+              title="Its phones register here (a name under the wildcard, so it can be moved to another server by DNS). Empty: the server's own address." />
           </div>
           <p className="pbx-hint">
             The caller ID is what its calls show, and its emergency calls when an extension has none of its own: an Irish
