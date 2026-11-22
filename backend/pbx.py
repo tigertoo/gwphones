@@ -2155,6 +2155,91 @@ def parse_contacts(output: str) -> Dict[str, dict]:
 _CONTACT_RANK = {"Avail": 3, "Reachable": 3, "NonQual": 2, "Created": 1, "Updated": 1}
 
 
+# -- each device on an extension (a desk phone, the apps) -------------------------------------
+
+_REGISTRAR_LINE = re.compile(r"^\s*/registrar/contact/(\S+?)\s*:\s*(\{.*\})\s*$")
+
+
+def parse_registrar(output: str) -> Dict[str, dict]:
+    """`database show registrar/contact`: each registered contact as
+    Asterisk keeps it (its user agent, address), by its id (aor;@hash)."""
+    out = {}
+    for line in output.splitlines():
+        m = _REGISTRAR_LINE.match(line)
+        if not m:
+            continue
+        try:
+            out[m.group(1)] = json.loads(m.group(2))
+        except ValueError:
+            continue
+    return out
+
+
+def parse_contact_rows(output: str) -> List[dict]:
+    """`pjsip show contacts`, one row per contact: its AOR, the start of its
+    hash (as the CLI shows it), status and round trip."""
+    rows = []
+    for line in output.splitlines():
+        tokens = line.split()
+        if len(tokens) < 4 or tokens[0] != "Contact:" or tokens[1].startswith("<"):
+            continue
+        aor = tokens[1].partition("/")[0]
+        status = next((t for t in tokens[2:] if t in CONTACT_STATUSES), "Unknown")
+        rtt = None
+        if status in tokens:
+            i = tokens.index(status)
+            if i + 1 < len(tokens):
+                try:
+                    v = float(tokens[i + 1])
+                    rtt = round(v, 1) if v == v else None
+                except ValueError:
+                    pass
+        h = tokens[tokens.index(status) - 1] if status in tokens and tokens.index(status) > 2 else ""
+        rows.append({"aor": aor, "hash": h, "status": status, "rtt_ms": rtt})
+    return rows
+
+
+def device_label(user_agent: str) -> tuple:
+    """(what it is, desk or app), from the User-Agent it registered with."""
+    ua = (user_agent or "").strip()
+    m = re.match(DESK_UA_RE, ua)
+    if m:
+        maker = m.group(1)
+        # the model: T46G in "Yealink SIP-T46G 28.83.0.120", 6851 in "Cisco-CP-6851-3PCC/12.0"
+        model = re.search(r"\b(?:SIP-|CP-)?([A-Z]{0,3}\d{2,4}[A-Z]{0,2})\b", ua[len(maker):])
+        return (f"{maker} {model.group(1)} desk phone" if model else f"{maker} desk phone", "desk")
+    if re.search(r"sipis|acrobits", ua, re.I):
+        return ("Groundwire app (through its push server)", "app")
+    for name in ("Groundwire", "Linphone", "Zoiper", "Bria", "MicroSIP", "Acrobits Softphone"):
+        if ua.lower().startswith(name.lower()):
+            return (f"{name} app", "app")
+    return ((ua[:40] or "A phone"), "app")
+
+
+def extension_devices(t: TenantNames = MAIN_NAMES, contacts_out: Optional[str] = None) -> Dict[str, list]:
+    """Each of tenant t's extensions' registered devices: what it is (desk
+    phone or app, from its User-Agent), online or not, its round trip and
+    the address it registered from (for the console)."""
+    rows = parse_contact_rows(contacts_out if contacts_out is not None else (asterisk_cli("pjsip show contacts") or ""))
+    reg = parse_registrar(asterisk_cli("database show registrar/contact") or "")
+    out: Dict[str, list] = {}
+    for r in rows:
+        ext = endpoint_ext(r["aor"], t.code)
+        if not ext:
+            continue
+        info = next((v for k, v in reg.items() if k.startswith(f"{r['aor']};@{r['hash']}")), {}) if r["hash"] else {}
+        label, kind = device_label(info.get("user_agent", ""))
+        via = info.get("via_addr") or ""
+        addr = re.search(r"@(\[[^\]]+\]|[^:;>]+)", info.get("uri", ""))
+        out.setdefault(ext, []).append({
+            "label": label, "kind": kind, "online": r["status"] in ("Avail", "Reachable", "NonQual"),
+            "status": r["status"], "rtt_ms": r["rtt_ms"], "user_agent": (info.get("user_agent") or "")[:80],
+            "address": addr.group(1).strip("[]") if addr else (via or None)})
+    for ds in out.values():
+        ds.sort(key=lambda d: (d["kind"] != "desk", not d["online"], d["label"]))
+    return out
+
+
 def parse_channels(output: str) -> List[dict]:
     channels = []
     for line in output.splitlines():
@@ -2199,11 +2284,14 @@ def get_status(t: TenantNames = MAIN_NAMES) -> dict:
     step 2.10.)"""
     version = asterisk_cli("core show version", timeout=4)
     if version is None:
-        return {"asterisk_running": False, "checked_at": _now(), "extensions": {}, "trunks": {},
+        return {"asterisk_running": False, "checked_at": _now(), "extensions": {}, "devices": {}, "trunks": {},
                 "channels": [], "last_apply": _last_apply, "unapplied": _unapplied_now()}
-    contacts = parse_contacts(asterisk_cli("pjsip show contacts") or "")
+    contacts_out = asterisk_cli("pjsip show contacts") or ""
+    contacts = parse_contacts(contacts_out)
+    devices = extension_devices(t, contacts_out)
     return {
         "asterisk_running": True,
+        "devices": devices,
         "version": version.strip().splitlines()[0] if version.strip() else "",
         "checked_at": _now(),
         "extensions": {endpoint_ext(k, t.code): v for k, v in contacts.items() if endpoint_ext(k, t.code)},
@@ -2726,7 +2814,11 @@ def api_tenant_status():
               "duration_seconds": c["duration_seconds"], "recording": c.get("recording", False)}
              for c in s["channels"] if channel_ext(c["channel"], t.code)]
     return {"asterisk_running": s["asterisk_running"], "checked_at": s["checked_at"],
-            "phones": {ext: {"status": v.get("status")} for ext, v in s["extensions"].items()}, "calls": calls}
+            "phones": {ext: {"status": v.get("status"),
+                             # each device: what it is and whether it's online (no addresses for the portal)
+                             "devices": [{k: d[k] for k in ("label", "kind", "online")}
+                                         for d in s.get("devices", {}).get(ext, [])]}
+                       for ext, v in s["extensions"].items()}, "calls": calls}
 
 
 @router.get("/routing")

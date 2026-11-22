@@ -324,7 +324,9 @@ def api_status(request: Request, me: Signed = Depends(signed_in())):
     mine = _bound(me, request)
     s = _cached(_status, me.user, "/status/tenant")
     return {"running": s["asterisk_running"],
-            "phones": {ext: {"status": v.get("status")} for ext, v in s["phones"].items() if mine is None or ext == mine},
+            "phones": {ext: {"status": v.get("status"),
+                             "devices": [{k: d.get(k) for k in ("label", "kind", "online")} for d in v.get("devices") or []]}
+                       for ext, v in s["phones"].items() if mine is None or ext == mine},
             "calls": [{k: c[k] for k in ("ext", "state", "caller_id", "duration_seconds", "recording")}
                       for c in s["calls"] if mine is None or c["ext"] == mine]}
 

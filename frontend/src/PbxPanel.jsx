@@ -357,6 +357,13 @@ function StatusSection({ config, status, send, busy }) {
                   <td>
                     <StatusDot status={s?.status || "Unavail"} />{" "}
                     {!s ? "Not registered" : s.status === "Avail" ? "Registered" : s.status === "Unavail" ? "Not responding" : s.status}
+                    {(status.devices?.[e.ext] || []).map((d, i) => (
+                      <div key={i} className="pbx-hint">
+                        <StatusDot status={d.online ? "Avail" : "Unavail"} /> {d.label}
+                        {d.address ? ` · ${d.address}` : ""}{d.rtt_ms != null ? ` · ${d.rtt_ms} ms` : ""}
+                        {d.user_agent ? <span title={d.user_agent}> ⓘ</span> : null}
+                      </div>
+                    ))}
                   </td>
                   <td>{s?.address || "—"}</td>
                   <td>{s?.rtt_ms != null ? `${s.rtt_ms} ms` : "—"}</td>

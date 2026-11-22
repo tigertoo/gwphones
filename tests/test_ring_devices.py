@@ -67,3 +67,29 @@ def test_call_pull_only_takes_the_extensions_own_call(world):
     for b in (main_block, acme_block):
         assert "Bridge(${PULL_PEER},x)" in b and '"${PULL_C}" = "${CHANNEL}"' in b  # never its own channel
         assert "ExecIf" not in b and "LOCAL(" not in b  # LOCAL() works only in a Gosub
+
+
+CONTACTS = """  Contact:  1002201/sips:1002201@194.125.12.215:61209;tra 9f3c2a1b7e Avail         41.9
+  Contact:  1002201/sips:1002201@165.227.210.221:15405;tra 1dc4fb0daf Avail        97.693
+  Contact:  1002202/sip:1002202@10.0.0.9:5060;ob             0a9b8c7d6e Unavail         nan
+  Contact:  201/sips:201@167.99.119.244:24653;transport=TL 4556be3b39 Avail        91.842
+"""
+REGISTRAR = """/registrar/contact/1002201;@9f3c2a1b7e5d4c3b2a1f0e9d8c7b6a59: {"user_agent":"Yealink SIP-T46G 28.83.0.120","uri":"sips:1002201@194.125.12.215:61209;transport=TLS","via_addr":"192.168.178.40"}
+/registrar/contact/1002201;@1dc4fb0daf00000000000000000000aa: {"user_agent":"Acrobits SIPIS","uri":"sips:1002201@165.227.210.221:15405;transport=TLS"}
+/registrar/contact/1002202;@0a9b8c7d6e00000000000000000000bb: {"user_agent":"Linphone-Desktop/5.2 (belle-sip/5.2)","uri":"sip:1002202@10.0.0.9:5060"}
+3 results found.
+"""
+
+
+def test_each_device_listed_with_what_it_is(env, monkeypatch):
+    import pbx
+    monkeypatch.setattr(pbx, "asterisk_cli", lambda cmd, timeout=8: REGISTRAR if cmd.startswith("database") else CONTACTS)
+    t = pbx.TenantNames(2, "1002")
+    d = pbx.extension_devices(t)
+    assert [x["label"] for x in d["201"]] == ["Yealink T46G desk phone", "Groundwire app (through its push server)"]
+    assert d["201"][0]["kind"] == "desk" and d["201"][0]["online"] and d["201"][0]["address"] == "194.125.12.215"
+    assert d["202"] == [{**d["202"][0], "label": "Linphone app", "online": False}]
+    assert "201" not in pbx.extension_devices(pbx.MAIN_NAMES) or len(pbx.extension_devices(pbx.MAIN_NAMES)["201"]) == 1
+    assert pbx.device_label("Cisco-CP-6851-3PCC/12.0.1 (00562b043615)") == ("Cisco 6851 desk phone", "desk")
+    assert pbx.device_label("Panasonic_KX-HDV130/16.009 (0080f0b5b001)") == ("Panasonic HDV130 desk phone", "desk")
+    assert pbx.device_label("Groundwire/26.1.21 (build 2549327; iOS 27.2.1)")[0] == "Groundwire app"

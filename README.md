@@ -520,6 +520,15 @@ is told from an app by the User-Agent it registered with (`DESK_UA_RE`:
 Yealink, Cisco, Panasonic, ...). Ring groups ring every device of each
 member. Admins set it for any extension, a user for their own.
 
+**Each device** is listed (portal: the extension's "Phones on this
+extension" and Status; console: Phones), as what it is and whether it's
+online: `extension_devices` matches `pjsip show contacts` (status, round
+trip) with `database show registrar/contact` (each contact's User-Agent
+and address, by its id `aor;@hash`), and `device_label` names it ("Yealink
+T46G desk phone", "Groundwire app (through its push server)", "Linphone
+app", else the User-Agent). The portal gets the name, desk or app, and
+online only; the console also the address, round trip and User-Agent.
+
 **Call pull, `*11`:** on a call on one of the extension's devices, dial
 `*11` on another: the call moves there and the first device drops out.
 `[t…-features]` looks only at channels of the dialling extension's own

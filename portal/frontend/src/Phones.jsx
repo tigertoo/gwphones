@@ -79,6 +79,7 @@ function ExtensionEditor({ ext, me, fwd, callerIds, onChange }) {
     <div className="editor">
       <NameAndSwitch ext={ext} admin={admin} onChange={onChange} />
       <CallerId ext={ext} callerIds={callerIds} onChange={onChange} />
+      <Devices ext={ext.ext} />
       <Ringing ext={ext} onChange={onChange} />
       <Forwarding ext={ext.ext} fwd={fwd} onChange={onChange} />
       <VoicemailEmail ext={ext} me={me} onChange={onChange} />
@@ -110,6 +111,36 @@ function NameAndSwitch({ ext, admin, onChange }) {
         </label>
       )}
       {a.show}
+    </div>
+  );
+}
+
+// What's signed in on this extension right now: a desk phone, the apps.
+function Devices({ ext }) {
+  const [devices, setDevices] = useState(null);
+  useEffect(() => {
+    let live = true;
+    const load = () => get("/status").then((r) => live && setDevices(r.phones?.[ext]?.devices || []))
+      .catch(() => live && setDevices(null));
+    load();
+    const t = setInterval(load, 15000);
+    return () => { live = false; clearInterval(t); };
+  }, [ext]);
+  if (devices === null) return null;
+  return (
+    <div className="block">
+      <h3>Phones on this extension</h3>
+      {devices.length === 0 ? <p className="small muted">No phone is signed in right now. Set one up below.</p> : (
+        <ul className="list compact">
+          {devices.map((d, i) => (
+            <li key={i} className="row-head static">
+              <span className={`dot ${d.online ? "dot-ok" : "dot-off"}`} />
+              <span className="grow">{d.label}</span>
+              <span className="muted">{d.online ? "Online" : "Offline"}</span>
+            </li>
+          ))}
+        </ul>
+      )}
     </div>
   );
 }
@@ -354,7 +385,9 @@ export function Status() {
             <li key={ext} className="row-head static">
               <span className={`dot ${p.status === "Avail" ? "dot-ok" : "dot-off"}`} />
               <span className="ext">{ext}</span>
-              <span className="grow">{p.status === "Avail" ? "Connected" : "Not connected"}</span>
+              <span className="grow">{p.status === "Avail" ? "Connected" : "Not connected"}
+                {p.devices?.length > 0 && <span className="small muted block">
+                  {p.devices.map((d) => `${d.label}: ${d.online ? "online" : "offline"}`).join(" · ")}</span>}</span>
             </li>
           ))}
         </ul>
