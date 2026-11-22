@@ -629,6 +629,15 @@ def get_db() -> sqlite3.Connection:
            -- A tenant's sites (offices): their own number (caller ID and 112/999
            -- for their extensions without one of their own) and optionally a
            -- block of extension numbers (Dublin 2000-2999).
+           -- What a tenant's directory knows about an extension's person beyond
+           -- its name (from Microsoft 365: directory.py)
+           CREATE TABLE IF NOT EXISTS directory_extras (
+               tenant_id INTEGER NOT NULL,
+               ext TEXT NOT NULL,
+               mobile TEXT NOT NULL DEFAULT '',
+               ddi TEXT NOT NULL DEFAULT '',
+               department TEXT NOT NULL DEFAULT '',
+               PRIMARY KEY (tenant_id, ext));
            CREATE TABLE IF NOT EXISTS sites (
                id INTEGER PRIMARY KEY AUTOINCREMENT,
                tenant_id INTEGER NOT NULL,
@@ -1844,15 +1853,21 @@ def build_portal_dialplan(conn) -> str:
     # came in on (the channel is the carrier's).
     trunkin = [" same => n,Set(GROUP(trunkin)=${CHANNEL(endpoint)})"] if _trunk_ceilings(s) else []
     names = {t.id: t for t in tenants}
+    import directory
     for r in conn.execute("SELECT * FROM inbound_routes ORDER BY did"):
         tid = r["tenant_id"]
+        if tid not in names:
+            continue
         goto = (f"Goto(from-internal,{r['target']},1)" if tid == MAIN_TENANT
                 else target_goto(r["target"], destinations(conn, tid), names[tid]) or "Hangup()")
         out += [f"exten => {r['did']},1,NoOp(Inbound {r['did']})", *trunkin, *names[tid].accountcode(),
-                *_count_inbound(names[tid]), *told[tid], f" same => n,{goto}"]
+                *_count_inbound(names[tid]), directory.lookup_line(names[tid]), *told[tid], f" same => n,{goto}"]
     default = s["inbound_default"]  # numbers not listed are the main tenant's
     for x in ("_X.", "s"):
-        out += [f"exten => {x},1,NoOp(Inbound)", *trunkin, *told[MAIN_TENANT], f" same => n,Goto(from-internal,{default},1)"]
+        out += [f"exten => {x},1,NoOp(Inbound)", *trunkin, directory.lookup_line(names[MAIN_TENANT]),
+                *told[MAIN_TENANT], f" same => n,Goto(from-internal,{default},1)"]
+    for t in tenants:
+        out += [""] + directory.cnam_context(conn, t)
     out.append("")
     return "\n".join(out)
 

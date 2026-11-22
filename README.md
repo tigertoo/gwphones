@@ -511,6 +511,29 @@ config, the service refuses to create a new, empty one (and says so in
 extensions. That catches a wrong `PBX_DB` path after a move. Set
 `PBX_ALLOW_NEW_DB=1` only when starting afresh is really meant.
 
+### Company directory (`backend/directory.py`)
+
+Each tenant's desk phones get its **company directory** as Yealink remote
+phone books (`remote_phonebook.data.1-5`, refreshed hourly), one per site
+with the phone's own site first, then the others, then "Others" (on no
+site); one "Everyone" book when there are no sites or more than five. An
+entry is an extension: its name, its department, and its extension,
+mobile and direct number to dial. The phone fetches them like its
+settings (`/prov/yealink/phonebook/<n>.xml`, its own credentials in the
+link, under its own tenant's address; the checking copy hides them).
+
+The department, mobile and direct number come from **Microsoft 365**
+(`department`, `mobilePhone`, Office phone `businessPhones`): each Sync
+now (and the 15-minute sync) sends them for its synced people (`PUT
+/api/pbx/directory`, `directory_extras`), replacing the tenant's last.
+
+**Names for incoming calls:** a call from one of those numbers shows
+"Cara Murphy (mobile)" or "(direct)": `[<prefix>-cnam]` knows each number
+in the forms a carrier may send (353..., 0..., +353..., 00353...), and
+`[portal-inbound]` looks the caller up there, only if it's there
+(`GosubIf(DIALPLAN_EXISTS(...))`: a Gosub to a missing one would end the
+call), in the called tenant's own directory only.
+
 ### Deleting a tenant
 
 Console → Tenants: **Delete** shows on a **suspended** tenant, and asks

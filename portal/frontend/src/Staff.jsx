@@ -264,6 +264,8 @@ function SyncResult({ r }) {
       {r.actions?.length > 0 && <ul>{r.actions.map((x, i) => (
         <li key={i}>{DOING[x.do]}: {x.email}{x.role === "admin" ? " (admin)" : x.ext ? ` (ext ${x.ext})` : ""}
           {x.changes ? `: ${x.changes.join(", ")}` : ""}</li>))}</ul>}
+      {r.directory && <p>Company directory on the phones: {r.directory.length} people with department, mobile or
+        direct number{r.directory.length ? "" : " (after Sync now)"}.</p>}
       {r.extensions?.length > 0 && <><p><strong>Extensions:</strong></p>
         <ul>{r.extensions.map((x, i) => <li key={i}>{EXT_DOING[x.do] ? EXT_DOING[x.do](x) : x.do}</li>)}</ul></>}
       {r.problems?.length > 0 && <><p><strong>Not synced:</strong></p>

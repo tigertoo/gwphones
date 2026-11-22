@@ -72,6 +72,9 @@ PORTAL_ROUTES = {
     ("PUT", "/api/pbx/extensions/{ext}/outbound-cid"),
     # How an extension's devices ring (a desk phone and its apps).
     ("PUT", "/api/pbx/extensions/{ext}/ring-mode"),
+    # The company directory's details from Microsoft 365 (the portal's sync).
+    ("GET", "/api/pbx/directory"),
+    ("PUT", "/api/pbx/directory"),
     # Sites (offices): their number and block of extensions; admins only in the portal.
     ("GET", "/api/pbx/sites"),
     ("POST", "/api/pbx/sites"),
@@ -306,6 +309,11 @@ from pbx import router as pbx_router, public_router as pbx_public_router  # noqa
 
 app.include_router(pbx_router)
 app.include_router(pbx_public_router)
+
+# A tenant's company directory (directory.py): its details from Microsoft 365, via the portal.
+from directory import router as directory_router  # noqa: E402
+
+app.include_router(directory_router)
 
 # A tenant's portal people (first admin invitation), from the console: operator only.
 from portal_admins import router as portal_admins_router  # noqa: E402

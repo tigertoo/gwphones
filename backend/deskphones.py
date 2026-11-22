@@ -94,6 +94,7 @@ MODELS = ["T41P", "T46G", "T31P", "T31G", "T33G", "T34W", "T43U", "T44U", "T46U"
 REPEAT_MINUTES = 60
 VOICEMAIL_NUMBER = "*97"
 MAX_LINE_KEYS = 27  # a T46G/T46U/T54W's 27 (3 pages of 9 or 10); more models have fewer
+PHONEBOOK_SECONDS = 3600  # how often a phone refreshes its company directory
 PICKUP_PREFIX = "**"  # ** + extension answers that extension's ringing call (pbx.py, feature codes)
 DESKPHONE_BASE_URL = os.environ.get("PBX_DESKPHONE_BASE_URL", "").rstrip("/") or PROVISION_BASE_URL
 
@@ -214,7 +215,28 @@ def build_config(conn, phone, agent: Optional[str] = None, fetching: bool = Fals
               "account.1.srtp_encryption = 2",  # compulsory, as for the apps
               f"voice_mail.number.1 = {VOICEMAIL_NUMBER}",
               ""]
-    return "\n".join(lines + _line_keys(conn, e["ext"], phone["tenant_id"]))
+    return "\n".join(lines + _phonebook_lines(conn, phone, e) + _line_keys(conn, e["ext"], phone["tenant_id"]))
+
+
+def _phonebook_lines(conn, phone, e) -> list:
+    """The company directory (directory.py): one remote phone book per site,
+    its own first, fetched with its own credentials like its settings, and
+    refreshed every hour; the names in it also show for incoming calls."""
+    import directory
+    base = server_url(phone["tenant_id"])
+    if not base:
+        return []
+    scheme, rest = base.split("://", 1)
+    books = directory.books(conn, phone["tenant_id"], e["site_id"])
+    lines = ["features.remote_phonebook.enable = 1", f"features.remote_phonebook.flash_time = {PHONEBOOK_SECONDS}"]
+    for n in range(1, directory.MAX_BOOKS + 1):
+        if n <= len(books):
+            label = re.sub(r"[\r\n]", " ", books[n - 1]["name"])
+            lines += [f"remote_phonebook.data.{n}.url = {scheme}://{phone['mac']}:{phone['prov_pass']}@{rest}phonebook/{n}.xml",
+                      f"remote_phonebook.data.{n}.name = {label}"]
+        else:
+            lines += [f"remote_phonebook.data.{n}.url = ", f"remote_phonebook.data.{n}.name = "]
+    return lines + [""]
 
 
 def _line_keys(conn, own: str, tenant: int) -> list:
@@ -533,6 +555,7 @@ def api_desk_phone_config(mac: str):
         body = build_config(conn, phone, phone["last_fetch_agent"])
     body = re.sub(r"^(account\.1\.password = ).*$", r"\1********", body, flags=re.M)
     body = re.sub(r"^(static\.firmware\.url = \w+://)[^@/]+@", r"\1********@", body, flags=re.M)
+    body = re.sub(r"^(remote_phonebook\.data\.\d\.url = \w+://)[^@/]+@", r"\1********@", body, flags=re.M)
     body = re.sub(r"^(static\.security\.user_password = admin:).*$", r"\1********", body, flags=re.M)
     return PlainTextResponse(body, headers=_NO_STORE)
 
@@ -540,6 +563,38 @@ def api_desk_phone_config(mac: str):
 # ---------------------------------------------------------------------------
 # Firmware (server-wide: the console only, never the portal)
 # ---------------------------------------------------------------------------
+
+@public_router.get("/phonebook/{name}")
+def prov_phonebook(name: str, request: Request):
+    """One of the phone's company directory books (directory.books), for
+    the phone itself: its credentials, under its own tenant's address."""
+    ip = _client_ip(request)
+    if _too_many(ip):
+        return Response("Too many attempts. Try again later.", status_code=429, media_type="text/plain",
+                        headers={**_NO_STORE, "Retry-After": str(FAILURE_WINDOW)})
+    m = re.fullmatch(r"([1-5])\.xml", name)
+    if not m:
+        return Response("Not found.", status_code=404, media_type="text/plain", headers=_NO_STORE)
+    creds = _credentials(request)
+    if not creds:
+        return _challenge(ip, counts=False)
+    user, password = creds
+    import directory
+    with get_db() as conn:
+        phone = conn.execute("SELECT * FROM desk_phones WHERE mac = ?", (user,)).fetchone()
+        if not phone or not hmac.compare_digest(password.encode(), phone["prov_pass"].encode()) \
+                or _host_refused(conn, request, phone["tenant_id"]):
+            changes_log.info(f"Phone book {name} refused from {ip}: wrong credentials")
+            return _challenge(ip)
+        e = conn.execute("SELECT site_id FROM extensions WHERE ext = ? AND tenant_id = ?",
+                         (phone["ext"], phone["tenant_id"])).fetchone()
+        books = directory.books(conn, phone["tenant_id"], e["site_id"] if e else None)
+        n = int(m.group(1))
+        if n > len(books):
+            return Response("Not found.", status_code=404, media_type="text/plain", headers=_NO_STORE)
+        body = directory.book_xml(conn, phone["tenant_id"], books[n - 1])
+    return Response(body, media_type="application/xml", headers=_NO_STORE)
+
 
 @public_router.get("/firmware/{name}")
 def prov_firmware(name: str, request: Request):

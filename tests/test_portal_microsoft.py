@@ -510,3 +510,21 @@ def test_office_ignored_unless_chosen(world, ms):
     ms.members[GROUP] = [with_office(member("oid-cara", "cara@acme.example", "203"), "Dublin")]
     r = admin.post("/api/microsoft/preview").json()
     assert all(x["do"] != "site" for x in r["extensions"]) and "Office" not in json.dumps(r["problems"])
+
+
+def test_sync_fills_the_company_directory(world, ms):
+    admin = link(world, ms)
+    acme_number(world, "35315557777")
+    m = with_phone(member("oid-cara", "cara@acme.example", "203", name="Cara Murphy"), "01 555 7777")
+    m["mobilePhone"], m["department"] = "+353 87 123 4567", "Accounts"
+    ms.members[GROUP] = [m]
+    preview = admin.post("/api/microsoft/preview").json()
+    assert preview["directory"] == []  # nobody synced yet: nothing changes before Sync now
+    r = admin.post("/api/microsoft/sync").json()
+    assert r["directory"] == [{"ext": "203", "mobile": "+353871234567", "ddi": "+35315557777", "department": "Accounts"}]
+    row = world["pbx"].get_db().execute("SELECT mobile, ddi, department FROM directory_extras WHERE tenant_id = ? "
+                                        "AND ext = '203'", (world["acme"]["id"],)).fetchone()
+    assert tuple(row) == ("0871234567", "015557777", "Accounts")
+    import os
+    dial = open(os.path.join(world["pbx"].GENERATED_DIR, "extensions_portal.conf")).read()
+    assert "exten => 0871234567,1,Set(CALLERID(name)=Cara Murphy (mobile))" in dial

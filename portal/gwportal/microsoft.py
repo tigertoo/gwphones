@@ -441,7 +441,7 @@ def _find_group(ms_tenant: str, name_or_id: str) -> dict:
 def _members(ms_tenant: str, group_id: str, attribute: int) -> List[dict]:
     url = f"{GRAPH}/groups/{group_id}/transitiveMembers/microsoft.graph.user"
     params = {"$select": "id,displayName,mail,userPrincipalName,accountEnabled,userType,businessPhones,"
-                         "officeLocation,onPremisesExtensionAttributes",
+                         "officeLocation,mobilePhone,department,onPremisesExtensionAttributes",
               "$top": "999"}
     out = []
     while url:
@@ -453,7 +453,9 @@ def _members(ms_tenant: str, group_id: str, attribute: int) -> List[dict]:
                         "enabled": bool(u.get("accountEnabled")), "guest": u.get("userType") == "Guest",
                         "ext": str(attrs.get(f"extensionAttribute{attribute}") or "").strip(),
                         "phone": e164((u.get("businessPhones") or [""])[0]),
-                        "office": (u.get("officeLocation") or "").strip()[:80]})
+                        "office": (u.get("officeLocation") or "").strip()[:80],
+                        "mobile": e164(u.get("mobilePhone") or ""),
+                        "department": (u.get("department") or "").strip()[:40]})
         url, params = data.get("@odata.nextLink"), None
     return out
 
@@ -561,6 +563,20 @@ def plan_extensions(conn, link, result: dict, members: List[dict], info: Dict[st
     return out
 
 
+def directory_entries(conn, link, members: List[dict]) -> List[dict]:
+    """For the company directory: each synced person on an extension, with
+    their department, mobile and direct number (Office phone)."""
+    by_oid = {m["oid"]: m for m in members}
+    out = []
+    for u in conn.execute("SELECT ms_oid, ext FROM users WHERE tenant_code = ? AND ms_tenant = ? AND source = 'microsoft' "
+                          "AND disabled = 0 AND ext IS NOT NULL", (link["tenant_code"], link["ms_tenant"])).fetchall():
+        m = by_oid.get(u["ms_oid"])
+        if m:
+            out.append({"ext": u["ext"], "mobile": m.get("mobile", ""), "ddi": m.get("phone", ""),
+                        "department": m.get("department", "")})
+    return out
+
+
 def _gw_try(caller, result: dict, x: dict, method: str, path: str, body: dict) -> bool:
     try:
         gw.call(caller, method, path, json=body)
@@ -654,10 +670,16 @@ def _run(tenant_code: str, apply: bool) -> dict:
         result = plan(conn, link, members, admins, exts)
         result["extensions"] = plan_extensions(conn, link, result, members, info, listed.get("caller_ids") or {},
                                                listed.get("sites") or [])
+        result["directory"] = directory_entries(conn, link, members)
         if apply:
             _apply_extensions_first(caller, result)
             _apply(conn, link, result)
             _apply_extensions_after(conn, caller, link, result)
+            result["directory"] = directory_entries(conn, link, members)
+            try:  # the company directory on the phones, and names for incoming calls (gwphones directory.py)
+                gw.call(caller, "PUT", "/directory", json={"entries": result["directory"]})
+            except auth.Refused as e:
+                result["problems"].append({"who": "the company directory", "problem": str(e)})
             conn.execute("UPDATE ms_links SET last_sync_at = ?, last_result = ? WHERE tenant_code = ?",
                          (result["at"], json.dumps(result), tenant_code))
     return result
