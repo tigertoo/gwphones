@@ -4,10 +4,10 @@ import { Account } from "./Account";
 import { Billing } from "./Billing";
 import { Contacts } from "./Contacts";
 import { DeskPhones } from "./DeskPhones";
-import { Extensions, Recordings, Status } from "./Phones";
+import { Extensions, Recordings, SitesPage, Status } from "./Phones";
 import { Routing } from "./Routing";
 import { CodeStep, LinkPage, SetUpCodes, SignIn } from "./SignIn";
-import { Staff } from "./Staff";
+import { MicrosoftPage, Staff } from "./Staff";
 import { Message } from "./ui";
 import { takeMicrosoftResult } from "./microsoft";
 
@@ -15,12 +15,18 @@ import { takeMicrosoftResult } from "./microsoft";
 // (none, pending_mfa, enrol, full). Links from emails open /invite#... or
 // /reset#...
 
-const TABS = {
-  admin: [["extensions", "Extensions"], ["routing", "Call routing"], ["desk", "Desk phones"], ["status", "Status"],
-    ["recordings", "Recordings"], ["contacts", "Contacts"], ["billing", "Billing"],
-    ["staff", "Staff"], ["account", "Account"]],
-  user: [["extensions", "My phone"], ["status", "Status"], ["recordings", "Recordings"], ["account", "Account"]],
+// The menu, by role: headings with their pages. Account and Sign out are
+// under the person's name at the top right.
+const MENU = {
+  admin: [
+    ["Phones", [["extensions", "Extensions"], ["desk", "Desk phones"], ["status", "Status"]]],
+    ["Calls", [["routing", "Call routing"], ["recordings", "Recordings"]]],
+    ["Organisation", [["staff", "Staff"], ["contacts", "Contacts"], ["sites", "Sites"], ["microsoft", "Microsoft 365"]]],
+    ["Billing", [["billing", "Statements and calls"]]],
+  ],
+  user: [[null, [["extensions", "My phone"], ["status", "Status"], ["recordings", "Recordings"]]]],
 };
+
 
 export default function App() {
   const path = window.location.pathname;
@@ -29,9 +35,9 @@ export default function App() {
   return <Portal />;
 }
 
-function Frame({ tenant, children, right }) {
+function Frame({ tenant, children, right, wide }) {
   return (
-    <div className="app">
+    <div className={`app ${wide ? "app-wide" : ""}`}>
       <header className="top">
         <span className="brand">{tenant ? tenant.name : "Phone system"}</span>
         {right}
@@ -45,6 +51,7 @@ function Portal() {
   const [session, setSession] = useState(null);
   const [tenant, setTenant] = useState(null);
   const [tab, setTab] = useState("extensions");
+  const [menuOpen, setMenuOpen] = useState(false);
   // Back from Microsoft (/?microsoft=...): its result, shown once; a link starts on Staff.
   const [notice] = useState(() => takeMicrosoftResult());
   useEffect(() => { if (notice?.tab) setTab(notice.tab); }, [notice]);
@@ -69,7 +76,9 @@ function Portal() {
   }
 
   const me = session.me;
-  const tabs = TABS[me.role] || TABS.user;
+  const menu = MENU[me.role] || MENU.user;
+  const go = (key) => { setTab(key); setMenuOpen(false); window.scrollTo(0, 0); };
+  const current = menu.flatMap(([, items]) => items).find(([k]) => k === tab)?.[1] || "Account";
   const signOut = async () => {
     await post("/logout").catch(() => null);
     setSession({ state: "none" });
@@ -77,13 +86,29 @@ function Portal() {
     setTab("extensions");
   };
   return (
-    <Frame tenant={tenant} right={<button className="link light" onClick={signOut}>Sign out</button>}>
-      <nav className="tabs" aria-label="Sections">
-        {tabs.map(([key, label]) => (
-          <button key={key} className={`tab ${tab === key ? "tab-on" : ""}`} aria-current={tab === key ? "page" : undefined}
-            onClick={() => setTab(key)}>{label}</button>
+    <Frame tenant={tenant} wide right={
+      <details className="usermenu">
+        <summary>{me.name || me.email}</summary>
+        <div className="usermenu-items">
+          <button onClick={(e) => { e.currentTarget.closest("details").open = false; go("account"); }}>Account</button>
+          <button onClick={signOut}>Sign out</button>
+        </div>
+      </details>}>
+      <div className="layout">
+      <button className="menu-toggle" aria-expanded={menuOpen} onClick={() => setMenuOpen(!menuOpen)}>
+        ☰ Menu<span className="muted"> · {current}</span></button>
+      <nav className={`side ${menuOpen ? "side-open" : ""}`} aria-label="Sections">
+        {menu.map(([heading, items]) => (
+          <div key={heading || "all"} className="side-group">
+            {heading && <div className="side-head">{heading}</div>}
+            {items.map(([key, label]) => (
+              <button key={key} className={`side-item ${tab === key ? "side-on" : ""}`}
+                aria-current={tab === key ? "page" : undefined} onClick={() => go(key)}>{label}</button>
+            ))}
+          </div>
         ))}
       </nav>
+      <div className="content">
       {tenant && tenant.status !== "active" && (
         <Message kind="error">This account is suspended: you can see and download everything, but not change it.
           Contact us to restore it.</Message>
@@ -95,8 +120,12 @@ function Portal() {
       {tab === "contacts" && me.role === "admin" && <Contacts />}
       {tab === "status" && <Status />}
       {tab === "recordings" && <Recordings me={me} />}
-      {tab === "staff" && me.role === "admin" && <Staff me={me} notice={notice} />}
+      {tab === "staff" && me.role === "admin" && <Staff me={me} />}
+      {tab === "sites" && me.role === "admin" && <SitesPage />}
+      {tab === "microsoft" && me.role === "admin" && <MicrosoftPage notice={notice} />}
       {tab === "account" && <Account me={me} onChanged={refresh} />}
+      </div>
+      </div>
     </Frame>
   );
 }

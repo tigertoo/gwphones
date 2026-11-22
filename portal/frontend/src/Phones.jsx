@@ -36,7 +36,6 @@ export function Extensions({ me }) {
   return (
     <section>
       <h2>{admin ? "Extensions" : "My phone"}</h2>
-      {admin && <Sites sites={sites} callerIds={callerIds} limits={limits} onChange={load} />}
       {admin && <NewExtension sites={sites} onMade={load} />}
       {list.length === 0 && <p className="muted">No extensions yet.</p>}
       {(admin && sites.length > 0 ? [...sites, { id: null, name: "No site" }] : [{ id: undefined }]).map((site) => {
@@ -136,6 +135,24 @@ function NameAndSwitch({ ext, admin, onChange }) {
       )}
       {a.show}
     </div>
+  );
+}
+
+// The Sites page: the organisation's offices (admins).
+export function SitesPage() {
+  const [d, setD] = useState(null);
+  const [error, setError] = useState(null);
+  const load = useCallback(() => get("/extensions").then((r) => { setD(r); setError(null); })
+    .catch((e) => setError(e.message)), []);
+  useEffect(() => { load(); }, [load]);
+  if (error) return <Message kind="error">{error}</Message>;
+  if (!d) return <p className="muted">Loading…</p>;
+  return (
+    <section>
+      <h2>Sites</h2>
+      <Sites sites={d.sites || []} callerIds={d.caller_ids || { default: "", numbers: [] }} limits={d.limits || {}}
+        onChange={load} />
+    </section>
   );
 }
 

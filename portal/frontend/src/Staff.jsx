@@ -6,7 +6,7 @@ import { goToMicrosoft } from "./microsoft";
 // Tenant admins: their organisation's people. An admin manages
 // everything; a user has one extension. The API keeps at least one admin.
 
-export function Staff({ me, notice }) {
+export function Staff({ me }) {
   const [users, setUsers] = useState(null);
   const [exts, setExts] = useState([]);
   const [error, setError] = useState(null);
@@ -27,8 +27,6 @@ export function Staff({ me, notice }) {
       <h2>Staff</h2>
       <p className="small muted">Admins manage everything here. Everyone else manages their own extension: its forwarding,
         voicemail and phone setup, and hears its recordings.</p>
-      {notice?.tab === "staff" && <Message kind={notice.kind}>{notice.text}</Message>}
-      <Microsoft365 onSynced={load} />
       <Invite exts={exts} onDone={load} />
       <ul className="list">
         {users.map((u) => <Person key={u.id} u={u} me={me} exts={exts} onChange={load} />)}
@@ -144,6 +142,17 @@ function Person({ u, me, exts, onChange }) {
 
 // Microsoft 365: sign-in with work accounts, and Staff kept in step with a
 // group. Extensions come from an Exchange custom attribute (1-15).
+// The Microsoft 365 page (admins): sign-in with work accounts and the sync.
+export function MicrosoftPage({ notice }) {
+  return (
+    <section>
+      <h2>Microsoft 365</h2>
+      {notice?.tab === "microsoft" && <Message kind={notice.kind}>{notice.text}</Message>}
+      <Microsoft365 onSynced={() => {}} />
+    </section>
+  );
+}
+
 function Microsoft365({ onSynced }) {
   const [s, setS] = useState(null);
   const [f, setF] = useState({ group: "", admin_group: "", attribute: 1, create_exts: false, sites_from_office: false,
