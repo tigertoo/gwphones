@@ -1482,13 +1482,16 @@ Irish mobile that speaks a short message: `say` (the message twice) or
 `ask` (the message, ending "press 1 to ...", and a 1 is recorded for the
 service to read back). Spoken by Piper on this machine, converted to 8 kHz
 mu-law in `/etc/asterisk/portal/alerts/` (kept a day), and dialled like
-click to call from `PBX_ALERT_EXT`, a main-tenant extension: its caller
-ID, route check, price cap and billing (`c2c:<ext>`). At most 6 calls an
+click to call from `PBX_ALERT_EXT`, an extension of the tenant
+`PBX_ALERT_TENANT` (its code; blank: the main tenant): its caller ID,
+route check, price cap and billing (`c2c:<ext>`). Best a tenant of its
+own that does nothing else (one extension, no phone, no portal users),
+so alert calls have their own caller ID, call limit and statement. At most 6 calls an
 hour to one number and 30 in all. `/alert/` answers 127.0.0.1 only, never
 through nginx: `X-Alert-Token` (`PBX_ALERT_TOKEN`; unset, alert calls are
 off) for the service, the route check's token for Asterisk's "1 pressed".
 
-Settings in `backend/.env`: `PBX_ALERT_TOKEN`, `PBX_ALERT_EXT`, and
+Settings in `backend/.env`: `PBX_ALERT_TOKEN`, `PBX_ALERT_TENANT`, `PBX_ALERT_EXT`, and
 `PBX_TTS_MODEL`, a Piper voice:
 
 ```bash

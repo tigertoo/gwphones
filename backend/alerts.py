@@ -15,9 +15,12 @@ leaves it), converted here to 8 kHz mu-law, and stored in
 asterisk group); files and records go after a day.
 
 The call is started like click to call, from PBX_ALERT_EXT, an extension
-of the main tenant: through [portal-c2c-dial], so it shows that
-extension's caller ID, goes through the route check and price cap and is
-billed to it (CDR userfield c2c:<ext>). The answered side plays the
+of the tenant PBX_ALERT_TENANT (its code; blank: the main tenant). Best a
+tenant of its own that only does this (one extension, no phone, no portal
+users), so the calls have their own caller ID, call limit, price cap and
+statement. Through that tenant's click to call [..-c2c-dial], so it shows
+the extension's caller ID, goes through the route check and price cap and
+is billed to it (CDR userfield c2c:<ext>). The answered side plays the
 message from [portal-alert-say] or [portal-alert-ask], which nothing a
 phone can dial reaches.
 
@@ -45,13 +48,14 @@ from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import PlainTextResponse
 from pydantic import BaseModel
 
-from pbx import (C2C_DIAL, GENERATED_DIR, MAIN_TENANT, _lcr_token, asterisk_cli, changes_log, classify_dialled,
-                 get_db)
+from pbx import (GENERATED_DIR, MAIN_TENANT, _lcr_token, asterisk_cli, changes_log, classify_dialled, get_db,
+                 tenant_names)
 
 public_router = APIRouter(prefix="/alert")
 
 ALERT_TOKEN = os.environ.get("PBX_ALERT_TOKEN", "")
 ALERT_EXT = os.environ.get("PBX_ALERT_EXT", "")
+ALERT_TENANT = os.environ.get("PBX_ALERT_TENANT", "")  # a tenant's code; blank: the main tenant
 TTS_MODEL = os.environ.get("PBX_TTS_MODEL", "")  # a Piper voice (.onnx), its .onnx.json next to it
 ALERT_DIR = os.path.join(GENERATED_DIR, "alerts")
 PRESSED_URL = os.environ.get("PBX_ALERT_PRESSED_URL", "http://127.0.0.1:8010/alert/pressed")
@@ -215,10 +219,17 @@ def api_alert_call(req: AlertCall, request: Request):
     with get_db() as conn:
         conn.execute(SCHEMA)
         _tidy(conn, now)
+        tid = MAIN_TENANT
+        if ALERT_TENANT:
+            r = conn.execute("SELECT id FROM tenants WHERE code = ? AND status = 'active'", (ALERT_TENANT,)).fetchone()
+            if not r:
+                raise HTTPException(503, f"Alert calls are off (PBX_ALERT_TENANT {ALERT_TENANT} isn't an active tenant).")
+            tid = r["id"]
         if not re.fullmatch(r"\d{3,4}", ALERT_EXT) or not conn.execute(
                 "SELECT 1 FROM extensions WHERE ext = ? AND enabled = 1 AND tenant_id = ?",
-                (ALERT_EXT, MAIN_TENANT)).fetchone():
-            raise HTTPException(503, "Alert calls are off (PBX_ALERT_EXT isn't a main-tenant extension that's on).")
+                (ALERT_EXT, tid)).fetchone():
+            raise HTTPException(503, "Alert calls are off (PBX_ALERT_EXT isn't an extension of that tenant that's on).")
+        dial = tenant_names(conn, tid).c2c_dial
         hour = now - 3600
         if conn.execute("SELECT COUNT(*) FROM alert_calls WHERE number = ? AND created_at > ?",
                         (national, hour)).fetchone()[0] >= PER_NUMBER_HOUR or \
@@ -232,8 +243,9 @@ def api_alert_call(req: AlertCall, request: Request):
     write_ulaw(alert_path(call_id), audio)
     leg = f"{ALERT_EXT}{national}"  # digits only (checked above)
     context = ASK_CONTEXT if req.kind == "ask" else SAY_CONTEXT
-    out = asterisk_cli(f"channel originate Local/{leg}@{C2C_DIAL}/n extension {call_id}@{context}")
-    changes_log.info(f"Alert call {call_id} ({req.kind}) to {national[:-4]}xxxx from extension {ALERT_EXT}")
+    out = asterisk_cli(f"channel originate Local/{leg}@{dial}/n extension {call_id}@{context}")
+    changes_log.info(f"Alert call {call_id} ({req.kind}) to {national[:-4]}xxxx from extension {ALERT_EXT}"
+                     f" of tenant {ALERT_TENANT or 'main'}")
     if out is None or re.search(r"no such command|usage:|unable to", out, re.I):
         raise HTTPException(502, "Asterisk didn't start the call.")
     return {"id": call_id}

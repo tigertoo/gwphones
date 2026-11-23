@@ -128,3 +128,35 @@ def test_dialplan_has_the_alert_contexts(alerts):
     assert "Read(KEY," in plan and "/alert/pressed?id=${EXTEN}" in plan
     # one digit or more: call 1 must match (_X. needs two)
     assert plan.count("exten => _X!,1,Wait(1)") == 2 and "exten => _X.,1,Wait(1)" not in plan
+
+
+def test_from_a_tenant_of_its_own(env, monkeypatch):
+    """Best: a tenant that only makes alert calls, with its own caller ID and statement."""
+    from fastapi.testclient import TestClient
+    import main
+    op = TestClient(main.app)
+    op.headers.update({"Authorization": "Bearer testtoken", "X-PBX-Tenant": "1"})
+    r = op.post("/api/pbx/tenants", json={"name": "Pet tracker", "outbound_cid": "015557000"})
+    tid, code = r.json()["id"], r.json()["code"]
+    op.headers["X-PBX-Tenant"] = str(tid)
+    op.cookies.set("pbx_tenant", str(tid))
+    assert op.post("/api/pbx/extensions", json={"ext": "2000", "name": "Alerts"}).status_code == 200
+    import alerts as mod
+    monkeypatch.setattr(mod, "ALERT_TOKEN", "alert-secret")
+    monkeypatch.setattr(mod, "ALERT_TENANT", code)
+    monkeypatch.setattr(mod, "ALERT_EXT", "2000")
+    monkeypatch.setattr(mod, "speak", lambda text: _wav())
+    cmds = []
+    monkeypatch.setattr(mod, "asterisk_cli", lambda cmd: (cmds.append(cmd), "")[1])
+    c = local_client(main.app)
+    r = c.post("/alert/call", headers=LOCAL, json={"number": "0851234567", "text": "Hello there"})
+    assert r.status_code == 200, r.text
+    import pbx
+    with pbx.get_db() as conn:
+        dial = pbx.tenant_names(conn, tid).c2c_dial
+    assert dial != "portal-c2c-dial" and cmds[-1].startswith(f"channel originate Local/20000851234567@{dial}/n ")
+    # an extension of another tenant doesn't do
+    monkeypatch.setattr(mod, "ALERT_EXT", "201")
+    assert c.post("/alert/call", headers=LOCAL, json={"number": "0851234567", "text": "Hello"}).status_code == 503
+    monkeypatch.setattr(mod, "ALERT_TENANT", "9999")
+    assert c.post("/alert/call", headers=LOCAL, json={"number": "0851234567", "text": "Hello"}).status_code == 503
