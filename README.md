@@ -1474,3 +1474,27 @@ and the apps on one extension"). A phone can be moved
 to another extension in the console without a new password; it picks it
 up at its next fetch. If it then shows "No service", see the cipher list
 in the PBX certificate section.
+
+### Alert calls (`backend/alerts.py`)
+
+Another service on this machine (the pet tracker) can ask for a call to an
+Irish mobile that speaks a short message: `say` (the message twice) or
+`ask` (the message, ending "press 1 to ...", and a 1 is recorded for the
+service to read back). Spoken by Piper on this machine, converted to 8 kHz
+mu-law in `/etc/asterisk/portal/alerts/` (kept a day), and dialled like
+click to call from `PBX_ALERT_EXT`, a main-tenant extension: its caller
+ID, route check, price cap and billing (`c2c:<ext>`). At most 6 calls an
+hour to one number and 30 in all. `/alert/` answers 127.0.0.1 only, never
+through nginx: `X-Alert-Token` (`PBX_ALERT_TOKEN`; unset, alert calls are
+off) for the service, the route check's token for Asterisk's "1 pressed".
+
+Settings in `backend/.env`: `PBX_ALERT_TOKEN`, `PBX_ALERT_EXT`, and
+`PBX_TTS_MODEL`, a Piper voice:
+
+```bash
+/opt/gwphones/backend/venv/bin/pip install piper-tts
+install -d -o admindash -g admindash /var/lib/admin-dashboard/piper
+cd /var/lib/admin-dashboard/piper && sudo -u admindash /opt/gwphones/backend/venv/bin/python -m piper.download_voices en_GB-alba-medium
+```
+
+The answered side also plays `auth-thankyou` and `vm-goodbye` from the core sounds.

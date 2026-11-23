@@ -1831,6 +1831,8 @@ def build_portal_dialplan(conn) -> str:
     for t in tenants:
         out += [""] + _click_to_call_contexts(t)
     out += [""] + _weblinks_context(conn, notices)
+    from alerts import alert_contexts  # here: alerts.py imports this module
+    out += [""] + alert_contexts()
     out += [""] + _rec_context()
     out += [""] + _ring_ext_context()
     for t in tenants:

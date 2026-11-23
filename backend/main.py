@@ -158,7 +158,8 @@ if CORS_ORIGINS:
 # below rather than in each route, so a new route can't be left open by
 # mistake. The exceptions outside /api/ are /prov/ (pbx.py), the one-time
 # phone setup links behind the QR codes, /call/ (calllinks.py), the public
-# call link pages, and /lcr/ (lcr.py), Asterisk's own route checks, which
+# call link pages, /lcr/ (lcr.py), Asterisk's own route checks, and
+# /alert/ (alerts.py), alert calls for other services on the machine, which
 # only answer this machine.
 #
 # In production nginx's login comes first, and nginx adds X-Proxy-Secret to
@@ -346,6 +347,7 @@ app.include_router(recordings_router)
 from billing import router as billing_router  # noqa: E402
 from statements import router as statements_router  # noqa: E402
 from lcr import public_router as lcr_public_router, router as lcr_router  # noqa: E402
+from alerts import public_router as alerts_public_router  # noqa: E402
 
 from tenant_billing import router as tenant_billing_router  # noqa: E402
 
@@ -354,3 +356,4 @@ app.include_router(statements_router)
 app.include_router(tenant_billing_router)  # a tenant's own, for its portal: /api/pbx/billing/*
 app.include_router(lcr_router)
 app.include_router(lcr_public_router)
+app.include_router(alerts_public_router)  # /alert/: calls for the pet tracker, this machine only
