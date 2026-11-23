@@ -79,14 +79,14 @@ def alert_contexts() -> list:
     play = os.path.join(ALERT_DIR, "alert-${EXTEN}")
     return ["; ---- Alert calls (alerts.py): only started by the service, never dialled ----",
             f"[{SAY_CONTEXT}]",
-            "exten => _X.,1,Wait(1)",
+            "exten => _X!,1,Wait(1)",  # _X. would need 2+ digits: the first calls are 1, 2, 3
             f" same => n,Playback({play})",
             " same => n,Wait(1)",
             f" same => n,Playback({play})",
             " same => n,Playback(vm-goodbye)",
             " same => n,Hangup()",
             f"[{ASK_CONTEXT}]",
-            "exten => _X.,1,Wait(1)",
+            "exten => _X!,1,Wait(1)",  # _X. would need 2+ digits: the first calls are 1, 2, 3
             " same => n,Set(TRIES=0)",
             f" same => n(ask),Read(KEY,{play},1,,1,6)",
             ' same => n,GotoIf($["${KEY}" = "1"]?yes)',

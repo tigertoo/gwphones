@@ -126,3 +126,5 @@ def test_dialplan_has_the_alert_contexts(alerts):
         plan = pbx.build_portal_dialplan(conn)
     assert "[portal-alert-say]" in plan and "[portal-alert-ask]" in plan
     assert "Read(KEY," in plan and "/alert/pressed?id=${EXTEN}" in plan
+    # one digit or more: call 1 must match (_X. needs two)
+    assert plan.count("exten => _X!,1,Wait(1)") == 2 and "exten => _X.,1,Wait(1)" not in plan
